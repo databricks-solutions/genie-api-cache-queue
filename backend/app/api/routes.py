@@ -20,7 +20,7 @@ from app.models import (
 from app.runtime_config import RuntimeSettings
 from app.services.query_processor import query_processor
 from app.services.queue_service import queue_service
-from app.services.database import db_service
+import app.services.database as _db
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ async def get_cache_post(request: CacheRequest, req: Request):
 
         runtime_settings = RuntimeSettings(request.config, user_token, user_email) if request.config else None
 
-        cached_queries = db_service.get_all_cached_queries(request.identity, runtime_settings)
+        cached_queries = await _db.db_service.get_all_cached_queries(request.identity, runtime_settings)
         return cached_queries
     except Exception as e:
         logger.exception("Error in get_cache_post")
@@ -173,7 +173,7 @@ async def save_query_log_post(request: SaveQueryLogRequest, req: Request):
         user_email = req.headers.get('X-Forwarded-Email')
         runtime_settings = RuntimeSettings(request.config, user_token, user_email) if request.config else None
 
-        log_id = db_service.save_query_log(
+        log_id = await _db.db_service.save_query_log(
             request.query_id,
             request.query_text,
             request.identity,
@@ -197,7 +197,7 @@ async def get_query_logs_post(request: QueryLogRequest, req: Request):
         user_email = req.headers.get('X-Forwarded-Email')
         runtime_settings = RuntimeSettings(request.config, user_token, user_email) if request.config else None
 
-        logs = db_service.get_query_logs(
+        logs = await _db.db_service.get_query_logs(
             identity=request.identity,
             limit=50,
             runtime_settings=runtime_settings

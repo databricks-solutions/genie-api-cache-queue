@@ -24,20 +24,8 @@ class RuntimeSettings:
         self.user_email = user_email
 
         if self.runtime and self.runtime.lakebase_instance_name and self.runtime.user_pat:
-            self._apply_lakebase_config()
-
-    def _apply_lakebase_config(self):
-        # Known limitation: mutates the shared Settings singleton from lru_cache().
-        # Per-request config should use RuntimeSettings properties exclusively.
-        # Fixing this requires moving backend selection into request-scoped context.
-        if self.runtime.lakebase_instance_name:
-            self.base.lakebase_instance = self.runtime.lakebase_instance_name
-        if self.runtime.lakebase_catalog:
-            self.base.lakebase_catalog = self.runtime.lakebase_catalog
-        if self.runtime.lakebase_schema:
-            self.base.lakebase_schema = self.runtime.lakebase_schema
-        self.base.storage_backend = "pgvector"
-        logger.info("Runtime Lakebase config: instance=%s, table=%s", self.runtime.lakebase_instance_name, self.full_table_name)
+            logger.info("Runtime Lakebase config: instance=%s, table=%s",
+                        self.runtime.lakebase_instance_name, self.full_table_name)
 
     @property
     def postgres_connection_string(self) -> str:
@@ -47,7 +35,7 @@ class RuntimeSettings:
             if not self.runtime.user_pat:
                 raise ValueError("Lakebase requires a Databricks Personal Access Token (PAT).")
             password = quote_plus(self.runtime.user_pat)
-            host = "placeholder"
+            host = self.runtime.lakebase_instance_name
             port = self.base.postgres_port
             database = "databricks_postgres"
             return f"postgresql://{user}:{password}@{host}:{port}/{database}"
@@ -143,6 +131,10 @@ class RuntimeSettings:
 
     @property
     def storage_backend(self) -> str:
+        if self.runtime and self.runtime.storage_backend == 'lakebase':
+            return 'pgvector'
+        if self.runtime and self.runtime.storage_backend:
+            return self.runtime.storage_backend
         return self.base.storage_backend
 
     @property

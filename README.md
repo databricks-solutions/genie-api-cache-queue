@@ -154,13 +154,6 @@ CREATE TABLE query_logs (
 **Frontend:** React, Vite, TailwindCSS, Axios, Lucide React
 **Infrastructure:** Databricks Apps, Lakebase, Databricks Foundation Model API
 
-## Known Limitations
-
-- **Runtime config mutation**: `RuntimeSettings` mutates the global `Settings` singleton. Per-request config should use RuntimeSettings properties exclusively.
-- **Sync-over-async threading**: PGVector operations use dedicated event loops with `run_coroutine_threadsafe`. A fully async pipeline would be cleaner.
-- **Import-time initialization**: OAuth token generation and thread creation happen at module import. Should be moved to FastAPI's lifespan context.
-- **Queue loses user config**: Queued queries process with default settings, not the original user's runtime config.
-
 ## Troubleshooting
 
 **App won't start:** Check logs with `databricks apps logs <app-name> --follow`

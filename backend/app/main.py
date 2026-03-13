@@ -24,11 +24,36 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize storage backend (creates connection pool if using Lakebase/PGVector)
+    from app.services.database import initialize_storage
+    storage = await initialize_storage()
+
+    # Start background queue processor
     queue_task = asyncio.create_task(query_processor.process_queue())
+
+    # Start periodic OAuth token refresh for default Lakebase backend
+    refresh_task = None
+    if settings.storage_backend == "pgvector" and settings.lakebase_instance:
+        async def _token_refresh_loop():
+            while True:
+                await asyncio.sleep(45 * 60)  # Every 45 minutes
+                try:
+                    logger.info("Background token refresh: checking default backend")
+                    await storage.refresh_default_backend()
+                except Exception as e:
+                    logger.error("Background token refresh failed: %s", e)
+
+        refresh_task = asyncio.create_task(_token_refresh_loop())
+        logger.info("Started async OAuth token refresh task (every 45 min)")
+
     yield
+
     queue_task.cancel()
+    if refresh_task:
+        refresh_task.cancel()
     try:
-        await queue_task
+        tasks = [queue_task] + ([refresh_task] if refresh_task else [])
+        await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
         pass
 
@@ -56,6 +81,7 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 
 # Serve static files (frontend build)
+# Databricks Apps deploys code to /app; local dev uses relative paths
 possible_dist_paths = [
     Path(__file__).parent.parent.parent / "frontend" / "dist",
     Path(__file__).parent.parent / "frontend" / "dist",

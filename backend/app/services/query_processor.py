@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 from app.models import QueryStage
-from app.services.database import db_service
+import app.services.database as _db
 from app.services.queue_service import queue_service
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
@@ -130,7 +130,7 @@ class QueryProcessor:
             query_embedding = embedding_service.get_embedding(context_text, runtime_settings)
 
             try:
-                cached_result = db_service.search_similar_query(
+                cached_result = await _db.db_service.search_similar_query(
                     query_embedding,
                     identity,
                     runtime_settings.similarity_threshold,
@@ -182,6 +182,9 @@ class QueryProcessor:
                         'conversation_id': conversation_id,
                         'conversation_synced': conversation_synced,
                         'conversation_history': conversation_history,
+                        'runtime_config': runtime_config.model_dump() if runtime_config else None,
+                        'user_token': user_token,
+                        'user_email': user_email,
                     })
 
                     self._update_status(
@@ -206,7 +209,7 @@ class QueryProcessor:
 
                         if sql_query:
                             try:
-                                db_service.save_query_cache(
+                                await _db.db_service.save_query_cache(
                                     context_text, query_embedding, sql_query,
                                     identity, runtime_settings.genie_space_id, runtime_settings
                                 )
@@ -233,6 +236,9 @@ class QueryProcessor:
                             'conversation_synced': conversation_synced,
                             'conversation_history': conversation_history,
                             '_retries': 1,
+                            'runtime_config': runtime_config.model_dump() if runtime_config else None,
+                            'user_token': user_token,
+                            'user_email': user_email,
                         })
                         self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
 
@@ -251,6 +257,9 @@ class QueryProcessor:
                         'conversation_history': conversation_history,
                         '_retries': 0,  # 429 responses use the API's Retry-After delay instead of backoff
                         '_delay': rate_err.retry_after,
+                        'runtime_config': runtime_config.model_dump() if runtime_config else None,
+                        'user_token': user_token,
+                        'user_email': user_email,
                     })
                     self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
 
@@ -268,6 +277,9 @@ class QueryProcessor:
                         'conversation_synced': conversation_synced,
                         'conversation_history': conversation_history,
                         '_retries': 1,
+                        'runtime_config': runtime_config.model_dump() if runtime_config else None,
+                        'user_token': user_token,
+                        'user_email': user_email,
                     })
                     self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
 
@@ -334,13 +346,18 @@ class QueryProcessor:
                     conv_id = queued_item.get('conversation_id')
                     conv_synced = queued_item.get('conversation_synced')
                     conv_history = queued_item.get('conversation_history')
+                    raw_runtime_config = queued_item.get('runtime_config')
+                    user_token = queued_item.get('user_token')
+                    user_email = queued_item.get('user_email')
 
                     context_text = build_context_text(query_text, conv_history)
 
                     self._update_status(query_id, QueryStage.PROCESSING_GENIE, query_text, identity)
 
                     from app.runtime_config import RuntimeSettings
-                    runtime_settings = RuntimeSettings()
+                    from app.models import RuntimeConfig
+                    rc = RuntimeConfig(**raw_runtime_config) if raw_runtime_config else None
+                    runtime_settings = RuntimeSettings(rc, user_token, user_email)
 
                     try:
                         genie_result = await self._call_genie(
@@ -356,7 +373,7 @@ class QueryProcessor:
 
                             if sql_query and query_embedding:
                                 try:
-                                    db_service.save_query_cache(
+                                    await _db.db_service.save_query_cache(
                                         context_text, query_embedding, sql_query,
                                         identity, runtime_settings.genie_space_id, runtime_settings
                                     )
@@ -384,6 +401,9 @@ class QueryProcessor:
                                     'conversation_synced': conv_synced,
                                     'conversation_history': conv_history,
                                     '_retries': retries + 1,
+                                    'runtime_config': raw_runtime_config,
+                                    'user_token': user_token,
+                                    'user_email': user_email,
                                 })
                                 self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
                                 await asyncio.sleep(delay)
@@ -406,6 +426,9 @@ class QueryProcessor:
                             'conversation_synced': conv_synced,
                             'conversation_history': conv_history,
                             '_retries': retries,  # Preserve retry count — 429 waits use Retry-After, not backoff
+                            'runtime_config': raw_runtime_config,
+                            'user_token': user_token,
+                            'user_email': user_email,
                         })
                         self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
                         await asyncio.sleep(delay)
@@ -424,6 +447,9 @@ class QueryProcessor:
                                 'conversation_synced': conv_synced,
                                 'conversation_history': conv_history,
                                 '_retries': retries + 1,
+                                'runtime_config': raw_runtime_config,
+                                'user_token': user_token,
+                                'user_email': user_email,
                             })
                             self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
                             await asyncio.sleep(delay)
