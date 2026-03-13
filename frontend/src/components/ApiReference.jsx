@@ -369,10 +369,16 @@ print(status)`;
   "sql_warehouse_id": "4b9b953...",
   "similarity_threshold": 0.92,
   "max_queries_per_minute": 5,
-  "cache_ttl_hours": 24.0,
-  "embedding_provider": "databricks",
-  "storage_backend": "local",
+  "cache_ttl_seconds": 86400,
   "shared_cache": true,
+  "embedding_provider": "databricks",
+  "databricks_embedding_endpoint": "databricks-bge-large-en",
+  "storage_backend": "local",
+  "lakebase_instance_name": null,
+  "lakebase_catalog": null,
+  "lakebase_schema": null,
+  "cache_table_name": "cached_queries",
+  "query_log_table_name": "query_logs",
   "databricks_host": "workspace.cloud.databricks.com"
 }`}
                 </pre>
@@ -398,9 +404,16 @@ print(status)`;
   "sql_warehouse_id": "4b9b953...",      // SQL Warehouse ID
   "similarity_threshold": 0.95,          // Cache match threshold (0-1)
   "max_queries_per_minute": 5,           // Rate limit per workspace
-  "cache_ttl_hours": 48,                 // Cache freshness (0 = no limit)
+  "cache_ttl_seconds": 172800,           // Cache freshness in seconds (0 = no limit)
+  "shared_cache": true,                  // true = global, false = per-user
   "embedding_provider": "databricks",    // "databricks" or "local"
-  "shared_cache": true                   // true = global, false = per-user
+  "databricks_embedding_endpoint": "databricks-bge-large-en",
+  "storage_backend": "lakebase",         // "local" or "lakebase"
+  "lakebase_instance_name": "my-instance",
+  "lakebase_catalog": "my_catalog",
+  "lakebase_schema": "public",
+  "cache_table_name": "cached_queries",
+  "query_log_table_name": "query_logs"
 }`}
                 </pre>
               </div>
@@ -408,7 +421,7 @@ print(status)`;
                 <p className="text-xs font-medium text-gray-500 mb-1">Response</p>
                 <pre className="bg-gray-900 text-gray-100 rounded-lg p-4 text-xs overflow-x-auto">
 {`{
-  "updated": { "similarity_threshold": 0.95, "cache_ttl_hours": 48 },
+  "updated": { "similarity_threshold": 0.95, "cache_ttl_seconds": 172800 },
   "message": "Configuration updated successfully"
 }`}
                 </pre>
@@ -420,9 +433,9 @@ print(status)`;
 {`curl -X PUT ${baseUrl}/api/v1/config \\
   -H "Authorization: Bearer $DATABRICKS_TOKEN" \\
   -H "Content-Type: application/json" \\
-  -d '{"similarity_threshold": 0.95, "cache_ttl_hours": 48}'`}
+  -d '{"similarity_threshold": 0.95, "cache_ttl_seconds": 172800}'`}
                   </pre>
-                  <CopyButton text={`curl -X PUT ${baseUrl}/api/v1/config -H "Authorization: Bearer $DATABRICKS_TOKEN" -H "Content-Type: application/json" -d '{"similarity_threshold": 0.95, "cache_ttl_hours": 48}'`} id="curl-config" />
+                  <CopyButton text={`curl -X PUT ${baseUrl}/api/v1/config -H "Authorization: Bearer $DATABRICKS_TOKEN" -H "Content-Type: application/json" -d '{"similarity_threshold": 0.95, "cache_ttl_seconds": 172800}'`} id="curl-config" />
                 </div>
               </div>
             </div>

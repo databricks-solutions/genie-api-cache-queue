@@ -334,28 +334,56 @@ async def proxy_save_query_log(body: SaveQueryLogBody, request: Request):
 
 
 class ServerConfigUpdate(BaseModel):
+    # Databricks resources
     genie_space_id: Optional[str] = None
     sql_warehouse_id: Optional[str] = None
+    # Cache settings
     similarity_threshold: Optional[float] = None
     max_queries_per_minute: Optional[int] = None
-    cache_ttl_hours: Optional[float] = None
-    embedding_provider: Optional[str] = None
+    cache_ttl_seconds: Optional[int] = None  # 0 = no freshness limit
     shared_cache: Optional[bool] = None
+    # Embedding
+    embedding_provider: Optional[str] = None  # "databricks" or "local"
+    databricks_embedding_endpoint: Optional[str] = None
+    # Storage
+    storage_backend: Optional[str] = None  # "local" or "lakebase"
+    lakebase_instance_name: Optional[str] = None
+    lakebase_catalog: Optional[str] = None
+    lakebase_schema: Optional[str] = None
+    cache_table_name: Optional[str] = None
+    query_log_table_name: Optional[str] = None
+
+
+def _ttl_hours_to_seconds(hours: float) -> int:
+    """Convert TTL from hours (internal) to seconds (API)."""
+    return int(hours * 3600)
+
+
+def _ttl_seconds_to_hours(seconds: int) -> float:
+    """Convert TTL from seconds (API) to hours (internal)."""
+    return seconds / 3600
 
 
 @proxy_router.get("/config")
 async def proxy_get_config(request: Request):
     """Get current server configuration."""
     _extract_bearer_token(request)
+    ttl_hours = _get_effective_setting("cache_ttl_hours") or 0
     return {
         "genie_space_id": _get_effective_setting("genie_space_id"),
         "sql_warehouse_id": _get_effective_setting("sql_warehouse_id"),
         "similarity_threshold": _get_effective_setting("similarity_threshold"),
         "max_queries_per_minute": _get_effective_setting("max_queries_per_minute"),
-        "cache_ttl_hours": _get_effective_setting("cache_ttl_hours"),
-        "embedding_provider": _get_effective_setting("embedding_provider"),
-        "storage_backend": _get_effective_setting("storage_backend"),
+        "cache_ttl_seconds": _ttl_hours_to_seconds(ttl_hours),
         "shared_cache": _server_config_overrides.get("shared_cache", True),
+        "embedding_provider": _get_effective_setting("embedding_provider"),
+        "databricks_embedding_endpoint": _get_effective_setting("databricks_embedding_endpoint"),
+        "storage_backend": _get_effective_setting("storage_backend"),
+        "lakebase_instance_name": settings.lakebase_instance or _server_config_overrides.get("lakebase_instance_name"),
+        "lakebase_catalog": settings.lakebase_catalog or _server_config_overrides.get("lakebase_catalog"),
+        "lakebase_schema": settings.lakebase_schema or _server_config_overrides.get("lakebase_schema"),
+        "cache_table_name": settings.pgvector_table_name or _server_config_overrides.get("cache_table_name"),
+        "query_log_table_name": _server_config_overrides.get("query_log_table_name", "query_logs"),
         "databricks_host": settings.databricks_host or None,
     }
 
@@ -366,8 +394,13 @@ async def proxy_update_config(body: ServerConfigUpdate, request: Request):
     _extract_bearer_token(request)
     updated = {}
     for field, value in body.model_dump(exclude_none=True).items():
-        _server_config_overrides[field] = value
-        updated[field] = value
+        if field == "cache_ttl_seconds":
+            # API accepts seconds, store as hours internally
+            _server_config_overrides["cache_ttl_hours"] = _ttl_seconds_to_hours(value)
+            updated["cache_ttl_seconds"] = value
+        else:
+            _server_config_overrides[field] = value
+            updated[field] = value
 
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update. Send at least one field.")
