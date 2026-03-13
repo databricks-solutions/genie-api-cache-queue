@@ -6,7 +6,8 @@ import FlowDiagram from './components/FlowDiagram';
 import LogsDisplay from './components/LogsDisplay';
 import Settings from './components/Settings';
 import Debug from './components/Debug';
-import { Database, ListOrdered, MessageSquare, Settings as SettingsIcon, Bug } from 'lucide-react';
+import ApiReference from './components/ApiReference';
+import { Database, ListOrdered, MessageSquare, Settings as SettingsIcon, Bug, Code2 } from 'lucide-react';
 
 function App() {
   const [activeTab, setActiveTab] = useState('chat');
@@ -41,6 +42,7 @@ function App() {
     { id: 'chat', name: 'Chat & Flow', icon: MessageSquare },
     { id: 'cache', name: getStorageLabel(), icon: Database },
     { id: 'queue', name: 'Query Logs', icon: ListOrdered },
+    { id: 'api', name: 'API', icon: Code2 },
     { id: 'settings', name: 'Settings', icon: SettingsIcon },
     { id: 'debug', name: 'Debug', icon: Bug },
   ];
@@ -145,6 +147,7 @@ function App() {
         )}
         {activeTab === 'cache' && <CacheTable />}
         {activeTab === 'queue' && <QueueTable />}
+        {activeTab === 'api' && <ApiReference />}
         {activeTab === 'settings' && <Settings />}
         {activeTab === 'debug' && <Debug />}
       </main>

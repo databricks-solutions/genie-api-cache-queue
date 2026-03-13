@@ -15,6 +15,8 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from app.api.routes import router
+from app.api.proxy_routes import proxy_router
+from app.api.genie_clone_routes import genie_clone_router
 from app.services.query_processor import query_processor
 from app.config import get_settings
 
@@ -79,6 +81,8 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+app.include_router(proxy_router, prefix="/api/v1")
+app.include_router(genie_clone_router, prefix="/api/2.0/genie")
 
 # Serve static files (frontend build)
 # Databricks Apps deploys code to /app; local dev uses relative paths

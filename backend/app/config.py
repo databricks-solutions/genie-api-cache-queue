@@ -95,7 +95,7 @@ class Settings(BaseSettings):
         return bool(os.getenv("DATABRICKS_RUNTIME_VERSION")) or self.storage_backend == "databricks"
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=[".env", "backend/.env"],
         case_sensitive=False,
         extra="ignore",
     )

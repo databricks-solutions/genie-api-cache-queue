@@ -5,14 +5,16 @@ name: genie-cache-queue
 display_name: "Genie API with Cache & Queue"
 description: "Intelligent query caching and rate limiting for Databricks Genie API"
 
-# Build and run command
+# Run command (requirements.txt auto-installed by runtime, frontend pre-built in frontend/dist/)
 command:
-  - "sh"
-  - "-c"
-  - |
-    npm run build &&
-    pip install -r backend/requirements.txt &&
-    cd backend && ../.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+  - "python"
+  - "-m"
+  - "uvicorn"
+  - "entrypoint:app"
+  - "--host"
+  - "0.0.0.0"
+  - "--port"
+  - "8000"
 
 # Compute configuration
 compute:

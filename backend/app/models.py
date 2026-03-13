@@ -109,3 +109,32 @@ class GenieAPIResponse(BaseModel):
     result: Optional[Union[dict, List[dict], Any]] = None  # Can be dict or list (attachments)
     sql_query: Optional[str] = None
     attachments: Optional[List[dict]] = None  # Genie API attachments array
+
+
+# --- Proxy API models (for /api/v1/ external consumers) ---
+
+class ProxyQueryRequest(BaseModel):
+    """External API request to submit a query."""
+    query: str
+    space_id: Optional[str] = None       # Falls back to server default
+    warehouse_id: Optional[str] = None   # Falls back to server default
+    identity: Optional[str] = None       # For cache isolation; defaults to "api-user"
+    conversation_id: Optional[str] = None  # For multi-turn follow-ups
+
+
+class ProxyQueryResponse(BaseModel):
+    """External API response after submitting a query."""
+    query_id: str
+    status: str
+
+
+class ProxyQueryStatusResponse(BaseModel):
+    """External API response when polling query status."""
+    query_id: str
+    status: str
+    stage: Optional[str] = None
+    sql_query: Optional[str] = None
+    result: Optional[Union[dict, List[dict], Any]] = None
+    from_cache: bool = False
+    error: Optional[str] = None
+    conversation_id: Optional[str] = None

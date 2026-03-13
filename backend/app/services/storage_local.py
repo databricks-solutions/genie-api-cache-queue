@@ -11,7 +11,10 @@ from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timedelta
 import os
 from pathlib import Path
-from sklearn.metrics.pairwise import cosine_similarity
+try:
+    from sklearn.metrics.pairwise import cosine_similarity
+except ImportError:
+    cosine_similarity = None
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +96,13 @@ class LocalStorageService:
 
         # Calculate cosine similarity
         query_emb = np.array(query_embedding).reshape(1, -1)
-        similarities = cosine_similarity(query_emb, matched_embeddings)[0]
+        if cosine_similarity is not None:
+            similarities = cosine_similarity(query_emb, matched_embeddings)[0]
+        else:
+            # Fallback: manual cosine similarity using numpy
+            norms_q = np.linalg.norm(query_emb, axis=1, keepdims=True)
+            norms_m = np.linalg.norm(matched_embeddings, axis=1, keepdims=True)
+            similarities = (query_emb @ matched_embeddings.T / (norms_q * norms_m.T + 1e-10))[0]
 
         # Find best match
         best_idx = np.argmax(similarities)
