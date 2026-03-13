@@ -1,0 +1,31 @@
+# Databricks Apps Configuration
+# Reference: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/
+
+name: genie-cache-queue
+display_name: "Genie API with Cache & Queue"
+description: "Intelligent query caching and rate limiting for Databricks Genie API"
+
+# Build and run command
+command:
+  - "sh"
+  - "-c"
+  - |
+    npm run build &&
+    pip install -r backend/requirements.txt &&
+    cd backend && ../.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# Compute configuration
+compute:
+  size: small  # small (2 cores, 8GB), medium (4 cores, 16GB), large (8 cores, 32GB)
+
+# Environment variables
+# DATABRICKS_HOST and DATABRICKS_TOKEN are automatically provided by Databricks Apps
+# Set other variables through Databricks Apps UI or CLI (see DATABRICKS_APPS.md)
+env: []
+
+# Static files served by FastAPI (not needed here)
+
+# Resource limits
+resources:
+  cpu: 2
+  memory: 8Gi
