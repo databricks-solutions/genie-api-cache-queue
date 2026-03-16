@@ -67,11 +67,16 @@ class DynamicStorageService:
         from app.services.storage_pgvector import PGVectorStorageService
         ttl = runtime_settings.cache_ttl_hours if hasattr(runtime_settings, 'cache_ttl_hours') else 24
 
+        # For Lakebase operations, prefer user_pat (full API access) over user_token
+        # (OAuth proxy token has limited scopes and can't access Postgres API)
+        effective_token = ((runtime_settings.runtime.user_pat if runtime_settings.runtime else None) or
+                           getattr(runtime_settings, 'user_token', None))
+
         backend = PGVectorStorageService(
             connection_string=runtime_settings.postgres_connection_string,
             table_name=runtime_settings.full_table_name,
             query_log_table_name=runtime_settings.query_log_table_name,
-            databricks_pat=runtime_settings.runtime.user_pat if runtime_settings.runtime else None,
+            databricks_pat=effective_token,
             databricks_host=runtime_settings.databricks_host,
             lakebase_instance_name=runtime_settings.runtime.lakebase_instance_name if runtime_settings.runtime else None,
             cache_ttl_hours=ttl
@@ -95,24 +100,26 @@ class DynamicStorageService:
         try:
             from app.config import get_settings
             from app.services.storage_pgvector import PGVectorStorageService
-            from databricks.sdk import WorkspaceClient
             from urllib.parse import quote_plus
             import uuid as _uuid
+            import httpx
 
             settings = get_settings()
-            client = WorkspaceClient(host=settings.databricks_host, token=settings.databricks_token, auth_type="pat")
-            _instance_name = next(
-                (i.name for i in client.database.list_database_instances()
-                 if i.state and i.state.value == "AVAILABLE"),
-                None
-            )
-            _cred_kwargs = {"request_id": str(_uuid.uuid4())}
-            if _instance_name:
-                _cred_kwargs["instance_names"] = [_instance_name]
-            cred = client.database.generate_database_credential(**_cred_kwargs)
+
+            # Use REST API for credential generation (works with both Provisioned and Autoscaling)
+            async with httpx.AsyncClient() as http_client:
+                cred_url = f"{settings.databricks_host}/api/2.0/database/credentials/generate"
+                response = await http_client.post(
+                    cred_url,
+                    headers={"Authorization": f"Bearer {settings.databricks_token}"},
+                    json={"request_id": str(_uuid.uuid4())}
+                )
+                response.raise_for_status()
+                cred_data = response.json()
+                oauth_token = cred_data.get("token")
 
             conn_string = (
-                f"postgresql://{quote_plus(settings.postgres_user)}:{quote_plus(cred.token)}"
+                f"postgresql://{quote_plus(settings.postgres_user)}:{quote_plus(oauth_token)}"
                 f"@{settings.lakebase_instance}:{settings.postgres_port}/databricks_postgres"
                 f"?sslmode={settings.postgres_sslmode}"
             )
@@ -142,9 +149,12 @@ class DynamicStorageService:
         if not runtime_settings:
             return self.default_backend
         if hasattr(runtime_settings, 'runtime') and runtime_settings.runtime:
+            # Accept user_token (OAuth from Databricks Apps proxy) OR user_pat (from localStorage)
+            has_token = (runtime_settings.runtime.user_pat or
+                         getattr(runtime_settings, 'user_token', None))
             if (runtime_settings.runtime.storage_backend == 'lakebase' and
                     runtime_settings.runtime.lakebase_instance_name and
-                    runtime_settings.runtime.user_pat):
+                    has_token):
                 return await self._get_or_create_pgvector_backend(runtime_settings)
             if runtime_settings.runtime.storage_backend == 'local':
                 return self.default_backend

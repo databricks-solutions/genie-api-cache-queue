@@ -59,7 +59,10 @@ class PGVectorStorageService:
         self.table_name = self._normalize_table_name(table_name)
         self.query_log_table_name = self._normalize_table_name(query_log_table_name)
         self.databricks_pat = databricks_pat
+        # Ensure host has https:// prefix
         self.databricks_host = databricks_host
+        if self.databricks_host and not self.databricks_host.startswith("http"):
+            self.databricks_host = f"https://{self.databricks_host}"
         self.lakebase_instance_name = lakebase_instance_name
         self.cache_ttl_hours = cache_ttl_hours
         self.pool = None
@@ -83,77 +86,38 @@ class PGVectorStorageService:
             logger.info("Lakebase mode: getting instance details for %s", self.lakebase_instance_name)
 
             try:
-                from databricks.sdk import WorkspaceClient
                 import uuid
                 from urllib.parse import quote_plus
 
-                use_sdk = True
-                try:
-                    client = WorkspaceClient(
-                        host=self.databricks_host,
-                        token=self.databricks_pat,
-                        auth_type="pat"
+                instance_name = self.lakebase_instance_name
+                is_hostname = ".database." in instance_name
+                # Normalize project name: "projects/foo" → "foo"
+                is_autoscaling = instance_name.startswith("projects/") or (not is_hostname and "/" not in instance_name)
+                project_id = instance_name.replace("projects/", "") if instance_name.startswith("projects/") else instance_name
+
+                if is_hostname:
+                    # Direct hostname provided — generate credentials via Provisioned API
+                    logger.info("Using direct hostname: %s", instance_name)
+                    hostname = instance_name
+                    connection_string = await self._build_connection_string_with_creds(
+                        hostname, quote_plus, uuid
                     )
-                    if not hasattr(client, 'database'):
-                        logger.warning("SDK version doesn't support database API, using REST fallback")
-                        use_sdk = False
-                except Exception as sdk_error:
-                    logger.warning("SDK init failed: %s, using REST fallback", sdk_error)
-                    use_sdk = False
-
-                if use_sdk and hasattr(client, 'database'):
-                    instance = client.database.get_database_instance(name=self.lakebase_instance_name)
-                    hostname = instance.read_write_dns
-                    logger.info("Instance hostname: %s", hostname)
-
-                    credential = client.database.generate_database_credential(
-                        request_id=str(uuid.uuid4()),
-                        instance_names=[self.lakebase_instance_name]
+                elif is_autoscaling:
+                    # Lakebase Autoscaling: use SDK postgres.generate_database_credential
+                    logger.info("Lakebase Autoscaling project: %s", project_id)
+                    hostname, endpoint_name = await self._resolve_autoscaling_endpoint(project_id)
+                    logger.info("Autoscaling endpoint: %s (%s)", hostname, endpoint_name)
+                    connection_string = self._build_autoscaling_connection_string(
+                        hostname, endpoint_name, quote_plus
                     )
-                    oauth_token = credential.token
-                    logger.info("OAuth token generated (expires in %ds)", getattr(credential, 'expires_in', 3600))
-
-                    username = client.current_user.me().user_name
-                    connection_string = f"postgresql://{quote_plus(username)}:{quote_plus(oauth_token)}@{hostname}:5432/databricks_postgres"
                 else:
-                    import httpx
-                    logger.info("Fetching instance details via REST API")
-
-                    async with httpx.AsyncClient() as http_client:
-                        instance_url = f"{self.databricks_host}/api/2.1/lakebase/instances/{self.lakebase_instance_name}"
-                        response = await http_client.get(
-                            instance_url,
-                            headers={"Authorization": f"Bearer {self.databricks_pat}"}
-                        )
-                        response.raise_for_status()
-                        instance_data = response.json()
-                        hostname = instance_data.get("read_write_dns") or instance_data.get("host")
-                        logger.info("Instance hostname: %s", hostname)
-
-                        cred_url = f"{self.databricks_host}/api/2.1/lakebase/credentials/generate"
-                        response = await http_client.post(
-                            cred_url,
-                            headers={"Authorization": f"Bearer {self.databricks_pat}"},
-                            json={
-                                "request_id": str(uuid.uuid4()),
-                                "instance_names": [self.lakebase_instance_name]
-                            }
-                        )
-                        response.raise_for_status()
-                        cred_data = response.json()
-                        oauth_token = cred_data.get("token")
-                        logger.info("OAuth token generated")
-
-                        user_url = f"{self.databricks_host}/api/2.0/preview/scim/v2/Me"
-                        response = await http_client.get(
-                            user_url,
-                            headers={"Authorization": f"Bearer {self.databricks_pat}"}
-                        )
-                        response.raise_for_status()
-                        user_data = response.json()
-                        username = user_data.get("userName")
-
-                        connection_string = f"postgresql://{quote_plus(username)}:{quote_plus(oauth_token)}@{hostname}:5432/databricks_postgres"
+                    # Lakebase Provisioned: resolve hostname via Database API
+                    logger.info("Lakebase Provisioned instance: %s", instance_name)
+                    hostname = await self._resolve_provisioned_hostname(instance_name)
+                    logger.info("Provisioned instance hostname: %s", hostname)
+                    connection_string = await self._build_connection_string_with_creds(
+                        hostname, quote_plus, uuid
+                    )
 
             except Exception as e:
                 logger.exception("Failed to get Lakebase details")
@@ -184,6 +148,102 @@ class PGVectorStorageService:
             await register_vector(conn)
             await self._ensure_table(conn)
             await self._ensure_query_log_table(conn)
+
+    async def _build_connection_string_with_creds(self, hostname, quote_plus, uuid):
+        """Generate OAuth credentials and build connection string for a Lakebase hostname."""
+        import httpx
+
+        oauth_token = None
+        username = None
+
+        async with httpx.AsyncClient() as http_client:
+            # Try to generate a database-specific credential
+            try:
+                cred_url = f"{self.databricks_host}/api/2.0/database/credentials/generate"
+                response = await http_client.post(
+                    cred_url,
+                    headers={"Authorization": f"Bearer {self.databricks_pat}"},
+                    json={"request_id": str(uuid.uuid4())}
+                )
+                response.raise_for_status()
+                cred_data = response.json()
+                oauth_token = cred_data.get("token")
+                logger.info("Database credential generated (expires in %ds)", cred_data.get("expires_in", 3600))
+            except Exception as e:
+                # Credential generation failed (e.g. token lacks database scope).
+                # Use the provided token directly — works with Autoscaling Lakebase.
+                logger.info("Credential generation failed (%s), using token directly as password", e)
+                oauth_token = self.databricks_pat
+
+            # Get current username
+            try:
+                user_url = f"{self.databricks_host}/api/2.0/preview/scim/v2/Me"
+                response = await http_client.get(
+                    user_url,
+                    headers={"Authorization": f"Bearer {self.databricks_pat}"}
+                )
+                response.raise_for_status()
+                username = response.json().get("userName")
+            except Exception as e:
+                logger.warning("Failed to get username via SCIM (%s), using connection_string user", e)
+                # Extract user from the existing connection string if available
+                if self.connection_string and "@" in self.connection_string:
+                    from urllib.parse import urlparse, unquote
+                    parsed = urlparse(self.connection_string)
+                    username = unquote(parsed.username) if parsed.username else None
+
+        if not username:
+            raise ValueError("Cannot determine username for Lakebase connection")
+
+        return f"postgresql://{quote_plus(username)}:{quote_plus(oauth_token)}@{hostname}:5432/databricks_postgres"
+
+    async def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
+        """Resolve Lakebase Autoscaling project to (hostname, endpoint_name)."""
+        import httpx
+
+        async with httpx.AsyncClient() as http_client:
+            url = f"{self.databricks_host}/api/2.0/postgres/projects/{project_id}/branches/production/endpoints"
+            response = await http_client.get(
+                url,
+                headers={"Authorization": f"Bearer {self.databricks_pat}"}
+            )
+            response.raise_for_status()
+            endpoints = response.json().get("endpoints", [])
+            if not endpoints:
+                raise ValueError(f"No endpoints found for Autoscaling project '{project_id}'")
+            ep = endpoints[0]
+            hostname = ep["status"]["hosts"]["host"]
+            endpoint_name = ep["name"]  # e.g. "projects/genie-cache/branches/production/endpoints/primary"
+            return hostname, endpoint_name
+
+    def _build_autoscaling_connection_string(self, hostname: str, endpoint_name: str, quote_plus) -> str:
+        """Generate JWT credential for Autoscaling Lakebase and build connection string."""
+        from databricks.sdk import WorkspaceClient
+
+        client = WorkspaceClient(
+            host=self.databricks_host,
+            token=self.databricks_pat,
+            auth_type="pat"
+        )
+        cred = client.postgres.generate_database_credential(endpoint=endpoint_name)
+        username = client.current_user.me().user_name
+        logger.info("Autoscaling JWT credential generated for %s", username)
+
+        return f"postgresql://{quote_plus(username)}:{quote_plus(cred.token)}@{hostname}:5432/databricks_postgres"
+
+    async def _resolve_provisioned_hostname(self, instance_name: str) -> str:
+        """Resolve Lakebase Provisioned instance to its hostname."""
+        import httpx
+
+        async with httpx.AsyncClient() as http_client:
+            url = f"{self.databricks_host}/api/2.0/database/instances/{instance_name}"
+            response = await http_client.get(
+                url,
+                headers={"Authorization": f"Bearer {self.databricks_pat}"}
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("read_write_dns") or data.get("host")
 
     async def _ensure_extension(self, conn):
         """Ensure pgvector extension is installed"""

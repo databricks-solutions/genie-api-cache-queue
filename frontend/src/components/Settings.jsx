@@ -421,12 +421,12 @@ const Settings = () => {
                       name="lakebase_instance_name"
                       value={config.lakebase_instance_name}
                       onChange={handleChange}
-                      placeholder="my-lakebase-instance"
+                      placeholder="genie-cache or ep-xxx.database.us-east-1.cloud.databricks.com"
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
                       required={config.storage_backend === 'lakebase'}
                     />
                     <p className="text-xs mt-1 text-gray-500">
-                      Your Lakebase instance name (not the hostname). Find this in your Databricks workspace under Lakebase.
+                      Autoscaling project name (e.g. "genie-cache"), Provisioned instance name, or direct hostname.
                     </p>
                   </div>
 

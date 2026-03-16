@@ -32,30 +32,32 @@ async def initialize_storage():
 
         if settings.lakebase_instance and settings.databricks_token and settings.databricks_host:
             try:
-                from databricks.sdk import WorkspaceClient
+                import httpx
                 import uuid as _uuid
 
-                logger.info("Generating OAuth token for Lakebase...")
-                client = WorkspaceClient(
-                    host=settings.databricks_host,
-                    token=settings.databricks_token,
-                    auth_type="pat"
-                )
-                _instance_name = next(
-                    (i.name for i in client.database.list_database_instances()
-                     if i.state and i.state.value == "AVAILABLE"),
-                    None
-                )
-                _cred_kwargs = {"request_id": str(_uuid.uuid4())}
-                if _instance_name:
-                    _cred_kwargs["instance_names"] = [_instance_name]
-                cred = client.database.generate_database_credential(**_cred_kwargs)
+                logger.info("Generating OAuth token for Lakebase via REST API...")
+                # Use REST API directly — works with both SP tokens and PATs,
+                # and doesn't depend on Provisioned vs Autoscaling Lakebase
+                import asyncio
+                async def _generate_token():
+                    async with httpx.AsyncClient() as http_client:
+                        cred_url = f"{settings.databricks_host.rstrip('/')}/api/2.0/database/credentials/generate"
+                        response = await http_client.post(
+                            cred_url,
+                            headers={"Authorization": f"Bearer {settings.databricks_token}"},
+                            json={"request_id": str(_uuid.uuid4())}
+                        )
+                        response.raise_for_status()
+                        return response.json()
+
+                cred_data = await _generate_token()
+                oauth_token = cred_data.get("token")
                 conn_string = (
-                    f"postgresql://{quote_plus(settings.postgres_user)}:{quote_plus(cred.token)}"
+                    f"postgresql://{quote_plus(settings.postgres_user)}:{quote_plus(oauth_token)}"
                     f"@{settings.lakebase_instance}:{settings.postgres_port}/databricks_postgres"
                     f"?sslmode={settings.postgres_sslmode}"
                 )
-                logger.info("OAuth token generated (expires in %ds)", getattr(cred, 'expires_in', 3600))
+                logger.info("OAuth token generated for default Lakebase backend")
             except Exception as e:
                 logger.warning("OAuth token generation failed: %s, using connection string as-is", e)
 

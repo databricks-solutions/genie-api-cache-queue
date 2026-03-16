@@ -21,6 +21,14 @@ class GenieRateLimitError(Exception):
         super().__init__(f"Genie API rate limited. Retry after {retry_after}s")
 
 
+class GenieConfigError(Exception):
+    """Raised for non-retryable errors (404 space not found, 401 unauthorized, 403 forbidden)."""
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"Genie API {status_code}: {detail}")
+
+
 class GenieService:
     def __init__(self):
         host = ensure_https(settings.databricks_host)
@@ -67,6 +75,15 @@ class GenieService:
                 logger.warning("Genie API rate limited (429). Retry-After: %ss", retry_after)
                 raise GenieRateLimitError(retry_after)
 
+            if response.status_code in (401, 403, 404):
+                detail = {
+                    401: f"Unauthorized. Check your token/credentials for {space_id}",
+                    403: f"Forbidden. The service principal or user lacks access to Genie Space {space_id}",
+                    404: f"Genie Space '{space_id}' not found. Verify the Space ID exists on this workspace",
+                }[response.status_code]
+                logger.error("Genie config error %d: %s — %s", response.status_code, detail, response.text[:200])
+                raise GenieConfigError(response.status_code, detail)
+
             if not response.is_success:
                 logger.error("Genie API error %d: %s", response.status_code, response.text[:200])
 
@@ -103,6 +120,15 @@ class GenieService:
                 retry_after = float(response.headers.get("Retry-After", 60))
                 logger.warning("Genie API rate limited (429) on send_message. Retry-After: %ss", retry_after)
                 raise GenieRateLimitError(retry_after)
+
+            if response.status_code in (401, 403, 404):
+                detail = {
+                    401: f"Unauthorized. Check your token/credentials",
+                    403: f"Forbidden. Lacks access to Genie Space {space_id}",
+                    404: f"Conversation {conversation_id} or Space {space_id} not found",
+                }[response.status_code]
+                logger.error("Genie config error %d on send_message: %s", response.status_code, detail)
+                raise GenieConfigError(response.status_code, detail)
 
             response.raise_for_status()
             message_data = response.json()

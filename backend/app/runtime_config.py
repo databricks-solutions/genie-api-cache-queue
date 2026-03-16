@@ -32,9 +32,12 @@ class RuntimeSettings:
         if self.runtime and self.runtime.lakebase_instance_name:
             db_user = self.user_email if self.user_email else self.base.postgres_user
             user = quote_plus(db_user)
-            if not self.runtime.user_pat:
-                raise ValueError("Lakebase requires a Databricks Personal Access Token (PAT).")
-            password = quote_plus(self.runtime.user_pat)
+            # For Lakebase, prefer PAT (full API access) over OAuth proxy token
+            password_source = ((self.runtime.user_pat if self.runtime else None) or
+                               self.user_token)
+            if not password_source:
+                raise ValueError("Lakebase requires an OAuth token or PAT.")
+            password = quote_plus(password_source)
             host = self.runtime.lakebase_instance_name
             port = self.base.postgres_port
             database = "databricks_postgres"
@@ -76,13 +79,20 @@ class RuntimeSettings:
 
     @property
     def databricks_token(self) -> str:
+        # Priority 1: User's OAuth token from Databricks Apps proxy (X-Forwarded-Access-Token)
+        if self.user_token and self.user_token.strip():
+            logger.debug("Using user OAuth token from request header")
+            return self.user_token.strip()
+
         if self.auth_mode == "user":
+            # Priority 2: PAT from frontend localStorage config
             if self.runtime and self.runtime.user_pat and self.runtime.user_pat.strip():
                 return self.runtime.user_pat.strip()
             else:
-                logger.error("User Auth mode requires a Personal Access Token")
+                logger.error("User Auth mode requires a Personal Access Token or OAuth token")
                 return ""
 
+        # Priority 3: Service principal token (App Auth mode)
         sp_token = get_service_principal_token()
         if sp_token:
             return sp_token

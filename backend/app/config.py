@@ -2,6 +2,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from functools import lru_cache
 import os
+from pathlib import Path
+
+# Resolve .env paths relative to the project root (parent of backend/)
+_BACKEND_DIR = Path(__file__).resolve().parent.parent  # backend/
+_PROJECT_DIR = _BACKEND_DIR.parent  # project root
+_ENV_FILES = [
+    str(_PROJECT_DIR / ".env"),
+    str(_BACKEND_DIR / ".env"),
+]
 
 
 class Settings(BaseSettings):
@@ -95,7 +104,7 @@ class Settings(BaseSettings):
         return bool(os.getenv("DATABRICKS_RUNTIME_VERSION")) or self.storage_backend == "databricks"
     
     model_config = SettingsConfigDict(
-        env_file=[".env", "backend/.env"],
+        env_file=_ENV_FILES,
         case_sensitive=False,
         extra="ignore",
     )

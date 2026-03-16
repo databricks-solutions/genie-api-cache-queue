@@ -13,7 +13,7 @@ from app.models import QueryStage
 import app.services.database as _db
 from app.services.queue_service import queue_service
 from app.services.embedding_service import embedding_service
-from app.services.genie_service import genie_service, GenieRateLimitError
+from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -263,8 +263,19 @@ class QueryProcessor:
                     })
                     self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
 
+                except GenieConfigError as cfg_err:
+                    # Non-retryable config error (404, 401, 403) — fail immediately
+                    logger.error(
+                        "Genie config error for query=%s: %s (not retryable)",
+                        query_id[:8], cfg_err
+                    )
+                    self._update_status(
+                        query_id, QueryStage.FAILED, query_text, identity,
+                        error=str(cfg_err)
+                    )
+
                 except Exception as genie_exc:
-                    # Other exceptions (network error, etc.) — route to queue for retry
+                    # Transient errors (network, 5xx, timeout) — route to queue for retry
                     logger.warning(
                         "Direct Genie call exception for query=%s: %s, routing to queue for retry",
                         query_id[:8], genie_exc
@@ -433,8 +444,19 @@ class QueryProcessor:
                         self._update_status(query_id, QueryStage.QUEUED, query_text, identity)
                         await asyncio.sleep(delay)
 
+                    except GenieConfigError as cfg_err:
+                        # Non-retryable config error (404, 401, 403) — fail immediately
+                        logger.error(
+                            "Genie config error for queued query=%s: %s (not retryable)",
+                            query_id[:8], cfg_err
+                        )
+                        self._update_status(
+                            query_id, QueryStage.FAILED, query_text, identity,
+                            error=str(cfg_err)
+                        )
+
                     except Exception as inner_e:
-                        # Other exceptions (network error, etc.) — retry or fail
+                        # Transient errors (network, 5xx, timeout) — retry or fail
                         if retries < MAX_RETRIES:
                             delay = RETRY_DELAYS[retries]
                             logger.warning("Re-queuing query=%s retry=%d/%d delay=%ds error=%s",
