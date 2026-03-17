@@ -15,6 +15,7 @@ class DynamicStorageService:
     """
     Storage service that dynamically selects backend based on runtime config.
     Falls back to default backend when no runtime config is provided.
+    On connection errors, invalidates the cached backend and retries once.
     """
 
     _DEFAULT_KEY = "__default__"
@@ -43,6 +44,18 @@ class DynamicStorageService:
         if cache_key not in self._token_expiry:
             return True
         return (self._token_expiry[cache_key] - time.time()) < 300
+
+    async def _invalidate_backend(self, runtime_settings):
+        """Close and remove the cached backend so the next call creates a fresh one."""
+        cache_key = self._get_cache_key(runtime_settings)
+        old = self._pgvector_backends.pop(cache_key, None)
+        self._token_expiry.pop(cache_key, None)
+        if old and hasattr(old, 'close'):
+            try:
+                await old.close()
+            except Exception:
+                pass
+        logger.info("Invalidated backend for key=%s", cache_key)
 
     async def _get_or_create_pgvector_backend(self, runtime_settings):
         """Get or create a PGVector backend. Awaits initialization directly."""
@@ -132,8 +145,7 @@ class DynamicStorageService:
             logger.exception("Failed to refresh default backend credentials")
 
     async def _resolve_backend(self, runtime_settings):
-        """Resolve which backend to use, initializing lazily if needed.
-        Only uses local when explicitly configured. Lakebase errors are NOT silenced."""
+        """Resolve which backend to use, initializing lazily if needed."""
         if not runtime_settings:
             return self.default_backend
         if hasattr(runtime_settings, 'runtime') and runtime_settings.runtime:
@@ -142,7 +154,6 @@ class DynamicStorageService:
                 has_token = (rt.user_pat or getattr(runtime_settings, 'user_token', None))
                 if rt.lakebase_instance_name and has_token:
                     return await self._get_or_create_pgvector_backend(runtime_settings)
-                # Lakebase configured but missing instance or token — use default if it's PGVector
                 if hasattr(self.default_backend, 'pool'):
                     return self.default_backend
                 raise ValueError(
@@ -154,6 +165,24 @@ class DynamicStorageService:
                 return self.default_backend
         return self.default_backend
 
+    async def _run_with_retry(self, operation, runtime_settings):
+        """Run an async operation against the backend. On connection error,
+        invalidate the cached backend and retry once with a fresh connection."""
+        try:
+            return await operation()
+        except Exception as e:
+            err = str(e).lower()
+            is_conn_error = any(k in err for k in (
+                "connection", "closed", "reset", "broken pipe", "eof",
+                "ssl", "timeout", "pool is closed", "terminating",
+                "not initialized",
+            ))
+            if not is_conn_error:
+                raise
+            logger.warning("Connection error: %s — invalidating backend and retrying", e)
+            await self._invalidate_backend(runtime_settings)
+            return await operation()
+
     async def search_similar_query(
         self,
         query_embedding: List[float],
@@ -164,19 +193,19 @@ class DynamicStorageService:
         shared_cache: bool = True
     ) -> Optional[Tuple[int, str, str, float]]:
         """Search for similar cached queries using vector similarity."""
-        backend = await self._resolve_backend(runtime_settings)
-        ttl = runtime_settings.cache_ttl_hours if runtime_settings and hasattr(runtime_settings, 'cache_ttl_hours') else None
-
-        if hasattr(backend, 'pool'):
-            return await backend.search_similar_query(
-                query_embedding, identity, threshold, genie_space_id,
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            ttl = runtime_settings.cache_ttl_hours if runtime_settings and hasattr(runtime_settings, 'cache_ttl_hours') else None
+            if hasattr(backend, 'pool'):
+                return await backend.search_similar_query(
+                    query_embedding, identity, threshold, genie_space_id,
+                    cache_ttl_hours=ttl, shared_cache=shared_cache
+                )
+            return backend.search_similar_query(
+                query_embedding, identity, threshold,
                 cache_ttl_hours=ttl, shared_cache=shared_cache
             )
-
-        return backend.search_similar_query(
-            query_embedding, identity, threshold,
-            cache_ttl_hours=ttl, shared_cache=shared_cache
-        )
+        return await self._run_with_retry(_op, runtime_settings)
 
     async def save_query_cache(
         self,
@@ -188,16 +217,16 @@ class DynamicStorageService:
         runtime_settings=None
     ) -> int:
         """Save a new query to the cache."""
-        backend = await self._resolve_backend(runtime_settings)
-
-        if hasattr(backend, 'pool'):
-            return await backend.save_query_cache(
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'pool'):
+                return await backend.save_query_cache(
+                    query_text, query_embedding, sql_query, identity, genie_space_id
+                )
+            return backend.save_query_cache(
                 query_text, query_embedding, sql_query, identity, genie_space_id
             )
-
-        return backend.save_query_cache(
-            query_text, query_embedding, sql_query, identity, genie_space_id
-        )
+        return await self._run_with_retry(_op, runtime_settings)
 
     async def get_all_cached_queries(
         self,
@@ -205,12 +234,12 @@ class DynamicStorageService:
         runtime_settings=None
     ) -> List[dict]:
         """Get all cached queries."""
-        backend = await self._resolve_backend(runtime_settings)
-
-        if hasattr(backend, 'pool'):
-            return await backend.get_all_cached_queries(identity)
-
-        return backend.get_all_cached_queries(identity)
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'pool'):
+                return await backend.get_all_cached_queries(identity)
+            return backend.get_all_cached_queries(identity)
+        return await self._run_with_retry(_op, runtime_settings)
 
     async def save_query_log(
         self,
@@ -223,18 +252,18 @@ class DynamicStorageService:
         runtime_settings=None
     ) -> Optional[int]:
         """Save a query log entry."""
-        backend = await self._resolve_backend(runtime_settings)
-
-        if hasattr(backend, 'pool'):
-            try:
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'pool'):
                 return await backend.save_query_log(
                     query_id, query_text, identity, stage, from_cache, genie_space_id
                 )
-            except Exception as e:
-                logger.warning("save_query_log failed: %s", e)
-                return None
-
-        return None
+            return None
+        try:
+            return await self._run_with_retry(_op, runtime_settings)
+        except Exception as e:
+            logger.warning("save_query_log failed: %s", e)
+            return None
 
     async def get_query_logs(
         self,
@@ -243,13 +272,13 @@ class DynamicStorageService:
         runtime_settings=None
     ) -> List[dict]:
         """Get query logs."""
-        backend = await self._resolve_backend(runtime_settings)
-
-        if hasattr(backend, 'pool'):
-            try:
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'pool'):
                 return await backend.get_query_logs(identity, limit)
-            except Exception as e:
-                logger.warning("get_query_logs failed: %s", e)
-                return []
-
-        return []
+            return []
+        try:
+            return await self._run_with_retry(_op, runtime_settings)
+        except Exception as e:
+            logger.warning("get_query_logs failed: %s", e)
+            return []
