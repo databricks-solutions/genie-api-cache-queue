@@ -197,34 +197,58 @@ class PGVectorStorageService:
 
         return f"postgresql://{quote_plus(username)}:{quote_plus(oauth_token)}@{hostname}:5432/databricks_postgres"
 
-    async def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
-        """Resolve Lakebase Autoscaling project to (hostname, endpoint_name)."""
-        import httpx
+    def _get_lakebase_sdk_client(self):
+        """Create a Databricks SDK WorkspaceClient for Lakebase operations.
 
-        async with httpx.AsyncClient() as http_client:
-            url = f"{self.databricks_host}/api/2.0/postgres/projects/{project_id}/branches/production/endpoints"
-            response = await http_client.get(
-                url,
-                headers={"Authorization": f"Bearer {self.databricks_pat}"}
+        Supports lakebase_service_token formats:
+          - PAT:   "dapi..."                    → WorkspaceClient(token=..., auth_type="pat")
+          - SP:    "client_id:client_secret"    → WorkspaceClient(client_id=..., client_secret=...)
+          - OAuth: "eyJ..."                     → WorkspaceClient(token=..., auth_type="pat")
+        """
+        from databricks.sdk import WorkspaceClient
+
+        token = self.databricks_pat or ""
+
+        if ":" in token and not token.startswith("dapi") and not token.startswith("eyJ"):
+            client_id, client_secret = token.split(":", 1)
+            logger.info("Lakebase auth: SP OAuth (client_id=%s...)", client_id[:12])
+            return WorkspaceClient(
+                host=self.databricks_host,
+                client_id=client_id,
+                client_secret=client_secret,
             )
-            response.raise_for_status()
-            endpoints = response.json().get("endpoints", [])
-            if not endpoints:
-                raise ValueError(f"No endpoints found for Autoscaling project '{project_id}'")
-            ep = endpoints[0]
-            hostname = ep["status"]["hosts"]["host"]
-            endpoint_name = ep["name"]  # e.g. "projects/genie-cache/branches/production/endpoints/primary"
-            return hostname, endpoint_name
+        elif token:
+            logger.info("Lakebase auth: %s", "PAT" if token.startswith("dapi") else "token")
+            return WorkspaceClient(
+                host=self.databricks_host,
+                token=token,
+                auth_type="pat"
+            )
+        else:
+            from app.auth import get_service_principal_client
+            client = get_service_principal_client()
+            if not client:
+                raise ValueError("No Lakebase service token configured")
+            return client
+
+    async def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
+        """Resolve Lakebase Autoscaling project to (hostname, endpoint_name) using SDK."""
+        client = self._get_lakebase_sdk_client()
+        endpoints = client.api_client.do(
+            'GET',
+            f'/api/2.0/postgres/projects/{project_id}/branches/production/endpoints'
+        )
+        eps = endpoints.get("endpoints", [])
+        if not eps:
+            raise ValueError(f"No endpoints found for Autoscaling project '{project_id}'")
+        ep = eps[0]
+        hostname = ep["status"]["hosts"]["host"]
+        endpoint_name = ep["name"]
+        return hostname, endpoint_name
 
     def _build_autoscaling_connection_string(self, hostname: str, endpoint_name: str, quote_plus) -> str:
         """Generate JWT credential for Autoscaling Lakebase and build connection string."""
-        from databricks.sdk import WorkspaceClient
-
-        client = WorkspaceClient(
-            host=self.databricks_host,
-            token=self.databricks_pat,
-            auth_type="pat"
-        )
+        client = self._get_lakebase_sdk_client()
         cred = client.postgres.generate_database_credential(endpoint=endpoint_name)
         username = client.current_user.me().user_name
         logger.info("Autoscaling JWT credential generated for %s", username)

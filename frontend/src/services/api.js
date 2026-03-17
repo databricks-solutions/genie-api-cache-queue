@@ -108,6 +108,16 @@ export const api = {
     }
   },
 
+  getServerConfig: async () => {
+    const response = await axios.get(`${API_BASE_URL}/config`);
+    return response.data;
+  },
+
+  updateServerConfig: async (configUpdate) => {
+    const response = await axios.put(`${API_BASE_URL}/config`, configUpdate);
+    return response.data;
+  },
+
   getConfig: getConfig,
   computeTtlHours: computeTtlHours,
 };

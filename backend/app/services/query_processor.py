@@ -121,10 +121,7 @@ class QueryProcessor:
                          runtime_settings.databricks_host, runtime_settings.genie_space_id,
                          is_follow_up, context_text[:100])
 
-            # Stage 1: Received
             self._update_status(query_id, QueryStage.RECEIVED, query_text, identity)
-
-            # Stage 2: Check cache (using contextualized embedding)
             self._update_status(query_id, QueryStage.CHECKING_CACHE, query_text, identity)
 
             query_embedding = embedding_service.get_embedding(context_text, runtime_settings)
@@ -162,8 +159,7 @@ class QueryProcessor:
                 if result['status'] == 'SUCCEEDED':
                     self._update_status(
                         query_id, QueryStage.COMPLETED, query_text, identity,
-                        sql_query=sql_query, result=result['result'], from_cache=True
-                        # No conversation_id on cache hit — Genie was not involved
+                        sql_query=sql_query, result=result['result'], from_cache=True,
                     )
                 else:
                     self._update_status(
@@ -255,7 +251,7 @@ class QueryProcessor:
                         'conversation_id': conversation_id,
                         'conversation_synced': conversation_synced,
                         'conversation_history': conversation_history,
-                        '_retries': 0,  # 429 responses use the API's Retry-After delay instead of backoff
+                        '_retries': 0,
                         '_delay': rate_err.retry_after,
                         'runtime_config': runtime_config.model_dump() if runtime_config else None,
                         'user_token': user_token,
@@ -436,7 +432,7 @@ class QueryProcessor:
                             'conversation_id': conv_id,
                             'conversation_synced': conv_synced,
                             'conversation_history': conv_history,
-                            '_retries': retries,  # Preserve retry count — 429 waits use Retry-After, not backoff
+                            '_retries': retries,
                             'runtime_config': raw_runtime_config,
                             'user_token': user_token,
                             'user_email': user_email,

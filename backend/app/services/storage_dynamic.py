@@ -51,7 +51,6 @@ class DynamicStorageService:
         if cache_key in self._pgvector_backends and not self._is_token_expired(cache_key):
             return self._pgvector_backends[cache_key]
 
-        # Expire old backend if token is stale
         if cache_key in self._pgvector_backends and self._is_token_expired(cache_key):
             old = self._pgvector_backends.pop(cache_key, None)
             if old and hasattr(old, 'close'):
@@ -67,10 +66,13 @@ class DynamicStorageService:
         from app.services.storage_pgvector import PGVectorStorageService
         ttl = runtime_settings.cache_ttl_hours if hasattr(runtime_settings, 'cache_ttl_hours') else 24
 
-        # For Lakebase operations, prefer user_pat (full API access) over user_token
-        # (OAuth proxy token has limited scopes and can't access Postgres API)
-        effective_token = ((runtime_settings.runtime.user_pat if runtime_settings.runtime else None) or
-                           getattr(runtime_settings, 'user_token', None))
+        from app.config import get_settings
+        _s = get_settings()
+        effective_token = (
+            (runtime_settings.runtime.user_pat if runtime_settings.runtime else None) or
+            _s.databricks_token or
+            getattr(runtime_settings, 'user_token', None)
+        )
 
         backend = PGVectorStorageService(
             connection_string=runtime_settings.postgres_connection_string,
@@ -89,40 +91,19 @@ class DynamicStorageService:
         return backend
 
     async def refresh_default_backend(self):
-        """Refresh OAuth token for the default Lakebase backend. Called periodically."""
+        """Refresh OAuth token for the default Lakebase backend by re-initializing."""
         cache_key = self._DEFAULT_KEY
         if cache_key not in self._pgvector_backends:
             return
         if not self._is_token_expired(cache_key):
             return
 
-        logger.info("Refreshing OAuth token for default Lakebase backend")
+        logger.info("Refreshing default Lakebase backend (re-generating credentials)")
         try:
             from app.config import get_settings
             from app.services.storage_pgvector import PGVectorStorageService
-            from urllib.parse import quote_plus
-            import uuid as _uuid
-            import httpx
 
             settings = get_settings()
-
-            # Use REST API for credential generation (works with both Provisioned and Autoscaling)
-            async with httpx.AsyncClient() as http_client:
-                cred_url = f"{settings.databricks_host}/api/2.0/database/credentials/generate"
-                response = await http_client.post(
-                    cred_url,
-                    headers={"Authorization": f"Bearer {settings.databricks_token}"},
-                    json={"request_id": str(_uuid.uuid4())}
-                )
-                response.raise_for_status()
-                cred_data = response.json()
-                oauth_token = cred_data.get("token")
-
-            conn_string = (
-                f"postgresql://{quote_plus(settings.postgres_user)}:{quote_plus(oauth_token)}"
-                f"@{settings.lakebase_instance}:{settings.postgres_port}/databricks_postgres"
-                f"?sslmode={settings.postgres_sslmode}"
-            )
 
             old = self._pgvector_backends.pop(cache_key, None)
             if old and hasattr(old, 'close'):
@@ -131,32 +112,45 @@ class DynamicStorageService:
                 except Exception:
                     pass
 
+            from app.auth import get_service_principal_token
+            token = settings.databricks_token or get_service_principal_token()
+
             new_backend = PGVectorStorageService(
-                connection_string=conn_string,
+                connection_string=settings.postgres_connection_string,
                 table_name=settings.full_table_name,
-                cache_ttl_hours=settings.cache_ttl_hours
+                cache_ttl_hours=settings.cache_ttl_hours,
+                databricks_pat=token,
+                databricks_host=settings.databricks_host,
+                lakebase_instance_name=settings.lakebase_instance,
             )
             await new_backend.initialize()
             self._pgvector_backends[cache_key] = new_backend
             self._token_expiry[cache_key] = time.time() + 3300
             self.default_backend = new_backend
-            logger.info("Default backend OAuth token refreshed")
+            logger.info("Default backend credentials refreshed")
         except Exception:
-            logger.exception("Failed to refresh default backend OAuth token")
+            logger.exception("Failed to refresh default backend credentials")
 
     async def _resolve_backend(self, runtime_settings):
-        """Resolve which backend to use, initializing lazily if needed."""
+        """Resolve which backend to use, initializing lazily if needed.
+        Only uses local when explicitly configured. Lakebase errors are NOT silenced."""
         if not runtime_settings:
             return self.default_backend
         if hasattr(runtime_settings, 'runtime') and runtime_settings.runtime:
-            # Accept user_token (OAuth from Databricks Apps proxy) OR user_pat (from localStorage)
-            has_token = (runtime_settings.runtime.user_pat or
-                         getattr(runtime_settings, 'user_token', None))
-            if (runtime_settings.runtime.storage_backend == 'lakebase' and
-                    runtime_settings.runtime.lakebase_instance_name and
-                    has_token):
-                return await self._get_or_create_pgvector_backend(runtime_settings)
-            if runtime_settings.runtime.storage_backend == 'local':
+            rt = runtime_settings.runtime
+            if rt.storage_backend == 'lakebase':
+                has_token = (rt.user_pat or getattr(runtime_settings, 'user_token', None))
+                if rt.lakebase_instance_name and has_token:
+                    return await self._get_or_create_pgvector_backend(runtime_settings)
+                # Lakebase configured but missing instance or token — use default if it's PGVector
+                if hasattr(self.default_backend, 'pool'):
+                    return self.default_backend
+                raise ValueError(
+                    f"Lakebase configured but cannot connect: "
+                    f"instance={'set' if rt.lakebase_instance_name else 'MISSING'}, "
+                    f"token={'set' if has_token else 'MISSING'}"
+                )
+            if rt.storage_backend == 'local':
                 return self.default_backend
         return self.default_backend
 

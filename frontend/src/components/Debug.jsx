@@ -7,13 +7,18 @@ const Debug = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const [serverConfig, setServerConfig] = useState(null);
+
   const fetchDebugInfo = async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/debug/config');
-      const data = await response.json();
-      setDebugInfo(data);
+      const [debugResp, configResp] = await Promise.all([
+        fetch('/api/debug/config'),
+        fetch('/api/config'),
+      ]);
+      setDebugInfo(await debugResp.json());
+      setServerConfig(await configResp.json());
     } catch (err) {
       setError(err.message);
     } finally {
@@ -101,6 +106,31 @@ const Debug = () => {
           )}
         </div>
       </div>
+
+      {/* Server Config (Unified — shared between UI and Clone API) */}
+      {serverConfig && (
+        <div className="bg-white rounded-lg shadow-sm border">
+          <div className="px-6 py-4 border-b">
+            <h3 className="text-lg font-semibold text-gray-900">Server Config (Unified)</h3>
+            <p className="text-sm text-gray-500">Active configuration used by Clone API and UI (from PUT /api/config)</p>
+          </div>
+          <div className="p-6">
+            <div className="space-y-2">
+              {Object.entries(serverConfig).map(([key, value]) => (
+                <div key={key} className="flex items-center justify-between py-2 border-b">
+                  <div className="flex items-center gap-2">
+                    {getStatusIcon(value)}
+                    <span className="font-mono text-sm text-gray-500">{key}</span>
+                  </div>
+                  <span className={`text-sm font-mono px-3 py-1 rounded ${getStatusStyle(value)}`}>
+                    {String(value)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {debugInfo && (
         <>

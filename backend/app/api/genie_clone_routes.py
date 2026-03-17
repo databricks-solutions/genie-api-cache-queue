@@ -2,18 +2,27 @@
 Drop-in replacement for the Databricks Genie Conversation API.
 Mirrors the exact same endpoints and response format so callers only need to change the base URL.
 Adds transparent caching, rate-limit management, queueing, and retry.
+
+Endpoints:
+  GET  /spaces/{space_id}                          — proxy to real Genie
+  POST /spaces/{space_id}/start-conversation       — cache + queue + Genie
+  POST /spaces/{sid}/conversations/{cid}/messages   — cache + queue + Genie
+  GET  /spaces/{sid}/conversations/{cid}/messages/{mid}                                — poll / proxy
+  GET  .../messages/{mid}/attachments/{aid}/query-result                               — exec SQL or proxy
+  POST .../messages/{mid}/attachments/{aid}/execute-query                              — exec SQL or proxy
 """
 
 import logging
 import uuid
 import asyncio
 import httpx
-from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from app.config import get_settings
 from app.auth import ensure_https
+from app.config import get_settings
+from app.api.config_store import get_effective_setting
+from app.api.auth_helpers import extract_bearer_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
 from app.services.queue_service import queue_service
@@ -24,70 +33,61 @@ settings = get_settings()
 
 genie_clone_router = APIRouter()
 
-# In-memory store for synthetic (cache/queue) messages
-_synthetic_messages: Dict[str, dict] = {}
+# ---------------------------------------------------------------------------
+# In-memory store for synthetic (cache / queued) messages & attachments
+# ---------------------------------------------------------------------------
+_synthetic_messages: dict[str, dict] = {}
 
-# Prefix for synthetic IDs to distinguish from real Genie IDs
 CONV_PREFIX = "ccache_"
 MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
 
 
-# --- Helpers ---
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _extract_token(request: Request) -> str:
     """Extract auth token from request headers."""
-    forwarded = request.headers.get("X-Forwarded-Access-Token", "").strip()
-    if forwarded:
-        return forwarded
-
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[7:].strip()
-        if token:
-            return token
-
-    if request.headers.get("X-Forwarded-Email"):
-        from app.auth import get_service_principal_token
-        sp_token = get_service_principal_token()
-        if sp_token:
-            return sp_token
-
-    raise HTTPException(status_code=401, detail="Missing authentication.")
+    return extract_bearer_token(request)
 
 
 def _build_runtime_settings(token: str, space_id: str):
-    """Build RuntimeSettings for the pipeline."""
+    """Build RuntimeSettings using server config overrides (PUT /config) + env defaults.
+    Uses server PAT for Lakebase cache, caller OAuth for Genie/SQL."""
     from app.models import RuntimeConfig
     from app.runtime_config import RuntimeSettings
 
+    # For Lakebase: use service token from server config (set via Settings UI), fallback to caller token
+    lakebase_pat = get_effective_setting("lakebase_service_token") or token
+
     rc = RuntimeConfig(
         auth_mode="user",
-        user_pat=token,
+        user_pat=lakebase_pat,
         genie_space_id=space_id,
-        sql_warehouse_id=settings.sql_warehouse_id or None,
-        similarity_threshold=settings.similarity_threshold,
-        max_queries_per_minute=settings.max_queries_per_minute,
-        cache_ttl_hours=settings.cache_ttl_hours,
-        embedding_provider=settings.embedding_provider,
-        databricks_embedding_endpoint=settings.databricks_embedding_endpoint,
-        storage_backend="lakebase" if settings.storage_backend == "pgvector" else settings.storage_backend,
-        lakebase_instance_name=settings.lakebase_instance or None,
-        lakebase_catalog=settings.lakebase_catalog or None,
-        lakebase_schema=settings.lakebase_schema or None,
-        cache_table_name=settings.pgvector_table_name or None,
+        sql_warehouse_id=get_effective_setting("sql_warehouse_id") or None,
+        similarity_threshold=get_effective_setting("similarity_threshold"),
+        max_queries_per_minute=get_effective_setting("max_queries_per_minute"),
+        cache_ttl_hours=get_effective_setting("cache_ttl_hours"),
+        embedding_provider=get_effective_setting("embedding_provider"),
+        databricks_embedding_endpoint=get_effective_setting("databricks_embedding_endpoint"),
+        storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else (get_effective_setting("storage_backend") or None),
+        lakebase_instance_name=get_effective_setting("lakebase_instance_name") or get_effective_setting("lakebase_instance") or None,
+        lakebase_catalog=get_effective_setting("lakebase_catalog") or None,
+        lakebase_schema=get_effective_setting("lakebase_schema") or None,
+        cache_table_name=get_effective_setting("cache_table_name") or get_effective_setting("pgvector_table_name") or None,
+        shared_cache=get_effective_setting("shared_cache"),
     )
-    return RuntimeSettings(rc, None, None)
+    return RuntimeSettings(rc, user_token=token, user_email=None)
 
 
 def _make_synthetic_ids():
-    """Generate synthetic conversation_id, message_id, attachment_id."""
     uid = uuid.uuid4().hex[:24]
     return f"{CONV_PREFIX}{uid}", f"{MSG_PREFIX}{uid}", f"{ATT_PREFIX}{uid}"
 
 
-def _format_cache_hit_response(conv_id, msg_id, att_id, sql_query, identity):
-    """Format a cache hit as a Genie API response."""
+def _format_completed_response(conv_id, msg_id, att_id, sql_query):
+    """Format a COMPLETED Genie-compatible response (cache hit or finished background)."""
     attachments = []
     if sql_query:
         attachments.append({
@@ -101,13 +101,21 @@ def _format_cache_hit_response(conv_id, msg_id, att_id, sql_query, identity):
         "attachment_id": f"{ATT_PREFIX}txt_{uuid.uuid4().hex[:16]}",
         "text": {"content": "This result was served from the semantic cache."},
     })
-
     return {
         "conversation_id": conv_id,
         "message_id": msg_id,
         "status": "COMPLETED",
         "attachments": attachments,
-        "created_timestamp": None,
+    }
+
+
+def _format_executing_response(conv_id, msg_id):
+    """Format an EXECUTING_QUERY response (work in progress)."""
+    return {
+        "conversation_id": conv_id,
+        "message_id": msg_id,
+        "status": "EXECUTING_QUERY",
+        "attachments": [],
     }
 
 
@@ -130,156 +138,235 @@ class GenieContentBody(BaseModel):
     content: str
 
 
-# --- Endpoints ---
+# ---------------------------------------------------------------------------
+# Background processing for queued Genie queries
+# ---------------------------------------------------------------------------
 
-@genie_clone_router.post("/spaces/{space_id}/start-conversation")
-async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request):
-    """Clone of POST /api/2.0/genie/spaces/{space_id}/start-conversation.
-    Adds cache lookup, rate limiting, and queueing transparently."""
-    token = _extract_token(request)
+async def _process_genie_background(
+    space_id: str,
+    query_text: str,
+    query_embedding,
+    identity: str,
+    token: str,
+    rs,
+    msg_id: str,
+    att_id: str,
+    conversation_id: str = None,
+    delay: float = 0,
+    max_retries: int = 3,
+):
+    """Call Genie in the background. Updates _synthetic_messages when done."""
+    if delay:
+        await asyncio.sleep(delay)
+
+    last_error = None
+    attempt = 0
+    max_rate_limit_waits = 12  # Max 12 × 5s = 60s waiting for rate limit
+
+    while attempt <= max_retries:
+        # Wait for rate limit slot (does NOT consume an attempt)
+        rate_limit_waits = 0
+        while not queue_service.backend.check_rate_limit(identity, rs.max_queries_per_minute):
+            rate_limit_waits += 1
+            if rate_limit_waits > max_rate_limit_waits:
+                logger.warning("Background rate limit wait exhausted for msg_id=%s", msg_id)
+                break
+            logger.info("Background rate limited, waiting 5s (wait %d/%d)", rate_limit_waits, max_rate_limit_waits)
+            await asyncio.sleep(5)
+
+        try:
+            if conversation_id and not conversation_id.startswith(CONV_PREFIX):
+                try:
+                    result = await genie_service.send_message(space_id, conversation_id, query_text, rs)
+                except Exception:
+                    logger.warning("send_message failed, falling back to start_conversation")
+                    result = await genie_service.start_conversation(space_id, query_text, rs)
+            else:
+                result = await genie_service.start_conversation(space_id, query_text, rs)
+
+            if result.get("status") == "COMPLETED":
+                sql_query = result.get("sql_query", "")
+
+                if sql_query and query_embedding is not None:
+                    try:
+                        cache_id = await _db.db_service.save_query_cache(
+                            query_text, query_embedding, sql_query,
+                            identity, space_id, rs,
+                        )
+                        logger.info("Background cache SAVED id=%s query=%s", cache_id, query_text[:50])
+                    except Exception as e:
+                        logger.error("Background cache save FAILED: %s", e, exc_info=True)
+                else:
+                    logger.warning("Background cache SKIPPED: sql=%s embedding=%s",
+                                   bool(sql_query), query_embedding is not None)
+
+                conv_id = CONV_PREFIX + msg_id[len(MSG_PREFIX):]
+                completed = _format_completed_response(conv_id, msg_id, att_id, sql_query)
+
+                real_attachments = result.get("attachments", [])
+                if real_attachments:
+                    completed["attachments"] = real_attachments
+
+                _synthetic_messages[msg_id] = completed
+                _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                for _att in completed.get("attachments", []):
+                    if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
+                        _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                return
+
+            # Non-COMPLETED terminal status
+            _synthetic_messages[msg_id] = {
+                "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+                "message_id": msg_id,
+                "status": result.get("status", "FAILED"),
+                "attachments": [],
+                "error": result.get("error"),
+            }
+            return
+
+        except GenieRateLimitError as e:
+            logger.info("Genie 429 in background, waiting %ss (attempt %d/%d)", e.retry_after, attempt + 1, max_retries + 1)
+            await asyncio.sleep(e.retry_after)
+            last_error = str(e)
+            continue
+        except Exception as e:
+            last_error = str(e)
+            attempt += 1
+            if attempt <= max_retries:
+                wait = [5, 15, 30][min(attempt - 1, 2)]
+                logger.warning("Background Genie attempt %d failed: %s, retrying in %ds", attempt, e, wait)
+                await asyncio.sleep(wait)
+                continue
+            break
+
+    # Fallback: all retries exhausted — ALWAYS set FAILED so client stops polling
+    logger.error("Background processing failed for msg_id=%s: %s", msg_id, last_error)
+    _synthetic_messages[msg_id] = {
+        "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+        "message_id": msg_id,
+        "status": "FAILED",
+        "attachments": [],
+        "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Core logic shared by start-conversation and create-message
+# ---------------------------------------------------------------------------
+
+async def _handle_query(
+    space_id: str,
+    query_text: str,
+    token: str,
+    identity: str,
+    conversation_id: str = None,
+):
+    """
+    Shared handler for start-conversation and create-message.
+    1. Check cache → if hit, return COMPLETED immediately.
+    2. If miss → return EXECUTING_QUERY and process in background.
+    """
     rs = _build_runtime_settings(token, space_id)
-    identity = request.headers.get("X-Forwarded-Email", "api-user")
-    query_text = body.content
 
     # Generate embedding and check cache
+    query_embedding = None
+    cached = None
     try:
         query_embedding = embedding_service.get_embedding(query_text, rs)
+        logger.info("Embedding generated: len=%s for query=%s", len(query_embedding) if query_embedding else None, query_text[:40])
         cached = await _db.db_service.search_similar_query(
             query_embedding, identity, rs.similarity_threshold,
             space_id, rs, shared_cache=rs.shared_cache,
         )
     except Exception as e:
-        logger.warning("Cache lookup failed: %s, proceeding without cache", e)
-        query_embedding = None
-        cached = None
+        logger.warning("Cache lookup failed: %s — proceeding without cache", e)
 
+    # --- Cache HIT: execute cached SQL against warehouse ---
     if cached:
         cache_id, cached_query, sql_query, similarity = cached
-        logger.info("Genie clone CACHE HIT: similarity=%.3f sql=%s", similarity, sql_query[:80])
+        logger.info("Clone CACHE HIT: sim=%.3f sql=%s", similarity, sql_query[:80] if sql_query else "")
 
         conv_id, msg_id, att_id = _make_synthetic_ids()
-        response = _format_cache_hit_response(conv_id, msg_id, att_id, sql_query, identity)
 
-        _synthetic_messages[msg_id] = response
-        _synthetic_messages[att_id] = {"sql_query": sql_query, "from_cache": True}
-
-        return response
-
-    # Cache miss — check rate limit
-    if not queue_service.backend.check_rate_limit(identity, rs.max_queries_per_minute):
-        logger.info("Genie clone rate limited, queuing query")
-        conv_id, msg_id, att_id = _make_synthetic_ids()
-
-        # Queue the work
-        queue_item_id = str(uuid.uuid4())
-        queue_service.add_to_queue(queue_item_id, {
-            "query_text": query_text,
-            "identity": identity,
-            "query_embedding": query_embedding,
-            "runtime_config": rs.runtime.model_dump() if rs.runtime else None,
-            "user_token": None,
-            "user_email": identity,
-            "_synthetic_msg_id": msg_id,
-            "_synthetic_att_id": att_id,
-        })
-
-        response = {
-            "conversation_id": conv_id,
-            "message_id": msg_id,
-            "status": "EXECUTING_QUERY",
-            "attachments": [],
-        }
-        _synthetic_messages[msg_id] = response
-        # Background task will update _synthetic_messages when done
-        asyncio.create_task(_process_queued_genie(
-            queue_item_id, space_id, query_text, query_embedding, identity, token, rs, msg_id, att_id
-        ))
-
-        return response
-
-    # Rate limit OK — call Genie directly
-    logger.info("Genie clone calling Genie API for: %s", query_text[:60])
-    try:
-        result = await genie_service.start_conversation(space_id, query_text, rs)
-    except GenieRateLimitError as e:
-        logger.warning("Genie 429, queuing: %s", e)
-        conv_id, msg_id, att_id = _make_synthetic_ids()
-        response = {
-            "conversation_id": conv_id,
-            "message_id": msg_id,
-            "status": "EXECUTING_QUERY",
-            "attachments": [],
-        }
-        _synthetic_messages[msg_id] = response
-        asyncio.create_task(_process_queued_genie(
-            str(uuid.uuid4()), space_id, query_text, query_embedding, identity, token, rs, msg_id, att_id,
-            delay=e.retry_after,
-        ))
-        return response
-
-    # Save to cache
-    if result.get("status") == "COMPLETED" and result.get("sql_query") and query_embedding:
+        # Execute the cached SQL to get fresh data
+        sql_result = None
         try:
-            await _db.db_service.save_query_cache(
-                query_text, query_embedding, result["sql_query"],
-                identity, space_id, rs,
-            )
+            sql_result = await genie_service.execute_sql(sql_query, rs)
         except Exception as e:
-            logger.warning("Failed to save cache: %s", e)
+            logger.warning("Cache hit SQL execution failed: %s", e)
 
-    return result
+        statement_id = sql_result.get("statement_id") if sql_result else None
+        row_count = 0
+        if sql_result and sql_result.get("result"):
+            row_count = sql_result["result"].get("row_count", 0)
+
+        response = {
+            "conversation_id": conv_id,
+            "message_id": msg_id,
+            "status": "COMPLETED",
+            "attachments": [
+                {
+                    "attachment_id": att_id,
+                    "query": {
+                        "query": sql_query,
+                        "description": "Cached query — SQL re-executed against warehouse.",
+                        **({"statement_id": statement_id} if statement_id else {}),
+                        "query_result_metadata": {"row_count": row_count},
+                    },
+                },
+            ],
+        }
+        _synthetic_messages[msg_id] = response
+        _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+        return response
+
+    # --- Cache MISS → non-blocking background processing ---
+    conv_id, msg_id, att_id = _make_synthetic_ids()
+    response = _format_executing_response(conv_id, msg_id)
+    _synthetic_messages[msg_id] = response
+
+    asyncio.create_task(_process_genie_background(
+        space_id=space_id,
+        query_text=query_text,
+        query_embedding=query_embedding,
+        identity=identity,
+        token=token,
+        rs=rs,
+        msg_id=msg_id,
+        att_id=att_id,
+        conversation_id=conversation_id,
+    ))
+
+    logger.info("Clone CACHE MISS: queued background task msg_id=%s", msg_id)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@genie_clone_router.get("/spaces/{space_id}")
+async def clone_get_space(space_id: str, request: Request):
+    """Proxy GET space metadata to real Genie API."""
+    token = _extract_token(request)
+    return await _proxy_passthrough(request, "GET", f"/api/2.0/genie/spaces/{space_id}", token)
+
+
+@genie_clone_router.post("/spaces/{space_id}/start-conversation")
+async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request):
+    """Clone of POST /api/2.0/genie/spaces/{space_id}/start-conversation.
+    Returns immediately. Cache hit → COMPLETED. Cache miss → EXECUTING_QUERY (poll get-message)."""
+    token = _extract_token(request)
+    identity = request.headers.get("X-Forwarded-Email", "api-user")
+    return await _handle_query(space_id, body.content, token, identity)
 
 
 @genie_clone_router.post("/spaces/{space_id}/conversations/{conversation_id}/messages")
 async def clone_create_message(space_id: str, conversation_id: str, body: GenieContentBody, request: Request):
-    """Clone of POST create-message. Follow-up messages with cache support."""
+    """Clone of POST create-message. Follow-up messages with cache + queue support."""
     token = _extract_token(request)
-    rs = _build_runtime_settings(token, space_id)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
-    query_text = body.content
-
-    # Check cache for follow-up too
-    try:
-        query_embedding = embedding_service.get_embedding(query_text, rs)
-        cached = await _db.db_service.search_similar_query(
-            query_embedding, identity, rs.similarity_threshold,
-            space_id, rs, shared_cache=rs.shared_cache,
-        )
-    except Exception:
-        query_embedding = None
-        cached = None
-
-    if cached:
-        cache_id, cached_query, sql_query, similarity = cached
-        conv_id, msg_id, att_id = _make_synthetic_ids()
-        response = _format_cache_hit_response(conv_id, msg_id, att_id, sql_query, identity)
-        _synthetic_messages[msg_id] = response
-        _synthetic_messages[att_id] = {"sql_query": sql_query, "from_cache": True}
-        return response
-
-    # Cache miss — call Genie
-    if conversation_id.startswith(CONV_PREFIX):
-        # Previous conversation was synthetic (cache hit) — start fresh with context
-        logger.info("Synthetic conv, starting new real conversation")
-        result = await genie_service.start_conversation(space_id, query_text, rs)
-    else:
-        # Real conversation — send follow-up
-        try:
-            result = await genie_service.send_message(space_id, conversation_id, query_text, rs)
-        except Exception:
-            logger.warning("send_message failed, falling back to start_conversation")
-            result = await genie_service.start_conversation(space_id, query_text, rs)
-
-    if result.get("status") == "COMPLETED" and result.get("sql_query") and query_embedding:
-        try:
-            await _db.db_service.save_query_cache(
-                query_text, query_embedding, result["sql_query"],
-                identity, space_id, rs,
-            )
-        except Exception as e:
-            logger.warning("Failed to save cache: %s", e)
-
-    return result
+    return await _handle_query(space_id, body.content, token, identity, conversation_id=conversation_id)
 
 
 @genie_clone_router.get(
@@ -306,20 +393,21 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
 async def clone_get_query_result(
     space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request
 ):
-    """Clone of GET query-result. Returns cached result or proxies to real Genie."""
+    """Clone of GET query-result. Executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
 
-    if attachment_id.startswith(ATT_PREFIX):
-        stored = _synthetic_messages.get(attachment_id)
-        if not stored:
-            raise HTTPException(status_code=404, detail="Attachment not found")
-        return {
-            "statement_id": f"cache_{uuid.uuid4().hex[:16]}",
-            "status": "SUCCEEDED",
-            "manifest": {},
-            "result": {"data_array": [], "row_count": 0},
-        }
+    # Check if we have cached SQL for this attachment (synthetic or registered real Genie ID)
+    stored = _synthetic_messages.get(attachment_id)
+    if stored and stored.get("sql_query"):
+        rs = _build_runtime_settings(token, space_id)
+        try:
+            result = await genie_service.execute_sql(stored["sql_query"], rs)
+            return {"statement_response": result}
+        except Exception as e:
+            logger.error("Failed to execute cached SQL: %s", e)
+            raise HTTPException(status_code=500, detail=f"SQL execution failed: {e}")
 
+    # Unknown attachment — proxy to real Genie (already returns statement_response)
     path = (
         f"/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}"
         f"/messages/{message_id}/attachments/{attachment_id}/query-result"
@@ -333,65 +421,21 @@ async def clone_get_query_result(
 async def clone_execute_query(
     space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request
 ):
-    """Clone of POST execute-query. Always proxies to real Genie (re-execution)."""
+    """Clone of POST execute-query. Re-executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
+
+    stored = _synthetic_messages.get(attachment_id)
+    if stored and stored.get("sql_query"):
+        rs = _build_runtime_settings(token, space_id)
+        try:
+            result = await genie_service.execute_sql(stored["sql_query"], rs)
+            return {"statement_response": result}
+        except Exception as e:
+            logger.error("Failed to execute cached SQL: %s", e)
+            raise HTTPException(status_code=500, detail=f"SQL execution failed: {e}")
+
     path = (
         f"/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}"
         f"/messages/{message_id}/attachments/{attachment_id}/execute-query"
     )
     return await _proxy_passthrough(request, "POST", path, token)
-
-
-# --- Background processing for queued queries ---
-
-async def _process_queued_genie(
-    queue_id: str, space_id: str, query_text: str, query_embedding,
-    identity: str, token: str, rs, msg_id: str, att_id: str,
-    delay: float = 0, max_retries: int = 3,
-):
-    """Process a queued Genie query in the background, updating synthetic message when done."""
-    if delay:
-        await asyncio.sleep(delay)
-
-    retry_delays = [5, 15, 30]
-    for attempt in range(max_retries + 1):
-        try:
-            result = await genie_service.start_conversation(space_id, query_text, rs)
-
-            if result.get("status") == "COMPLETED":
-                sql_query = result.get("sql_query", "")
-
-                if sql_query and query_embedding:
-                    try:
-                        await _db.db_service.save_query_cache(
-                            query_text, query_embedding, sql_query,
-                            identity, space_id, rs,
-                        )
-                    except Exception as e:
-                        logger.warning("Queue cache save failed: %s", e)
-
-                # Update synthetic message to COMPLETED
-                conv_id = MSG_PREFIX.replace("mcache_", "ccache_") + msg_id[len(MSG_PREFIX):]
-                _synthetic_messages[msg_id] = _format_cache_hit_response(
-                    conv_id, msg_id, att_id, sql_query, identity
-                )
-                _synthetic_messages[msg_id]["status"] = "COMPLETED"
-                _synthetic_messages[att_id] = {"sql_query": sql_query}
-                return
-
-        except GenieRateLimitError as e:
-            await asyncio.sleep(e.retry_after)
-            continue
-        except Exception as e:
-            if attempt < max_retries:
-                await asyncio.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
-                continue
-
-            _synthetic_messages[msg_id] = {
-                "conversation_id": msg_id.replace(MSG_PREFIX, CONV_PREFIX),
-                "message_id": msg_id,
-                "status": "FAILED",
-                "error": {"error": str(e), "type": "INTERNAL_ERROR"},
-                "attachments": [],
-            }
-            return

@@ -56,8 +56,5 @@ backend/data/*
 .coverage
 htmlcov/
 
-# Test evidence (screenshots, local only)
+# Test evidence (local only)
 test-evidence/
-
-# Report generators (local development tools)
-generate_*.py

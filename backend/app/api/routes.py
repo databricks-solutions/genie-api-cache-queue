@@ -107,48 +107,6 @@ async def get_queue_post(request: Optional[QueueRequest] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/debug/config")
-async def debug_config(req: Request):
-    """Debug endpoint to see configuration and headers. Disabled in production."""
-    import os
-
-    if settings.is_production:
-        raise HTTPException(status_code=403, detail="Debug endpoint disabled in production")
-
-    env_vars = {
-        "DATABRICKS_HOST": settings.databricks_host or os.getenv("DATABRICKS_HOST") or "NOT SET",
-        "DATABRICKS_TOKEN": ("***" + settings.databricks_token[-4:]) if settings.databricks_token else "NOT SET",
-        "DATABRICKS_CLIENT_ID": os.getenv("DATABRICKS_CLIENT_ID") or "NOT SET",
-        "DATABRICKS_CLIENT_SECRET": "***MASKED***" if os.getenv("DATABRICKS_CLIENT_SECRET") else "NOT SET",
-        "APP_ENV": settings.app_env or "NOT SET",
-        "STORAGE_BACKEND": settings.storage_backend or "NOT SET",
-    }
-
-    headers = {
-        "X-Forwarded-Access-Token": ("***" + req.headers.get("X-Forwarded-Access-Token", "")[-4:]) if req.headers.get("X-Forwarded-Access-Token") else "NOT SET (local dev)",
-        "X-Forwarded-Email": req.headers.get("X-Forwarded-Email") or "NOT SET (local dev)",
-        "X-Forwarded-Host": req.headers.get("X-Forwarded-Host") or "NOT SET (local dev)",
-        "Host": req.headers.get("Host", "NOT SET"),
-    }
-
-    config_values = {
-        "databricks_host": settings.databricks_host or "EMPTY",
-        "databricks_token_set": bool(settings.databricks_token),
-        "genie_space_id": settings.genie_space_id or "EMPTY",
-        "sql_warehouse_id": settings.sql_warehouse_id or "EMPTY",
-        "app_env": settings.app_env,
-        "storage_backend": settings.storage_backend,
-        "lakebase_instance": settings.lakebase_instance or "NOT SET",
-    }
-
-    return {
-        "environment_variables": env_vars,
-        "request_headers": headers,
-        "config_values": config_values,
-        "timestamp": datetime.now().isoformat()
-    }
-
-
 # Query Logs Endpoints
 class QueryLogRequest(BaseModel):
     identity: Optional[str] = None
@@ -227,3 +185,81 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat()
     }
+
+
+# --- Unified config endpoints (accessible by frontend without Bearer token) ---
+
+from app.api.config_store import get_effective_setting, update_overrides, get_overrides
+
+
+class UIConfigUpdate(BaseModel):
+    lakebase_service_token: Optional[str] = None  # SP/PAT token for Lakebase cache operations
+    user_pat: Optional[str] = None
+    genie_space_id: Optional[str] = None
+    sql_warehouse_id: Optional[str] = None
+    similarity_threshold: Optional[float] = None
+    max_queries_per_minute: Optional[int] = None
+    cache_ttl_seconds: Optional[int] = None
+    shared_cache: Optional[bool] = None
+    embedding_provider: Optional[str] = None
+    databricks_embedding_endpoint: Optional[str] = None
+    storage_backend: Optional[str] = None
+    lakebase_instance_name: Optional[str] = None
+    lakebase_catalog: Optional[str] = None
+    lakebase_schema: Optional[str] = None
+    cache_table_name: Optional[str] = None
+    query_log_table_name: Optional[str] = None
+
+
+@router.get("/config")
+async def get_config():
+    """Get server configuration. Used by Settings UI and external API."""
+    overrides = get_overrides()
+    ttl_hours = get_effective_setting("cache_ttl_hours") or 0
+    ttl_seconds = int(ttl_hours * 3600)
+    return {
+        "genie_space_id": get_effective_setting("genie_space_id"),
+        "sql_warehouse_id": get_effective_setting("sql_warehouse_id"),
+        "similarity_threshold": get_effective_setting("similarity_threshold"),
+        "max_queries_per_minute": get_effective_setting("max_queries_per_minute"),
+        "cache_ttl_seconds": ttl_seconds,
+        "shared_cache": overrides.get("shared_cache", True),
+        "embedding_provider": get_effective_setting("embedding_provider"),
+        "databricks_embedding_endpoint": get_effective_setting("databricks_embedding_endpoint"),
+        "storage_backend": get_effective_setting("storage_backend"),
+        "lakebase_instance_name": settings.lakebase_instance or overrides.get("lakebase_instance_name"),
+        "lakebase_catalog": settings.lakebase_catalog or overrides.get("lakebase_catalog"),
+        "lakebase_schema": settings.lakebase_schema or overrides.get("lakebase_schema"),
+        "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
+        "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
+        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token")),
+    }
+
+
+@router.put("/config")
+async def put_config(body: UIConfigUpdate):
+    """Update server configuration. Used by Settings UI and external API."""
+    batch = {}
+    updated = {}
+    for field, value in body.model_dump(exclude_none=True).items():
+        if field == "cache_ttl_seconds":
+            batch["cache_ttl_hours"] = value / 3600
+            updated["cache_ttl_seconds"] = value
+        elif field == "user_pat":
+            batch["lakebase_service_token"] = value
+            updated["lakebase_service_token"] = "***"
+        elif field == "lakebase_service_token":
+            batch[field] = value
+            updated[field] = "***"
+        else:
+            batch[field] = value
+            updated[field] = value
+
+    if not updated:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+
+    update_overrides(batch)
+    logger.info("Config updated via UI: %s", updated)
+    return {"updated": updated, "message": "Configuration updated successfully"}
+
+

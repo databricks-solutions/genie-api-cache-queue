@@ -26,45 +26,22 @@ async def initialize_storage():
 
     if settings.storage_backend == "pgvector":
         from app.services.storage_pgvector import PGVectorStorageService
-        from urllib.parse import quote_plus
 
-        conn_string = settings.postgres_connection_string
-
-        if settings.lakebase_instance and settings.databricks_token and settings.databricks_host:
-            try:
-                import httpx
-                import uuid as _uuid
-
-                logger.info("Generating OAuth token for Lakebase via REST API...")
-                # Use REST API directly — works with both SP tokens and PATs,
-                # and doesn't depend on Provisioned vs Autoscaling Lakebase
-                import asyncio
-                async def _generate_token():
-                    async with httpx.AsyncClient() as http_client:
-                        cred_url = f"{settings.databricks_host.rstrip('/')}/api/2.0/database/credentials/generate"
-                        response = await http_client.post(
-                            cred_url,
-                            headers={"Authorization": f"Bearer {settings.databricks_token}"},
-                            json={"request_id": str(_uuid.uuid4())}
-                        )
-                        response.raise_for_status()
-                        return response.json()
-
-                cred_data = await _generate_token()
-                oauth_token = cred_data.get("token")
-                conn_string = (
-                    f"postgresql://{quote_plus(settings.postgres_user)}:{quote_plus(oauth_token)}"
-                    f"@{settings.lakebase_instance}:{settings.postgres_port}/databricks_postgres"
-                    f"?sslmode={settings.postgres_sslmode}"
-                )
-                logger.info("OAuth token generated for default Lakebase backend")
-            except Exception as e:
-                logger.warning("OAuth token generation failed: %s, using connection string as-is", e)
+        # Use PAT if available, otherwise SP token (Databricks Apps)
+        token = settings.databricks_token
+        if not token:
+            from app.auth import get_service_principal_token
+            token = get_service_principal_token()
+            if token:
+                logger.info("Using Service Principal token for Lakebase initialization")
 
         default_backend = PGVectorStorageService(
-            connection_string=conn_string,
+            connection_string=settings.postgres_connection_string,
             table_name=settings.full_table_name,
-            cache_ttl_hours=settings.cache_ttl_hours
+            cache_ttl_hours=settings.cache_ttl_hours,
+            databricks_pat=token,
+            databricks_host=settings.databricks_host,
+            lakebase_instance_name=settings.lakebase_instance,
         )
         await default_backend.initialize()
 

@@ -1,5 +1,23 @@
 import { useState, useEffect } from 'react';
 import { Settings as SettingsIcon, Save, Eye, EyeOff } from 'lucide-react';
+import { api } from '../services/api';
+
+// Convert seconds to best-fit value + unit
+const secondsToTtl = (seconds) => {
+  if (!seconds || seconds === 0) return { value: '0', unit: 'hours' };
+  if (seconds >= 86400 && seconds % 86400 === 0) return { value: String(seconds / 86400), unit: 'days' };
+  if (seconds >= 3600 && seconds % 3600 === 0) return { value: String(seconds / 3600), unit: 'hours' };
+  return { value: String(seconds / 60), unit: 'minutes' };
+};
+
+// Convert value + unit to seconds
+const ttlToSeconds = (value, unit) => {
+  const v = parseFloat(value) || 0;
+  if (v === 0) return 0;
+  if (unit === 'minutes') return Math.round(v * 60);
+  if (unit === 'days') return Math.round(v * 86400);
+  return Math.round(v * 3600);
+};
 
 const Settings = () => {
   const [config, setConfig] = useState({
@@ -22,20 +40,53 @@ const Settings = () => {
     query_log_table_name: 'query_logs',
   });
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [showUserPat, setShowUserPat] = useState(false);
 
   useEffect(() => {
-    const savedConfig = localStorage.getItem('databricks_config');
-    if (savedConfig) {
-      const parsed = JSON.parse(savedConfig);
-      // Migrate from old cache_ttl_hours format
-      if (parsed.cache_ttl_hours && !parsed.cache_ttl_value) {
-        parsed.cache_ttl_value = parsed.cache_ttl_hours;
-        parsed.cache_ttl_unit = 'hours';
-        delete parsed.cache_ttl_hours;
+    // Load from server (source of truth), merge with localStorage for client-only fields
+    const loadConfig = async () => {
+      const local = localStorage.getItem('databricks_config');
+      const localParsed = local ? JSON.parse(local) : {};
+
+      try {
+        const server = await api.getServerConfig();
+        const ttl = secondsToTtl(server.cache_ttl_seconds);
+
+        setConfig(prev => ({
+          ...prev,
+          // Server fields (source of truth)
+          genie_space_id: server.genie_space_id || '',
+          sql_warehouse_id: server.sql_warehouse_id || '',
+          similarity_threshold: String(server.similarity_threshold || 0.92),
+          max_queries_per_minute: String(server.max_queries_per_minute || 5),
+          cache_ttl_value: ttl.value,
+          cache_ttl_unit: ttl.unit,
+          shared_cache: server.shared_cache ?? true,
+          embedding_provider: server.embedding_provider || 'databricks',
+          databricks_embedding_endpoint: server.databricks_embedding_endpoint || 'databricks-bge-large-en',
+          storage_backend: server.storage_backend === 'pgvector' ? 'lakebase' : (server.storage_backend || 'local'),
+          lakebase_instance_name: server.lakebase_instance_name || '',
+          lakebase_catalog: server.lakebase_catalog || '',
+          lakebase_schema: server.lakebase_schema || 'public',
+          cache_table_name: server.cache_table_name || 'cached_queries',
+          query_log_table_name: server.query_log_table_name || 'query_logs',
+          // Client-only fields (from localStorage)
+          auth_mode: localParsed.auth_mode || 'app',
+          user_pat: localParsed.user_pat || '',
+        }));
+      } catch {
+        // Server unreachable — fall back to localStorage
+        if (localParsed.genie_space_id) {
+          if (localParsed.cache_ttl_hours && !localParsed.cache_ttl_value) {
+            localParsed.cache_ttl_value = localParsed.cache_ttl_hours;
+            localParsed.cache_ttl_unit = 'hours';
+          }
+          setConfig(prev => ({ ...prev, ...localParsed }));
+        }
       }
-      setConfig(parsed);
-    }
+    };
+    loadConfig();
   }, []);
 
   const handleChange = (e) => {
@@ -44,14 +95,38 @@ const Settings = () => {
     setSaved(false);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      // Save shared fields to server
+      await api.updateServerConfig({
+        lakebase_service_token: config.user_pat || undefined,
+        genie_space_id: config.genie_space_id || undefined,
+        sql_warehouse_id: config.sql_warehouse_id || undefined,
+        similarity_threshold: parseFloat(config.similarity_threshold) || undefined,
+        max_queries_per_minute: parseInt(config.max_queries_per_minute) || undefined,
+        cache_ttl_seconds: ttlToSeconds(config.cache_ttl_value, config.cache_ttl_unit),
+        shared_cache: config.shared_cache,
+        embedding_provider: config.embedding_provider || undefined,
+        databricks_embedding_endpoint: config.databricks_embedding_endpoint || undefined,
+        storage_backend: config.storage_backend || undefined,
+        lakebase_instance_name: config.lakebase_instance_name || undefined,
+        lakebase_catalog: config.lakebase_catalog || undefined,
+        lakebase_schema: config.lakebase_schema || undefined,
+        cache_table_name: config.cache_table_name || undefined,
+        query_log_table_name: config.query_log_table_name || undefined,
+      });
+    } catch (e) {
+      console.warn('Failed to save to server, saving locally only:', e);
+    }
+    // Always save to localStorage (cache + client-only fields)
     localStorage.setItem('databricks_config', JSON.stringify(config));
+    setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   };
 
   const isConfigured = config.genie_space_id && config.sql_warehouse_id &&
-    (config.auth_mode === 'app' || (config.auth_mode === 'user' && config.user_pat)) &&
     (config.storage_backend === 'local' ||
      (config.storage_backend === 'lakebase' && config.lakebase_instance_name && config.user_pat));
 
@@ -148,44 +223,7 @@ const Settings = () => {
               </p>
             </div>
 
-            {/* User PAT Field */}
-            {config.auth_mode === 'user' && (
-              <div className="mt-4 p-4 rounded-lg border bg-gray-200 border-gray-300">
-                <label className="block text-sm font-medium mb-2 text-gray-900">
-                  Personal Access Token *
-                </label>
-                <div className="relative">
-                  <input
-                    type={showUserPat ? 'text' : 'password'}
-                    name="user_pat"
-                    value={config.user_pat}
-                    onChange={handleChange}
-                    placeholder="dapi..."
-                    required
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg pr-10 focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowUserPat(!showUserPat)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 hover:opacity-70 text-gray-500"
-                  >
-                    {showUserPat ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                  </button>
-                </div>
-                <p className="text-xs mt-2 text-gray-900">
-                  <strong>Required:</strong> Your Personal Access Token is used for all API calls (Genie, SQL Warehouse, Embeddings) to respect your data permissions and provide full API access.
-                  <br />
-                  <a
-                    href="https://docs.databricks.com/en/dev-tools/auth/pat.html"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-db-lava hover:underline inline-flex items-center gap-1 mt-1"
-                  >
-                    Learn how to generate a PAT →
-                  </a>
-                </p>
-              </div>
-            )}
+
 
           {/* Databricks Resources */}
           <div className="space-y-4 pt-4 border-t">
@@ -200,7 +238,7 @@ const Settings = () => {
                 name="genie_space_id"
                 value={config.genie_space_id}
                 onChange={handleChange}
-                placeholder="01f0f168..."
+                placeholder="Enter your Genie Space ID"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
               />
               <p className="text-xs mt-1 text-gray-500">Your Genie space identifier</p>
@@ -215,7 +253,7 @@ const Settings = () => {
                 name="sql_warehouse_id"
                 value={config.sql_warehouse_id}
                 onChange={handleChange}
-                placeholder="4b9b953939869799"
+                placeholder="Enter your SQL Warehouse ID"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
               />
               <p className="text-xs mt-1 text-gray-500">SQL warehouse for query execution</p>
@@ -402,16 +440,41 @@ const Settings = () => {
               <>
                 <div className="rounded-lg p-4 mb-4 border bg-gray-200 border-gray-300">
                   <p className="text-sm text-gray-900">
-                    <strong>Authentication:</strong> Lakebase uses your <strong>Databricks PAT</strong> from User Auth mode above.
-                    {!config.user_pat && (
-                      <span className="block mt-2 font-semibold text-db-lava">
-                        Please select User Auth and enter your PAT to use Lakebase.
-                      </span>
-                    )}
+                    <strong>Lakebase Service Token:</strong> A Service Principal or PAT token used exclusively for Lakebase cache operations.
+                    This token is NOT used for Genie API calls — callers authenticate with their own OAuth token.
                   </p>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Lakebase Service Token */}
+                  <div className="md:col-span-2">
+                    <label className="block text-sm font-medium mb-1 text-gray-500">
+                      Lakebase Service Token <span className="text-db-lava">*</span>
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showUserPat ? 'text' : 'password'}
+                        name="user_pat"
+                        value={config.user_pat}
+                        onChange={handleChange}
+                        placeholder="dapi... (PAT) or client_id:client_secret (SP)"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg pr-10 focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowUserPat(!showUserPat)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 hover:opacity-70 text-gray-500"
+                      >
+                        {showUserPat ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                    <p className="text-xs mt-1 text-gray-500">
+                      Formats: <strong>PAT</strong> (<code className="bg-gray-100 px-1 rounded">dapi...</code>) or <strong>Service Principal</strong> (<code className="bg-gray-100 px-1 rounded">client_id:client_secret</code>).
+                      The SP must have CAN_MANAGE on the Lakebase project.
+                      Also configurable via <code className="bg-gray-100 px-1 rounded">PUT /api/config</code> with field <code className="bg-gray-100 px-1 rounded">lakebase_service_token</code>.
+                    </p>
+                  </div>
+
                   <div className="md:col-span-2">
                     <label className="block text-sm font-medium mb-1 text-gray-500">
                       Lakebase Instance Name <span className="text-db-lava">*</span>
@@ -504,11 +567,11 @@ const Settings = () => {
           <div className="flex items-center gap-3 pt-4">
             <button
               onClick={handleSave}
-              disabled={!config.genie_space_id || !config.sql_warehouse_id}
+              disabled={!config.genie_space_id || !config.sql_warehouse_id || saving}
               className="flex items-center gap-2 px-6 py-2 rounded-lg font-medium text-white bg-gray-900 disabled:bg-gray-300 disabled:text-gray-400 disabled:cursor-not-allowed"
             >
               <Save className="w-4 h-4" />
-              Save Configuration
+              {saving ? 'Saving...' : 'Save Configuration'}
             </button>
 
             {saved && (
@@ -524,11 +587,10 @@ const Settings = () => {
               How It Works
             </p>
             <ul className="text-xs space-y-1 text-gray-500">
-              <li>- <strong>App Auth:</strong> Uses service principal from environment variables (DATABRICKS_CLIENT_ID/SECRET)</li>
-              <li>- <strong>User Auth:</strong> Uses your personal token from request headers (X-Forwarded-Access-Token)</li>
+              <li>- <strong>Genie API:</strong> Uses caller's OAuth token (from Databricks Apps proxy or Authorization header)</li>
+              <li>- <strong>Lakebase Cache:</strong> Uses the Service Token configured above (SP or PAT with Lakebase access)</li>
               <li>- <strong>Host:</strong> Automatically detected from DATABRICKS_HOST environment variable</li>
-              <li>- <strong>Cache Freshness:</strong> Controls how long cached results are considered valid for matching (0 = unlimited)</li>
-              <li>- <strong>Configuration:</strong> Saved in browser localStorage for convenience</li>
+              <li>- <strong>Configuration:</strong> Synced with server — changes here apply to both UI and Clone API</li>
             </ul>
           </div>
 
