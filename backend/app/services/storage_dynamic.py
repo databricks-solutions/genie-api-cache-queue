@@ -67,12 +67,20 @@ class DynamicStorageService:
         ttl = runtime_settings.cache_ttl_hours if hasattr(runtime_settings, 'cache_ttl_hours') else 24
 
         from app.config import get_settings
+        from app.api.config_store import get_effective_setting
         _s = get_settings()
+
+        # Lakebase service token: always prefer the server-configured SP token.
+        # This ensures Lakebase uses the SP regardless of caller's OAuth token.
         effective_token = (
+            get_effective_setting("lakebase_service_token") or
             (runtime_settings.runtime.user_pat if runtime_settings.runtime else None) or
-            _s.databricks_token or
-            getattr(runtime_settings, 'user_token', None)
+            _s.databricks_token
         )
+        logger.info("Lakebase token source: %s",
+                     "server_config" if get_effective_setting("lakebase_service_token")
+                     else "runtime_pat" if (runtime_settings.runtime and runtime_settings.runtime.user_pat)
+                     else "env_token")
 
         backend = PGVectorStorageService(
             connection_string=runtime_settings.postgres_connection_string,
