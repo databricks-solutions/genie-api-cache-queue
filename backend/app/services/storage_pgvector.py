@@ -4,7 +4,6 @@ Uses pgvector extension for fast cosine similarity operations.
 """
 
 import logging
-import functools
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timezone
 import numpy as np
@@ -38,26 +37,6 @@ def _ensure_imports():
                 "PGVector dependencies not installed. "
                 "Run: pip install asyncpg==0.29.0 pgvector==0.2.4 psycopg2-binary==2.9.9"
             ) from e
-
-
-def _retry_on_connection_error(method):
-    """Retry once on connection errors, resetting the pool before the second attempt."""
-    @functools.wraps(method)
-    async def wrapper(self, *args, **kwargs):
-        try:
-            return await method(self, *args, **kwargs)
-        except Exception as e:
-            err = str(e).lower()
-            is_conn_error = any(k in err for k in (
-                "connection", "closed", "reset", "broken pipe", "eof",
-                "ssl", "timeout", "pool is closed", "terminating",
-            ))
-            if not is_conn_error:
-                raise
-            logger.warning("Connection error in %s: %s — reconnecting", method.__name__, e)
-            await self._reset_pool()
-            return await method(self, *args, **kwargs)
-    return wrapper
 
 
 class PGVectorStorageService:
@@ -154,17 +133,11 @@ class PGVectorStorageService:
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl_module.CERT_NONE
 
-        async def _init_connection(conn):
-            """Validate connection is alive when acquired from pool."""
-            await register_vector(conn)
-
         self.pool = await asyncpg.create_pool(
             connection_string,
-            min_size=1,
+            min_size=2,
             max_size=10,
             command_timeout=60,
-            max_inactive_connection_lifetime=120,
-            init=_init_connection,
             ssl=ssl_context
         )
 
@@ -172,6 +145,7 @@ class PGVectorStorageService:
 
         async with self.pool.acquire() as conn:
             await self._ensure_extension(conn)
+            await register_vector(conn)
             await self._ensure_table(conn)
             await self._ensure_query_log_table(conn)
 
@@ -366,7 +340,6 @@ class PGVectorStorageService:
 
         logger.info("Query log table '%s' initialized", self.query_log_table_name)
 
-    @_retry_on_connection_error
     async def search_similar_query(
         self,
         query_embedding: List[float],
@@ -391,6 +364,8 @@ class PGVectorStorageService:
         embedding_array = np.array(query_embedding, dtype=np.float32)
 
         async with self.pool.acquire() as conn:
+            await register_vector(conn)
+
             # Build query with optional filters
             filters = []
             params = [embedding_array]
@@ -469,7 +444,6 @@ class PGVectorStorageService:
             WHERE id = $1
         """, cache_id)
 
-    @_retry_on_connection_error
     async def save_query_cache(
         self,
         query_text: str,
@@ -485,6 +459,8 @@ class PGVectorStorageService:
         embedding_array = np.array(query_embedding, dtype=np.float32)
 
         async with self.pool.acquire() as conn:
+            await register_vector(conn)
+
             row = await conn.fetchrow(f"""
                 INSERT INTO {self.table_name}
                 (query_text, query_embedding, sql_query, identity, genie_space_id,
@@ -497,7 +473,6 @@ class PGVectorStorageService:
             logger.info("Saved to cache id=%d", cache_id)
             return cache_id
 
-    @_retry_on_connection_error
     async def get_all_cached_queries(
         self,
         identity: Optional[str] = None,
@@ -552,7 +527,6 @@ class PGVectorStorageService:
                 for row in rows
             ]
 
-    @_retry_on_connection_error
     async def get_cache_stats(self) -> Dict:
         """Get statistics about the cache"""
         if not self.pool:
@@ -578,18 +552,6 @@ class PGVectorStorageService:
             await self.pool.close()
             logger.info("PGVector connection pool closed")
 
-    async def _reset_pool(self):
-        """Close stale pool and re-initialize from scratch."""
-        logger.info("Resetting connection pool")
-        try:
-            if self.pool:
-                await self.pool.close()
-        except Exception:
-            pass
-        self.pool = None
-        await self.initialize()
-
-    @_retry_on_connection_error
     async def save_query_log(
         self,
         query_id: str,
@@ -620,7 +582,6 @@ class PGVectorStorageService:
 
             return row['id']
 
-    @_retry_on_connection_error
     async def get_query_logs(
         self,
         identity: Optional[str] = None,
