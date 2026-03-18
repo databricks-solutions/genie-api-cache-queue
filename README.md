@@ -121,8 +121,9 @@ GRANT ALL ON ALL TABLES IN SCHEMA public TO "<sp-client-id>";
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "<sp-client-id>";
 ```
 
-> **Important:** Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication.
-> See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
+> **Important:**
+> - Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication. See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
+> - **Do not create the cache tables manually.** Let the app create them on first use — this ensures the SP owns the tables and can manage indexes. If tables were already created by a human user, drop them first (`DROP TABLE IF EXISTS public.cached_queries CASCADE; DROP TABLE IF EXISTS public.query_logs CASCADE;`) so the SP recreates them as owner.
 
 ### 4. Configure in Settings
 
