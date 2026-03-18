@@ -28,7 +28,7 @@ const withConfig = (data = {}) => {
       ...data,
       config: {
         auth_mode: config.auth_mode || 'app',
-        user_pat: config.user_pat || undefined,
+        user_pat: (config.user_pat && config.user_pat !== '••••••••') ? config.user_pat : undefined,
         storage_backend: config.storage_backend || 'local',
         genie_space_id: config.genie_space_id,
         sql_warehouse_id: config.sql_warehouse_id,

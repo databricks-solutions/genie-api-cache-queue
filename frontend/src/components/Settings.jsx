@@ -73,7 +73,9 @@ const Settings = () => {
           query_log_table_name: server.query_log_table_name || 'query_logs',
           // Client-only fields (from localStorage)
           auth_mode: localParsed.auth_mode || 'app',
-          user_pat: localParsed.user_pat || '',
+          // Show token from localStorage if available, otherwise indicate server has it
+          user_pat: localParsed.user_pat || (server.lakebase_service_token_set ? '••••••••' : ''),
+          _server_token_set: server.lakebase_service_token_set || false,
         }));
       } catch {
         // Server unreachable — fall back to localStorage
@@ -100,7 +102,8 @@ const Settings = () => {
     try {
       // Save shared fields to server
       await api.updateServerConfig({
-        lakebase_service_token: config.user_pat || undefined,
+        // Only send token if user entered a real value (not the placeholder)
+        lakebase_service_token: (config.user_pat && config.user_pat !== '••••••••') ? config.user_pat : undefined,
         genie_space_id: config.genie_space_id || undefined,
         sql_warehouse_id: config.sql_warehouse_id || undefined,
         similarity_threshold: parseFloat(config.similarity_threshold) || undefined,
@@ -126,9 +129,10 @@ const Settings = () => {
     setTimeout(() => setSaved(false), 3000);
   };
 
+  const hasLakebaseToken = config.user_pat || config._server_token_set;
   const isConfigured = config.genie_space_id && config.sql_warehouse_id &&
     (config.storage_backend === 'local' ||
-     (config.storage_backend === 'lakebase' && config.lakebase_instance_name && config.user_pat));
+     (config.storage_backend === 'lakebase' && config.lakebase_instance_name && hasLakebaseToken));
 
   return (
     <div className="max-w-4xl mx-auto">
