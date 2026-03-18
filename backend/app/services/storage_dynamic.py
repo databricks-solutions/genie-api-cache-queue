@@ -14,18 +14,6 @@ from typing import Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Errors that indicate the pool is broken and needs full recreation
-_CONNECTION_ERROR_KEYWORDS = (
-    "connection", "closed", "reset", "broken pipe", "eof",
-    "ssl", "pool is closed", "terminating", "not initialized",
-    "password authentication failed", "invalid_client",
-)
-
-
-def _is_pool_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return any(k in msg for k in _CONNECTION_ERROR_KEYWORDS)
-
 
 class DynamicStorageService:
     """
@@ -197,13 +185,16 @@ class DynamicStorageService:
         return self.default_backend
 
     async def _with_reconnect(self, operation, runtime_settings):
-        """Run operation. On pool/connection error, invalidate backend and retry once."""
+        """Run operation. On any Lakebase error, invalidate backend and retry once.
+        Safe: only retries once, only for PGVector backends, and creates a fresh pool."""
         try:
             return await operation()
-        except Exception as e:
-            if not _is_pool_error(e):
+        except Exception as first_err:
+            cache_key = self._get_cache_key(runtime_settings)
+            if cache_key not in self._pgvector_backends:
                 raise
-            logger.warning("Pool error (%s) — invalidating backend and retrying", e)
+            logger.warning("Lakebase error: %s (%s) — reconnecting",
+                          type(first_err).__name__, first_err)
             await self._invalidate_backend(runtime_settings)
             return await operation()
 
