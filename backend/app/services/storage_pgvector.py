@@ -200,9 +200,15 @@ class PGVectorStorageService:
     def _get_lakebase_sdk_client(self):
         """Create a Databricks SDK WorkspaceClient for Lakebase operations.
 
-        Inside Databricks Apps, uses the app's built-in SP (auto-detected from
-        DATABRICKS_CLIENT_ID/SECRET env vars). For local dev, uses the
-        lakebase_service_token from Settings (PAT or SP credentials).
+        Inside Databricks Apps: uses the app's built-in SP, auto-detected from
+        DATABRICKS_CLIENT_ID/SECRET env vars. The caller's proxy token
+        (X-Forwarded-Access-Token) is NOT used for Lakebase.
+
+        Local development: uses the lakebase_service_token from Settings
+        (either SP client_id:client_secret or PAT).
+
+        The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
+        role created via databricks_create_role().
         """
         from databricks.sdk import WorkspaceClient
         from databricks.sdk.core import Config

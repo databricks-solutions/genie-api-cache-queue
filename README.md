@@ -85,14 +85,11 @@ r = requests.post(f"{BASE}/api/2.0/genie/spaces/{SPACE}/start-conversation",
 
 For production use, Lakebase provides persistent vector-based caching with pgvector.
 
-### 1. Create a Service Principal
+Inside Databricks Apps, the app automatically uses its **built-in Service Principal** (injected as `DATABRICKS_CLIENT_ID`/`SECRET`). You only need to grant this SP access to your Lakebase project — no manual credential configuration required.
 
-In **Workspace Settings > Identity and access > Service principals**:
-- Add a new SP (e.g., "genie-cache")
-- Go to the **Secrets** tab and generate an OAuth secret
-- Note the `client_id` and `client_secret`
+### 1. Grant the App's SP Access to Lakebase
 
-### 2. Grant SP Access to Lakebase
+Find the app's SP name in **Workspace Settings > Compute > Apps > your app > Service Principal**, then grant it CAN_MANAGE:
 
 ```python
 from databricks.sdk import WorkspaceClient
@@ -102,46 +99,40 @@ w = WorkspaceClient()
 w.permissions.update('database-projects', '<project-name>',
     access_control_list=[
         AccessControlRequest(
-            service_principal_name='<sp-display-name>',
+            service_principal_name='<app-sp-display-name>',
             permission_level=PermissionLevel.CAN_MANAGE
         )
     ])
 ```
 
-### 3. Create the SP's PostgreSQL Role
+### 2. Create the SP's PostgreSQL Role
 
-Connect to Lakebase as a human user and run:
+Connect to Lakebase as a human user and run (replace `<app-sp-client-id>` with the app's SP client ID):
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS databricks_auth;
-SELECT databricks_create_role('<sp-client-id>', 'SERVICE_PRINCIPAL');
+SELECT databricks_create_role('<app-sp-client-id>', 'SERVICE_PRINCIPAL');
 
-GRANT ALL ON SCHEMA public TO "<sp-client-id>";
-GRANT ALL ON ALL TABLES IN SCHEMA public TO "<sp-client-id>";
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "<sp-client-id>";
+GRANT ALL ON SCHEMA public TO "<app-sp-client-id>";
+GRANT ALL ON ALL TABLES IN SCHEMA public TO "<app-sp-client-id>";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "<app-sp-client-id>";
 ```
 
 > **Important:**
 > - Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication. See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
-> - **Do not create the cache tables manually.** Let the app create them on first use — this ensures the SP owns the tables and can manage indexes. If tables were already created by a human user, drop them first (`DROP TABLE IF EXISTS public.cached_queries CASCADE; DROP TABLE IF EXISTS public.query_logs CASCADE;`) so the SP recreates them as owner.
+> - **Do not create the cache tables manually.** Let the app create them on first use — this ensures the SP owns the tables and can manage indexes. If tables were already created by a different user, drop them first so the app's SP recreates them as owner.
 
-### 4. Configure in Settings
+### 3. Configure in Settings
 
-Set the **Lakebase Service Token** to `<client_id>:<client_secret>` and the **Instance Name** to your project name.
+Set the **Storage Backend** to `Lakebase`, the **Instance Name** to your project name, and the **Lakebase Service Token** to the app SP's `<client_id>:<client_secret>`.
 
-Or via API:
+> **Note:** Inside Databricks Apps, the actual Lakebase connection uses the app's built-in SP (auto-detected). The Lakebase Service Token in Settings is used as a fallback for local development only.
 
-```bash
-curl -X PUT https://<app-url>/api/config \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "lakebase_service_token": "<client_id>:<client_secret>",
-    "storage_backend": "lakebase",
-    "lakebase_instance_name": "<project-name>",
-    "lakebase_schema": "public"
-  }'
-```
+### Local Development
+
+For local development (outside Databricks Apps), the app cannot auto-detect SP credentials. Configure the Lakebase Service Token in Settings or `.env` with either:
+- **Service Principal:** `<client_id>:<client_secret>` (recommended)
+- **PAT:** `dapi...` (simpler, for development)
 
 ## Authentication
 
@@ -150,9 +141,9 @@ curl -X PUT https://<app-url>/api/config \
 | Genie API | Caller's OAuth | `X-Forwarded-Access-Token` (browser) or `Authorization: Bearer` (API) |
 | SQL Warehouse | Caller's OAuth | Same |
 | Embeddings | Caller's OAuth | Same |
-| **Lakebase cache** | **Service Principal OAuth** | `lakebase_service_token` in config |
+| **Lakebase cache** | **App's built-in SP** | Auto-detected from `DATABRICKS_CLIENT_ID`/`SECRET` |
 
-**Callers don't need Lakebase access.** The SP handles all cache operations.
+**Callers don't need Lakebase access.** The app's SP handles all cache operations.
 
 ## Configuration Reference
 
@@ -163,7 +154,7 @@ All settings are configurable via the UI Settings tab or `PUT /api/config`:
 | `genie_space_id` | Genie Space ID | Required |
 | `sql_warehouse_id` | SQL Warehouse for query execution | Required |
 | `storage_backend` | `lakebase` or `local` | `local` |
-| `lakebase_service_token` | SP (`client_id:client_secret`) or PAT for cache | Required for Lakebase |
+| `lakebase_service_token` | SP credentials for local dev (auto-detected in Databricks Apps) | Local dev only |
 | `lakebase_instance_name` | Autoscaling project name or hostname | Required for Lakebase |
 | `similarity_threshold` | Cache match threshold (0–1) | 0.92 |
 | `max_queries_per_minute` | Rate limit per workspace | 5 |

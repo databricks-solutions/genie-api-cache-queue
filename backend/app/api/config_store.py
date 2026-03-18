@@ -3,7 +3,10 @@ Shared server configuration overrides.
 Both proxy_routes and genie_clone_routes read from here.
 Updated via PUT /api/config.
 
-Config is persisted to a JSON file so it survives app restarts and redeployments.
+Config is persisted to a JSON file for the lifetime of the app instance.
+In Databricks Apps, this persists within a running deployment but not across
+new deployments (fresh container = fresh /tmp). After a new deployment, the
+user must re-save Settings once to repopulate the server config.
 """
 
 import json
