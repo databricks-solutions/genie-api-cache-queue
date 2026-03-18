@@ -423,7 +423,7 @@ class PGVectorStorageService:
                 logger.info("Cache HIT id=%s similarity=%.3f query=%s", row['id'], row['similarity'], row['query_text'][:50])
                 return (row['id'], row['query_text'], row['sql_query'], float(row['similarity']))
 
-            # Debug: check what's in the table
+            # Log closest available match for diagnostics
             count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
             if count > 0:
                 best = await conn.fetchrow(f"""
