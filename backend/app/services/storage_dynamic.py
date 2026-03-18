@@ -96,15 +96,15 @@ class DynamicStorageService:
             from app.api.config_store import get_effective_setting
             _s = get_settings()
 
-            effective_token = (
-                get_effective_setting("lakebase_service_token") or
-                (runtime_settings.runtime.user_pat if runtime_settings.runtime else None) or
-                _s.databricks_token
-            )
-            logger.info("Lakebase token source: %s",
-                        "server_config" if get_effective_setting("lakebase_service_token")
-                        else "runtime_pat" if (runtime_settings.runtime and runtime_settings.runtime.user_pat)
-                        else "env_token")
+            # Lakebase connections MUST use the Service Principal token.
+            # No fallback to user PAT or env token — those users won't have Lakebase access.
+            sp_token = get_effective_setting("lakebase_service_token")
+            if not sp_token:
+                raise ValueError(
+                    "Lakebase requires a Service Principal token. "
+                    "Configure 'Lakebase Service Token' (client_id:client_secret) in Settings."
+                )
+            effective_token = sp_token
 
             backend = PGVectorStorageService(
                 connection_string=runtime_settings.postgres_connection_string,
@@ -164,22 +164,23 @@ class DynamicStorageService:
             logger.exception("Failed to refresh default backend")
 
     async def _resolve_backend(self, runtime_settings):
-        """Resolve which backend to use, initializing lazily if needed."""
+        """Resolve which backend to use, initializing lazily if needed.
+        When Lakebase is configured, it MUST use the SP token — no fallback to local."""
         if not runtime_settings:
             return self.default_backend
         if hasattr(runtime_settings, 'runtime') and runtime_settings.runtime:
             rt = runtime_settings.runtime
             if rt.storage_backend == 'lakebase':
-                has_token = (rt.user_pat or getattr(runtime_settings, 'user_token', None))
-                if rt.lakebase_instance_name and has_token:
-                    return await self._get_or_create_pgvector_backend(runtime_settings)
-                if hasattr(self.default_backend, 'pool'):
-                    return self.default_backend
-                raise ValueError(
-                    f"Lakebase configured but cannot connect: "
-                    f"instance={'set' if rt.lakebase_instance_name else 'MISSING'}, "
-                    f"token={'set' if has_token else 'MISSING'}"
-                )
+                from app.api.config_store import get_effective_setting
+                sp_token = get_effective_setting("lakebase_service_token")
+                if not rt.lakebase_instance_name:
+                    raise ValueError("Lakebase requires 'Lakebase Instance Name' in Settings.")
+                if not sp_token:
+                    raise ValueError(
+                        "Lakebase requires a Service Principal token. "
+                        "Configure 'Lakebase Service Token' (client_id:client_secret) in Settings."
+                    )
+                return await self._get_or_create_pgvector_backend(runtime_settings)
             if rt.storage_backend == 'local':
                 return self.default_backend
         return self.default_backend
