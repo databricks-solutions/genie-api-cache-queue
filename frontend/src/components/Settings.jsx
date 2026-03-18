@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Save, Eye, EyeOff } from 'lucide-react';
+import { Settings as SettingsIcon, Save, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { api } from '../services/api';
 
 // Convert seconds to best-fit value + unit
@@ -591,10 +591,38 @@ const Settings = () => {
             </p>
             <ul className="text-xs space-y-1 text-gray-500">
               <li>- <strong>Genie API:</strong> Uses caller's OAuth token (from Databricks Apps proxy or Authorization header)</li>
-              <li>- <strong>Lakebase Cache:</strong> Uses the Service Token configured above (SP or PAT with Lakebase access)</li>
+              <li>- <strong>Lakebase Cache:</strong> Uses the app's built-in Service Principal (auto-detected)</li>
               <li>- <strong>Host:</strong> Automatically detected from DATABRICKS_HOST environment variable</li>
               <li>- <strong>Configuration:</strong> Synced with server — changes here apply to both UI and Clone API</li>
             </ul>
+          </div>
+
+          {/* Danger Zone */}
+          <div className="border-t border-red-200 pt-6">
+            <h3 className="text-lg font-medium text-db-lava mb-3">Danger Zone</h3>
+            <div className="p-4 rounded-lg border border-red-200 bg-red-50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-gray-900">Clear Cache</p>
+                  <p className="text-xs text-gray-500">Delete all cached queries from Lakebase. This cannot be undone.</p>
+                </div>
+                <button
+                  onClick={async () => {
+                    if (!window.confirm('Are you sure you want to delete ALL cached queries? This cannot be undone.')) return;
+                    try {
+                      const result = await api.clearCache();
+                      alert(result.message || 'Cache cleared');
+                    } catch (e) {
+                      alert('Failed to clear cache: ' + (e.response?.data?.detail || e.message));
+                    }
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Clear Cache
+                </button>
+              </div>
+            </div>
           </div>
 
         </div>

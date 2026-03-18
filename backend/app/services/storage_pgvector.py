@@ -551,6 +551,16 @@ class PGVectorStorageService:
 
             return dict(stats)
 
+    async def clear_cache(self):
+        """Delete all cached queries."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized.")
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
+            await conn.execute(f"DELETE FROM {self.table_name}")
+            logger.info("Cache cleared: %d entries deleted from %s", count, self.table_name)
+            return count
+
     async def close(self):
         """Close the connection pool"""
         if self.pool:

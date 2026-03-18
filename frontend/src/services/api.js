@@ -152,6 +152,11 @@ export const api = {
     return response.data;
   },
 
+  clearCache: async () => {
+    const response = await axios.delete(`${API_BASE_URL}/cache`);
+    return response.data;
+  },
+
   getConfig: getConfig,
   computeTtlHours: computeTtlHours,
 };

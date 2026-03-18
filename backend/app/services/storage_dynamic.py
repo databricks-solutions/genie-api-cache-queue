@@ -299,3 +299,12 @@ class DynamicStorageService:
         except Exception as e:
             logger.warning("get_query_logs failed: %s", e)
             return []
+
+    async def clear_cache(self, runtime_settings=None) -> int:
+        """Delete all cached queries."""
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'clear_cache'):
+                return await backend.clear_cache()
+            return 0
+        return await self._with_reconnect(_op, runtime_settings)

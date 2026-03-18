@@ -265,3 +265,17 @@ async def put_config(body: UIConfigUpdate):
     return {"updated": updated, "message": "Configuration updated successfully"}
 
 
+@router.delete("/cache")
+async def clear_cache(req: Request):
+    """Delete all cached queries from Lakebase."""
+    try:
+        user_token = req.headers.get('X-Forwarded-Access-Token')
+        user_email = req.headers.get('X-Forwarded-Email')
+        runtime_settings = RuntimeSettings(None, user_token, user_email)
+        count = await _db.db_service.clear_cache(runtime_settings)
+        return {"success": True, "deleted": count, "message": f"Cache cleared ({count} entries deleted)"}
+    except Exception as e:
+        logger.exception("Error clearing cache")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
