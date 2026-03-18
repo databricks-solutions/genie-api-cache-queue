@@ -274,7 +274,8 @@ class PGVectorStorageService:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
     async def _ensure_table(self, conn):
-        """Create the cached_queries table if it doesn't exist"""
+        """Create the cached_queries table and indexes.
+        Index creation is best-effort — skipped if the current role lacks ownership."""
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id SERIAL PRIMARY KEY,
@@ -290,28 +291,21 @@ class PGVectorStorageService:
         """)
 
         idx_base = self.table_name.replace('.', '_')
-
-        await conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx
-            ON {self.table_name}
-            USING ivfflat (query_embedding vector_cosine_ops)
-            WITH (lists = 100)
-        """)
-
-        await conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx
-            ON {self.table_name} (identity)
-        """)
-
-        await conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS {idx_base}_space_idx
-            ON {self.table_name} (genie_space_id)
-        """)
+        for idx_sql in [
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.table_name} USING ivfflat (query_embedding vector_cosine_ops) WITH (lists = 100)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx ON {self.table_name} (identity)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_space_idx ON {self.table_name} (genie_space_id)",
+        ]:
+            try:
+                await conn.execute(idx_sql)
+            except Exception as e:
+                logger.warning("Index creation skipped: %s", e)
 
         logger.info("PGVector table '%s' initialized", self.table_name)
 
     async def _ensure_query_log_table(self, conn):
-        """Create the query_logs table if it doesn't exist"""
+        """Create the query_logs table and indexes.
+        Index creation is best-effort — skipped if the current role lacks ownership."""
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.query_log_table_name} (
                 id SERIAL PRIMARY KEY,
@@ -327,16 +321,14 @@ class PGVectorStorageService:
         """)
 
         log_idx_base = self.query_log_table_name.replace('.', '_')
-
-        await conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS {log_idx_base}_identity_idx
-            ON {self.query_log_table_name} (identity)
-        """)
-
-        await conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS {log_idx_base}_created_idx
-            ON {self.query_log_table_name} (created_at DESC)
-        """)
+        for idx_sql in [
+            f"CREATE INDEX IF NOT EXISTS {log_idx_base}_identity_idx ON {self.query_log_table_name} (identity)",
+            f"CREATE INDEX IF NOT EXISTS {log_idx_base}_created_idx ON {self.query_log_table_name} (created_at DESC)",
+        ]:
+            try:
+                await conn.execute(idx_sql)
+            except Exception as e:
+                logger.warning("Index creation skipped: %s", e)
 
         logger.info("Query log table '%s' initialized", self.query_log_table_name)
 
