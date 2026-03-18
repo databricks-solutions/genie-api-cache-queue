@@ -1,11 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
-import { Send, X, Loader, CheckCircle, XCircle, Plus } from 'lucide-react';
+import { Send, X, Loader, CheckCircle, XCircle, Plus, ChevronDown } from 'lucide-react';
 
 const ChatInterface = ({ tabs, setTabs, activeTabId, setActiveTabId }) => {
   const [inputValue, setInputValue] = useState('');
+  const [spaceDropdownOpen, setSpaceDropdownOpen] = useState(false);
   const messagesEndRef = useRef(null);
   const activeTabMessages = tabs.find(t => t.id === activeTabId)?.messages;
+
+  const config = api.getConfig();
+  const genieSpaces = config.genie_spaces || [];
+  const activeSpaceId = api.getActiveSpaceId();
 
   useEffect(() => {
     if (messagesEndRef.current) {
@@ -84,10 +89,10 @@ const ChatInterface = ({ tabs, setTabs, activeTabId, setActiveTabId }) => {
         existingLogs.unshift(queryLog);
         localStorage.setItem('query_logs', JSON.stringify(existingLogs.slice(0, 100)));
 
-        const config = api.getConfig();
-        if (config.storage_backend === 'lakebase') {
+        const config_ = api.getConfig();
+        if (config_.storage_backend === 'lakebase') {
           api.saveQueryLog(
-            response.query_id, query, 'system', 'received', false, config.genie_space_id
+            response.query_id, query, 'system', 'received', false, api.getActiveSpaceId()
           ).catch(() => {});
         }
 
@@ -173,7 +178,7 @@ const ChatInterface = ({ tabs, setTabs, activeTabId, setActiveTabId }) => {
       const config = api.getConfig();
       if (config.storage_backend === 'lakebase') {
         api.saveQueryLog(
-          response.query_id, query, 'system', 'received', false, config.genie_space_id
+          response.query_id, query, 'system', 'received', false, api.getActiveSpaceId()
         ).catch(() => {});
       }
 
@@ -225,11 +230,11 @@ const ChatInterface = ({ tabs, setTabs, activeTabId, setActiveTabId }) => {
           };
           localStorage.setItem('query_logs', JSON.stringify(existingLogs));
 
-          const config = api.getConfig();
-          if (config.storage_backend === 'lakebase') {
+          const config_ = api.getConfig();
+          if (config_.storage_backend === 'lakebase') {
             api.saveQueryLog(
               queryId, existingLogs[logIndex].query_text, existingLogs[logIndex].identity,
-              status.stage, status.from_cache || false, config.genie_space_id
+              status.stage, status.from_cache || false, api.getActiveSpaceId()
             ).catch(() => {});
           }
         }
@@ -331,6 +336,43 @@ const ChatInterface = ({ tabs, setTabs, activeTabId, setActiveTabId }) => {
 
   return (
     <div className="bg-white rounded-lg border border-gray-300 h-[calc(100vh-200px)] flex flex-col">
+      {/* Space Selector */}
+      {genieSpaces.length > 1 && (
+        <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-300">
+          <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Space</span>
+          <div className="relative">
+            <button
+              onClick={() => setSpaceDropdownOpen(!spaceDropdownOpen)}
+              className="flex items-center gap-2 px-3 py-1.5 bg-db-navy text-white text-sm rounded-lg hover:bg-db-navy/90 transition-colors"
+            >
+              <span className="truncate max-w-[200px]">
+                {api.getSpaceName(activeSpaceId)}
+              </span>
+              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${spaceDropdownOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {spaceDropdownOpen && (
+              <div className="absolute top-full left-0 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg z-50 min-w-[240px]">
+                {genieSpaces.map((space) => (
+                  <button
+                    key={space.id}
+                    onClick={() => {
+                      api.setActiveSpaceId(space.id);
+                      setSpaceDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-4 py-2.5 text-sm hover:bg-gray-100 first:rounded-t-lg last:rounded-b-lg transition-colors ${
+                      space.id === activeSpaceId ? 'bg-gray-100 font-medium' : ''
+                    }`}
+                  >
+                    <div className="font-medium text-gray-900">{space.name}</div>
+                    <div className="text-xs text-gray-400 font-mono">{space.id.substring(0, 12)}...</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex border-b border-gray-300 overflow-x-auto">
         {tabs.map((tab) => (

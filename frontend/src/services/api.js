@@ -11,12 +11,15 @@ const _syncServerConfig = async () => {
   try {
     const response = await axios.get(`${API_BASE_URL}/config`);
     const server = response.data;
-    if (server.genie_space_id) {
+    if (server.genie_space_id || (server.genie_spaces && server.genie_spaces.length > 0)) {
       const local = JSON.parse(localStorage.getItem('databricks_config') || '{}');
       const merged = {
         ...local,
         auth_mode: server.auth_mode || local.auth_mode || 'app',
         genie_space_id: server.genie_space_id || local.genie_space_id,
+        genie_spaces: (server.genie_spaces && server.genie_spaces.length > 0)
+          ? server.genie_spaces
+          : local.genie_spaces || [],
         sql_warehouse_id: server.sql_warehouse_id || local.sql_warehouse_id,
         similarity_threshold: String(server.similarity_threshold || local.similarity_threshold || 0.92),
         max_queries_per_minute: String(server.max_queries_per_minute || local.max_queries_per_minute || 5),
@@ -41,8 +44,33 @@ const getConfig = () => {
   return savedConfig ? JSON.parse(savedConfig) : {};
 };
 
+// --- Multi-space helpers ---
+
+const getActiveSpaceId = () => {
+  const config = getConfig();
+  const stored = localStorage.getItem('active_space_id');
+  const spaces = config.genie_spaces || [];
+  // If stored ID is still in the spaces list, use it
+  if (stored && spaces.some(s => s.id === stored)) return stored;
+  // Fallback: first space in list, or legacy single space
+  if (spaces.length > 0) return spaces[0].id;
+  return config.genie_space_id || '';
+};
+
+const setActiveSpaceId = (id) => {
+  localStorage.setItem('active_space_id', id);
+};
+
+const getSpaceName = (spaceId) => {
+  const config = getConfig();
+  const spaces = config.genie_spaces || [];
+  const found = spaces.find(s => s.id === spaceId);
+  return found ? found.name : spaceId ? spaceId.substring(0, 8) + '...' : 'Unknown';
+};
+
 const isConfigValid = (config) => {
-  return config.genie_space_id && config.sql_warehouse_id;
+  const hasSpaces = (config.genie_spaces && config.genie_spaces.length > 0) || config.genie_space_id;
+  return hasSpaces && config.sql_warehouse_id;
 };
 
 const computeTtlHours = (config) => {
@@ -58,13 +86,15 @@ const withConfig = (data = {}) => {
   const config = getConfig();
 
   if (isConfigValid(config)) {
+    // Use active space ID (from dropdown) as genie_space_id for this request
+    const activeSpaceId = getActiveSpaceId();
     return {
       ...data,
       config: {
         auth_mode: config.auth_mode || 'app',
         user_pat: (config.user_pat && config.user_pat !== '••••••••') ? config.user_pat : undefined,
         storage_backend: config.storage_backend || 'local',
-        genie_space_id: config.genie_space_id,
+        genie_space_id: activeSpaceId,
         sql_warehouse_id: config.sql_warehouse_id,
         similarity_threshold: parseFloat(config.similarity_threshold) || 0.92,
         max_queries_per_minute: parseInt(config.max_queries_per_minute) || 5,
@@ -152,11 +182,27 @@ export const api = {
     return response.data;
   },
 
-  clearCache: async () => {
-    const response = await axios.delete(`${API_BASE_URL}/cache`);
+  clearCache: async (spaceId = null) => {
+    const url = spaceId
+      ? `${API_BASE_URL}/cache?space_id=${encodeURIComponent(spaceId)}`
+      : `${API_BASE_URL}/cache`;
+    const response = await axios.delete(url);
+    return response.data;
+  },
+
+  getCacheCount: async () => {
+    const response = await axios.get(`${API_BASE_URL}/cache/count`);
+    return response.data;
+  },
+
+  fetchSpaceInfo: async (spaceId) => {
+    const response = await axios.get(`${API_BASE_URL}/space-info/${encodeURIComponent(spaceId)}`);
     return response.data;
   },
 
   getConfig: getConfig,
+  getActiveSpaceId: getActiveSpaceId,
+  setActiveSpaceId: setActiveSpaceId,
+  getSpaceName: getSpaceName,
   computeTtlHours: computeTtlHours,
 };

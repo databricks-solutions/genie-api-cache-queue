@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Save, Eye, EyeOff, Trash2 } from 'lucide-react';
+import { Settings as SettingsIcon, Save, Eye, EyeOff, Trash2, Plus, X } from 'lucide-react';
 import { api } from '../services/api';
 
 // Convert seconds to best-fit value + unit
@@ -20,6 +20,9 @@ const ttlToSeconds = (value, unit) => {
 };
 
 const Settings = () => {
+  const [genieSpaces, setGenieSpaces] = useState([]);  // [{id: '', name: ''}]
+  const [selectedClearSpaces, setSelectedClearSpaces] = useState([]);
+  const [cacheCounts, setCacheCounts] = useState(null); // {total, by_space}
   const [config, setConfig] = useState({
     auth_mode: 'app',
     user_pat: '',
@@ -56,6 +59,15 @@ const Settings = () => {
         const server = await api.getServerConfig();
         const ttl = secondsToTtl(server.cache_ttl_seconds);
 
+        // Load genie_spaces
+        const serverSpaces = server.genie_spaces || [];
+        if (serverSpaces.length > 0) {
+          setGenieSpaces(serverSpaces);
+        } else if (server.genie_space_id) {
+          // Backward compat: single space → list
+          setGenieSpaces([{ id: server.genie_space_id, name: 'Default' }]);
+        }
+
         setConfig(prev => ({
           ...prev,
           // Server fields (source of truth)
@@ -81,11 +93,12 @@ const Settings = () => {
         }));
       } catch {
         // Server unreachable — fall back to localStorage
-        if (localParsed.genie_space_id) {
+        if (localParsed.genie_space_id || (localParsed.genie_spaces && localParsed.genie_spaces.length > 0)) {
           if (localParsed.cache_ttl_hours && !localParsed.cache_ttl_value) {
             localParsed.cache_ttl_value = localParsed.cache_ttl_hours;
             localParsed.cache_ttl_unit = 'hours';
           }
+          if (localParsed.genie_spaces) setGenieSpaces(localParsed.genie_spaces);
           setConfig(prev => ({ ...prev, ...localParsed }));
         }
       }
@@ -103,10 +116,12 @@ const Settings = () => {
     setSaving(true);
     try {
       // Save all fields to server (global config)
+      const validSpaces = genieSpaces.filter(s => s.id.trim());
       await api.updateServerConfig({
         auth_mode: config.auth_mode || undefined,
         lakebase_service_token: (config.user_pat && config.user_pat !== '••••••••') ? config.user_pat : undefined,
-        genie_space_id: config.genie_space_id || undefined,
+        genie_space_id: validSpaces.length > 0 ? validSpaces[0].id : (config.genie_space_id || undefined),
+        genie_spaces: validSpaces.length > 0 ? validSpaces : undefined,
         sql_warehouse_id: config.sql_warehouse_id || undefined,
         similarity_threshold: parseFloat(config.similarity_threshold) || undefined,
         max_queries_per_minute: parseInt(config.max_queries_per_minute) || undefined,
@@ -125,14 +140,20 @@ const Settings = () => {
       console.warn('Failed to save to server, saving locally only:', e);
     }
     // Always save to localStorage (cache + client-only fields)
-    localStorage.setItem('databricks_config', JSON.stringify(config));
+    const validSpaces = genieSpaces.filter(s => s.id.trim());
+    localStorage.setItem('databricks_config', JSON.stringify({
+      ...config,
+      genie_spaces: validSpaces,
+      genie_space_id: validSpaces.length > 0 ? validSpaces[0].id : config.genie_space_id,
+    }));
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   };
 
   const hasLakebaseToken = config.user_pat || config._server_token_set;
-  const isConfigured = config.genie_space_id && config.sql_warehouse_id &&
+  const hasSpaces = genieSpaces.some(s => s.id.trim());
+  const isConfigured = hasSpaces && config.sql_warehouse_id &&
     (config.storage_backend === 'local' ||
      (config.storage_backend === 'lakebase' && config.lakebase_instance_name && hasLakebaseToken));
 
@@ -235,19 +256,80 @@ const Settings = () => {
           <div className="space-y-4 pt-4 border-t">
             <h3 className="text-lg font-medium text-gray-900">Databricks Resources</h3>
 
+            {/* Genie Spaces (dynamic list) */}
             <div>
-              <label className="block text-sm font-medium mb-1 text-gray-500">
-                Genie Space ID *
+              <label className="block text-sm font-medium mb-2 text-gray-500">
+                Genie Spaces *
               </label>
-              <input
-                type="text"
-                name="genie_space_id"
-                value={config.genie_space_id}
-                onChange={handleChange}
-                placeholder="Enter your Genie Space ID"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
-              />
-              <p className="text-xs mt-1 text-gray-500">Your Genie space identifier</p>
+              <div className="space-y-2">
+                {genieSpaces.map((space, idx) => (
+                  <div key={idx} className="flex gap-2 items-start">
+                    <div className="flex-1">
+                      <input
+                        type="text"
+                        value={space.id}
+                        onChange={(e) => {
+                          const updated = [...genieSpaces];
+                          updated[idx] = { ...updated[idx], id: e.target.value };
+                          setGenieSpaces(updated);
+                          setSaved(false);
+                        }}
+                        onBlur={async (e) => {
+                          const id = e.target.value.trim();
+                          if (!id || genieSpaces[idx]?.name) return;
+                          try {
+                            const resp = await api.fetchSpaceInfo(id);
+                            if (resp?.name) {
+                              const updated = [...genieSpaces];
+                              updated[idx] = { ...updated[idx], name: resp.name };
+                              setGenieSpaces(updated);
+                            }
+                          } catch { /* ignore — user can type name manually */ }
+                        }}
+                        placeholder="Space ID (e.g. 01f11f1ae001...)"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent text-sm font-mono"
+                      />
+                    </div>
+                    <div className="w-40">
+                      <input
+                        type="text"
+                        value={space.name}
+                        onChange={(e) => {
+                          const updated = [...genieSpaces];
+                          updated[idx] = { ...updated[idx], name: e.target.value };
+                          setGenieSpaces(updated);
+                          setSaved(false);
+                        }}
+                        placeholder="Display name"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent text-sm"
+                      />
+                    </div>
+                    {genieSpaces.length > 1 && (
+                      <button
+                        onClick={() => {
+                          setGenieSpaces(genieSpaces.filter((_, i) => i !== idx));
+                          setSaved(false);
+                        }}
+                        className="p-2 text-gray-400 hover:text-db-lava hover:bg-red-50 rounded-lg transition-colors"
+                        title="Remove space"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => {
+                  setGenieSpaces([...genieSpaces, { id: '', name: '' }]);
+                  setSaved(false);
+                }}
+                className="flex items-center gap-1.5 mt-2 px-3 py-1.5 text-sm text-db-navy hover:bg-gray-100 rounded-lg transition-colors border border-dashed border-gray-300"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Add Space
+              </button>
+              <p className="text-xs mt-1 text-gray-500">Add one or more Genie Spaces. Select the active space in the Chat tab.</p>
             </div>
 
             <div>
@@ -262,7 +344,7 @@ const Settings = () => {
                 placeholder="Enter your SQL Warehouse ID"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
               />
-              <p className="text-xs mt-1 text-gray-500">SQL warehouse for query execution</p>
+              <p className="text-xs mt-1 text-gray-500">SQL warehouse for query execution (shared across all spaces)</p>
             </div>
           </div>
 
@@ -573,7 +655,7 @@ const Settings = () => {
           <div className="flex items-center gap-3 pt-4">
             <button
               onClick={handleSave}
-              disabled={!config.genie_space_id || !config.sql_warehouse_id || saving}
+              disabled={!hasSpaces || !config.sql_warehouse_id || saving}
               className="flex items-center gap-2 px-6 py-2 rounded-lg font-medium text-white bg-gray-900 disabled:bg-gray-300 disabled:text-gray-400 disabled:cursor-not-allowed"
             >
               <Save className="w-4 h-4" />
@@ -607,10 +689,22 @@ const Settings = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-gray-900">Clear Cache</p>
-                  <p className="text-xs text-gray-500">Delete all cached queries from Lakebase. This cannot be undone.</p>
+                  <p className="text-xs text-gray-500">Delete cached queries from storage. This cannot be undone.</p>
                 </div>
                 <button
-                  onClick={() => setClearModal('confirm')}
+                  onClick={async () => {
+                    // Pre-select all spaces and fetch counts
+                    const validSpaces = genieSpaces.filter(s => s.id.trim());
+                    setSelectedClearSpaces(validSpaces.map(s => s.id));
+                    setCacheCounts(null);
+                    setClearModal('select');
+                    try {
+                      const counts = await api.getCacheCount();
+                      setCacheCounts(counts);
+                    } catch {
+                      setCacheCounts({ total: -1, by_space: {} });
+                    }
+                  }}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -624,51 +718,184 @@ const Settings = () => {
           {clearModal && (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
               <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
-                {clearModal === 'confirm' && (
-                  <>
-                    <div className="p-6">
-                      <div className="flex items-center gap-3 mb-4">
-                        <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
-                          <Trash2 className="w-5 h-5 text-db-lava" />
+
+                {/* Step 1: Select spaces */}
+                {clearModal === 'select' && (() => {
+                  const validSpaces = genieSpaces.filter(s => s.id.trim());
+                  const allSelected = selectedClearSpaces.length === validSpaces.length;
+                  const totalSelected = selectedClearSpaces.reduce((sum, id) => {
+                    return sum + (cacheCounts?.by_space?.[id] || 0);
+                  }, 0);
+                  const totalRecords = allSelected ? (cacheCounts?.total ?? totalSelected) : totalSelected;
+
+                  return (
+                    <>
+                      <div className="p-6">
+                        <div className="flex items-center gap-3 mb-4">
+                          <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                            <Trash2 className="w-5 h-5 text-db-lava" />
+                          </div>
+                          <h3 className="text-lg font-semibold text-gray-900">Clear Cached Queries</h3>
                         </div>
-                        <h3 className="text-lg font-semibold text-gray-900">Clear All Cached Queries</h3>
+
+                        <p className="text-sm text-gray-600 mb-3">Select which spaces to clear:</p>
+
+                        <div className="space-y-2 mb-4">
+                          {/* Select All */}
+                          {validSpaces.length > 1 && (
+                            <label className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer border-b border-gray-100 pb-3 mb-1">
+                              <input
+                                type="checkbox"
+                                checked={allSelected}
+                                onChange={() => {
+                                  setSelectedClearSpaces(allSelected ? [] : validSpaces.map(s => s.id));
+                                }}
+                                className="w-4 h-4 accent-db-lava rounded"
+                              />
+                              <span className="text-sm font-medium text-gray-900">Select All</span>
+                              {cacheCounts && cacheCounts.total >= 0 && (
+                                <span className="ml-auto text-xs text-gray-500">{cacheCounts.total} total</span>
+                              )}
+                            </label>
+                          )}
+
+                          {/* Per-space checkboxes */}
+                          {validSpaces.map((space) => {
+                            const count = cacheCounts?.by_space?.[space.id];
+                            return (
+                              <label key={space.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedClearSpaces.includes(space.id)}
+                                  onChange={() => {
+                                    setSelectedClearSpaces(prev =>
+                                      prev.includes(space.id)
+                                        ? prev.filter(id => id !== space.id)
+                                        : [...prev, space.id]
+                                    );
+                                  }}
+                                  className="w-4 h-4 accent-db-lava rounded"
+                                />
+                                <span className="text-sm text-gray-900">{space.name || space.id.substring(0, 12) + '...'}</span>
+                                {cacheCounts && count !== undefined && (
+                                  <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                                    {count} {count === 1 ? 'entry' : 'entries'}
+                                  </span>
+                                )}
+                                {cacheCounts && count === undefined && (
+                                  <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-400">
+                                    0 entries
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        {!cacheCounts && (
+                          <p className="text-xs text-gray-400 animate-pulse">Loading counts...</p>
+                        )}
                       </div>
-                      <p className="text-sm text-gray-600 mb-2">
-                        This will permanently delete all cached queries and their embeddings from Lakebase.
-                      </p>
-                      <p className="text-sm text-gray-600">
-                        Future queries will need to go through the Genie API until the cache is rebuilt. This action cannot be undone.
-                      </p>
-                    </div>
-                    <div className="flex gap-3 px-6 py-4 bg-gray-50 justify-end">
-                      <button
-                        onClick={() => setClearModal(null)}
-                        disabled={clearing}
-                        className="px-4 py-2 rounded-lg font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={async () => {
-                          setClearing(true);
-                          try {
-                            const result = await api.clearCache();
-                            setClearResult(result);
-                            setClearModal('success');
-                          } catch (e) {
-                            setClearResult({ error: e.response?.data?.detail || e.message });
-                            setClearModal('error');
-                          }
-                          setClearing(false);
-                        }}
-                        disabled={clearing}
-                        className="px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90 disabled:opacity-50"
-                      >
-                        {clearing ? 'Clearing...' : 'Yes, Clear Cache'}
-                      </button>
-                    </div>
-                  </>
-                )}
+                      <div className="flex gap-3 px-6 py-4 bg-gray-50 justify-end">
+                        <button
+                          onClick={() => setClearModal(null)}
+                          className="px-4 py-2 rounded-lg font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => setClearModal('confirm')}
+                          disabled={selectedClearSpaces.length === 0}
+                          className="px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
+
+                {/* Step 2: Confirm */}
+                {clearModal === 'confirm' && (() => {
+                  const validSpaces = genieSpaces.filter(s => s.id.trim());
+                  const allSelected = selectedClearSpaces.length === validSpaces.length;
+                  const totalSelected = selectedClearSpaces.reduce((sum, id) => {
+                    return sum + (cacheCounts?.by_space?.[id] || 0);
+                  }, 0);
+                  const totalRecords = allSelected ? (cacheCounts?.total ?? totalSelected) : totalSelected;
+                  const spaceNames = selectedClearSpaces.map(id => {
+                    const s = genieSpaces.find(s => s.id === id);
+                    return s?.name || id.substring(0, 12) + '...';
+                  });
+
+                  return (
+                    <>
+                      <div className="p-6">
+                        <div className="flex items-center gap-3 mb-4">
+                          <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                            <Trash2 className="w-5 h-5 text-db-lava" />
+                          </div>
+                          <h3 className="text-lg font-semibold text-gray-900">Confirm Deletion</h3>
+                        </div>
+
+                        <div className="p-4 bg-red-50 border border-red-200 rounded-lg mb-4">
+                          <p className="text-sm font-medium text-gray-900 mb-1">
+                            {totalRecords >= 0
+                              ? `Will delete ${totalRecords} cached ${totalRecords === 1 ? 'entry' : 'entries'}`
+                              : 'Will delete cached entries'
+                            }
+                          </p>
+                          <p className="text-xs text-gray-600">
+                            {allSelected
+                              ? 'From all spaces'
+                              : `From: ${spaceNames.join(', ')}`
+                            }
+                          </p>
+                        </div>
+
+                        <p className="text-sm text-gray-600">
+                          Future queries will need to go through the Genie API until the cache is rebuilt. This action cannot be undone.
+                        </p>
+                      </div>
+                      <div className="flex gap-3 px-6 py-4 bg-gray-50 justify-end">
+                        <button
+                          onClick={() => setClearModal('select')}
+                          disabled={clearing}
+                          className="px-4 py-2 rounded-lg font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
+                        >
+                          Back
+                        </button>
+                        <button
+                          onClick={async () => {
+                            setClearing(true);
+                            try {
+                              let totalDeleted = 0;
+                              if (allSelected) {
+                                const result = await api.clearCache(null);
+                                totalDeleted = result.deleted || 0;
+                              } else {
+                                for (const spaceId of selectedClearSpaces) {
+                                  const result = await api.clearCache(spaceId);
+                                  totalDeleted += result.deleted || 0;
+                                }
+                              }
+                              setClearResult({ deleted: totalDeleted, message: `${totalDeleted} cached entries deleted.` });
+                              setClearModal('success');
+                            } catch (e) {
+                              setClearResult({ error: e.response?.data?.detail || e.message });
+                              setClearModal('error');
+                            }
+                            setClearing(false);
+                          }}
+                          disabled={clearing}
+                          className="px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90 disabled:opacity-50"
+                        >
+                          {clearing ? 'Deleting...' : `Yes, Delete ${totalRecords >= 0 ? totalRecords + ' ' : ''}${totalRecords === 1 ? 'Entry' : 'Entries'}`}
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
 
                 {clearModal === 'success' && (
                   <>

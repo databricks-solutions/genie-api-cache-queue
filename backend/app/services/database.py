@@ -117,5 +117,8 @@ class DatabaseService:
     async def get_query_logs(self, identity=None, limit=50, runtime_settings=None):
         return await self.backend.get_query_logs(identity, limit, runtime_settings)
 
-    async def clear_cache(self, runtime_settings=None) -> int:
-        return await self.backend.clear_cache(runtime_settings)
+    async def get_cache_count(self, runtime_settings=None):
+        return await self.backend.get_cache_count(runtime_settings)
+
+    async def clear_cache(self, runtime_settings=None, genie_space_id=None) -> int:
+        return await self.backend.clear_cache(runtime_settings, genie_space_id=genie_space_id)

@@ -300,11 +300,20 @@ class DynamicStorageService:
             logger.warning("get_query_logs failed: %s", e)
             return []
 
-    async def clear_cache(self, runtime_settings=None) -> int:
-        """Delete all cached queries."""
+    async def get_cache_count(self, runtime_settings=None):
+        """Return cache entry counts grouped by genie_space_id."""
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'get_cache_count'):
+                return await backend.get_cache_count()
+            return {"total": 0, "by_space": {}}
+        return await self._with_reconnect(_op, runtime_settings)
+
+    async def clear_cache(self, runtime_settings=None, genie_space_id=None) -> int:
+        """Delete cached queries, optionally filtered by genie_space_id."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'clear_cache'):
-                return await backend.clear_cache()
+                return await backend.clear_cache(genie_space_id=genie_space_id)
             return 0
         return await self._with_reconnect(_op, runtime_settings)

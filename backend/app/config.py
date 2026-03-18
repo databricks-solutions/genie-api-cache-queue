@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     # All optional (can be provided via frontend config)
     databricks_host: str = Field(default_factory=lambda: os.getenv("DATABRICKS_HOST", "").rstrip('/'))
     databricks_token: str = Field(default_factory=lambda: os.getenv("DATABRICKS_TOKEN", ""))
-    genie_space_id: str = Field(default="")  # Can be provided from frontend
+    genie_space_id: str = Field(default="")  # Can be provided from frontend (backward compat)
+    genie_spaces: list = Field(default_factory=list)  # List of {"id": "...", "name": "..."}
     sql_warehouse_id: str = Field(default="")  # Can be provided from frontend
     
     # Application environment
