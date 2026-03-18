@@ -2,6 +2,40 @@ import axios from 'axios';
 
 const API_BASE_URL = '/api';
 
+// Sync server config to localStorage on first load so all API calls
+// use the global config even if the user never opens Settings.
+let _configSynced = false;
+const _syncServerConfig = async () => {
+  if (_configSynced) return;
+  _configSynced = true;
+  try {
+    const response = await axios.get(`${API_BASE_URL}/config`);
+    const server = response.data;
+    if (server.genie_space_id) {
+      const local = JSON.parse(localStorage.getItem('databricks_config') || '{}');
+      const merged = {
+        ...local,
+        auth_mode: server.auth_mode || local.auth_mode || 'app',
+        genie_space_id: server.genie_space_id || local.genie_space_id,
+        sql_warehouse_id: server.sql_warehouse_id || local.sql_warehouse_id,
+        similarity_threshold: String(server.similarity_threshold || local.similarity_threshold || 0.92),
+        max_queries_per_minute: String(server.max_queries_per_minute || local.max_queries_per_minute || 5),
+        shared_cache: server.shared_cache ?? local.shared_cache ?? true,
+        embedding_provider: server.embedding_provider || local.embedding_provider || 'databricks',
+        databricks_embedding_endpoint: server.databricks_embedding_endpoint || local.databricks_embedding_endpoint || 'databricks-bge-large-en',
+        storage_backend: server.storage_backend === 'pgvector' ? 'lakebase' : (server.storage_backend || local.storage_backend || 'local'),
+        lakebase_instance_name: server.lakebase_instance_name || local.lakebase_instance_name || '',
+        lakebase_catalog: server.lakebase_catalog || local.lakebase_catalog || '',
+        lakebase_schema: server.lakebase_schema || local.lakebase_schema || 'public',
+        cache_table_name: server.cache_table_name || local.cache_table_name || 'cached_queries',
+        query_log_table_name: server.query_log_table_name || local.query_log_table_name || 'query_logs',
+      };
+      localStorage.setItem('databricks_config', JSON.stringify(merged));
+    }
+  } catch { /* server unreachable — use whatever localStorage has */ }
+};
+_syncServerConfig();
+
 const getConfig = () => {
   const savedConfig = localStorage.getItem('databricks_config');
   return savedConfig ? JSON.parse(savedConfig) : {};
