@@ -61,6 +61,7 @@ class LocalStorageService:
         query_embedding: List[float],
         identity: str,
         threshold: float = 0.92,
+        genie_space_id: Optional[str] = None,
         cache_ttl_hours: float = None,
         shared_cache: bool = True
     ) -> Optional[Tuple[int, str, str, float]]:
@@ -68,17 +69,20 @@ class LocalStorageService:
         Only matches entries within the freshness window (cache_ttl_hours).
         If shared_cache=True, searches all entries regardless of identity.
         If shared_cache=False, filters by identity.
+        Filters by genie_space_id when provided.
         """
         if len(self.cache) == 0:
             return None
 
         ttl = cache_ttl_hours if cache_ttl_hours is not None else self.cache_ttl_hours
 
-        # Filter by freshness window (and optionally by identity)
+        # Filter by freshness window, identity, and genie_space_id
         now = datetime.now()
         matches = []
         for idx, item in enumerate(self.cache):
             if not shared_cache and item['identity'] != identity:
+                continue
+            if genie_space_id and item.get('genie_space_id') != genie_space_id:
                 continue
             # Apply freshness window (0 = no limit)
             if ttl and ttl > 0:
@@ -165,11 +169,14 @@ class LocalStorageService:
         self._save_data()
         return new_id
 
-    def get_all_cached_queries(self, identity: Optional[str] = None) -> List[Dict]:
+    def get_all_cached_queries(self, identity: Optional[str] = None, genie_space_id: Optional[str] = None) -> List[Dict]:
         """Get all cached queries (no TTL filtering - shows full history)."""
+        results = self.cache
         if identity:
-            return [item for item in self.cache if item['identity'] == identity]
-        return self.cache
+            results = [item for item in results if item['identity'] == identity]
+        if genie_space_id:
+            results = [item for item in results if item.get('genie_space_id') == genie_space_id]
+        return results
 
 
 class LocalQueueService:

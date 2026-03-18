@@ -227,6 +227,7 @@ class DynamicStorageService:
                 )
             return backend.search_similar_query(
                 query_embedding, identity, threshold,
+                genie_space_id=genie_space_id,
                 cache_ttl_hours=ttl, shared_cache=shared_cache
             )
         return await self._with_reconnect(_op, runtime_settings)

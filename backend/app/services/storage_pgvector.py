@@ -381,9 +381,10 @@ class PGVectorStorageService:
             threshold_param_idx = param_idx
             param_idx += 1
 
-            # genie_space_id is stored for audit but not used as a search filter,
-            # since the same query text produces the same SQL regardless of space
-
+            if genie_space_id:
+                filters.append(f"genie_space_id = ${param_idx}")
+                params.append(genie_space_id)
+                param_idx += 1
 
             # Freshness window: only match entries within TTL (0 = no limit)
             if ttl and ttl > 0:
