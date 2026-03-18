@@ -105,7 +105,7 @@ class PGVectorStorageService:
                 elif is_autoscaling:
                     # Lakebase Autoscaling: use SDK postgres.generate_database_credential
                     logger.info("Lakebase Autoscaling project: %s", project_id)
-                    hostname, endpoint_name = await self._resolve_autoscaling_endpoint(project_id)
+                    hostname, endpoint_name = self._resolve_autoscaling_endpoint(project_id)
                     logger.info("Autoscaling endpoint: %s (%s)", hostname, endpoint_name)
                     connection_string = self._build_autoscaling_connection_string(
                         hostname, endpoint_name, quote_plus
@@ -200,39 +200,47 @@ class PGVectorStorageService:
     def _get_lakebase_sdk_client(self):
         """Create a Databricks SDK WorkspaceClient for Lakebase operations.
 
-        Supports lakebase_service_token formats:
-          - PAT:   "dapi..."                    → WorkspaceClient(token=..., auth_type="pat")
-          - SP:    "client_id:client_secret"    → WorkspaceClient(client_id=..., client_secret=...)
-          - OAuth: "eyJ..."                     → WorkspaceClient(token=..., auth_type="pat")
+        Inside Databricks Apps, uses the app's built-in SP (auto-detected from
+        DATABRICKS_CLIENT_ID/SECRET env vars). For local dev, uses the
+        lakebase_service_token from Settings (PAT or SP credentials).
         """
         from databricks.sdk import WorkspaceClient
+        from databricks.sdk.core import Config
+        import os
 
+        # Inside Databricks Apps: use the app's built-in SP (env vars auto-detected)
+        if os.getenv("DATABRICKS_CLIENT_ID"):
+            logger.info("Lakebase auth: app built-in SP (DATABRICKS_CLIENT_ID)")
+            return WorkspaceClient()
+
+        # Local dev: use the configured lakebase_service_token
         token = self.databricks_pat or ""
-
         if ":" in token and not token.startswith("dapi") and not token.startswith("eyJ"):
             client_id, client_secret = token.split(":", 1)
             logger.info("Lakebase auth: SP OAuth (client_id=%s...)", client_id[:12])
-            return WorkspaceClient(
+            config = Config(
                 host=self.databricks_host,
                 client_id=client_id,
                 client_secret=client_secret,
+                auth_type="oauth-m2m",
             )
+            return WorkspaceClient(config=config)
         elif token:
-            logger.info("Lakebase auth: %s", "PAT" if token.startswith("dapi") else "token")
-            return WorkspaceClient(
+            logger.info("Lakebase auth: PAT")
+            config = Config(
                 host=self.databricks_host,
                 token=token,
-                auth_type="pat"
+                auth_type="pat",
             )
+            return WorkspaceClient(config=config)
         else:
-            from app.auth import get_service_principal_client
-            client = get_service_principal_client()
-            if not client:
-                raise ValueError("No Lakebase service token configured")
-            return client
+            raise ValueError(
+                "No Lakebase credentials available. "
+                "Ensure the app's SP has CAN_MANAGE on the Lakebase project."
+            )
 
-    async def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
-        """Resolve Lakebase Autoscaling project to (hostname, endpoint_name) using SDK."""
+    def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
+        """Resolve Lakebase Autoscaling project to (hostname, endpoint_name)."""
         client = self._get_lakebase_sdk_client()
         endpoints = client.api_client.do(
             'GET',
@@ -242,9 +250,7 @@ class PGVectorStorageService:
         if not eps:
             raise ValueError(f"No endpoints found for Autoscaling project '{project_id}'")
         ep = eps[0]
-        hostname = ep["status"]["hosts"]["host"]
-        endpoint_name = ep["name"]
-        return hostname, endpoint_name
+        return ep["status"]["hosts"]["host"], ep["name"]
 
     def _build_autoscaling_connection_string(self, hostname: str, endpoint_name: str, quote_plus) -> str:
         """Generate JWT credential for Autoscaling Lakebase and build connection string."""
