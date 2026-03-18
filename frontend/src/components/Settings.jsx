@@ -673,8 +673,8 @@ const Settings = () => {
                 {clearModal === 'success' && (
                   <>
                     <div className="p-6 text-center">
-                      <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">
-                        <Save className="w-6 h-6 text-green-600" />
+                      <div className="w-12 h-12 rounded-full bg-gray-200 flex items-center justify-center mx-auto mb-4">
+                        <Save className="w-6 h-6 text-db-navy" />
                       </div>
                       <h3 className="text-lg font-semibold text-gray-900 mb-2">Cache Cleared</h3>
                       <p className="text-sm text-gray-600">
