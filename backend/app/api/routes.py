@@ -269,10 +269,18 @@ async def put_config(body: UIConfigUpdate):
 async def clear_cache(req: Request):
     """Delete all cached queries from Lakebase."""
     try:
+        overrides = get_overrides()
+        rc = RuntimeConfig(
+            auth_mode=overrides.get("auth_mode", "app"),
+            storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
+            lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
+            lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
+            cache_table_name=get_effective_setting("cache_table_name") or settings.pgvector_table_name or "cached_queries",
+        )
         user_token = req.headers.get('X-Forwarded-Access-Token')
         user_email = req.headers.get('X-Forwarded-Email')
-        runtime_settings = RuntimeSettings(None, user_token, user_email)
-        count = await _db.db_service.clear_cache(runtime_settings)
+        rs = RuntimeSettings(rc, user_token, user_email)
+        count = await _db.db_service.clear_cache(rs)
         return {"success": True, "deleted": count, "message": f"Cache cleared ({count} entries deleted)"}
     except Exception as e:
         logger.exception("Error clearing cache")

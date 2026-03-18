@@ -42,8 +42,9 @@ const Settings = () => {
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showUserPat, setShowUserPat] = useState(false);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clearModal, setClearModal] = useState(null); // null | 'confirm' | 'success' | 'error'
   const [clearing, setClearing] = useState(false);
+  const [clearResult, setClearResult] = useState(null);
 
   useEffect(() => {
     // Load from server (source of truth), merge with localStorage for client-only fields
@@ -609,7 +610,7 @@ const Settings = () => {
                   <p className="text-xs text-gray-500">Delete all cached queries from Lakebase. This cannot be undone.</p>
                 </div>
                 <button
-                  onClick={() => setShowClearConfirm(true)}
+                  onClick={() => setClearModal('confirm')}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -619,51 +620,99 @@ const Settings = () => {
             </div>
           </div>
 
-          {/* Clear Cache Confirmation Modal */}
-          {showClearConfirm && (
+          {/* Clear Cache Modal */}
+          {clearModal && (
             <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
               <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
-                <div className="p-6">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
-                      <Trash2 className="w-5 h-5 text-db-lava" />
+                {clearModal === 'confirm' && (
+                  <>
+                    <div className="p-6">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                          <Trash2 className="w-5 h-5 text-db-lava" />
+                        </div>
+                        <h3 className="text-lg font-semibold text-gray-900">Clear All Cached Queries</h3>
+                      </div>
+                      <p className="text-sm text-gray-600 mb-2">
+                        This will permanently delete all cached queries and their embeddings from Lakebase.
+                      </p>
+                      <p className="text-sm text-gray-600">
+                        Future queries will need to go through the Genie API until the cache is rebuilt. This action cannot be undone.
+                      </p>
                     </div>
-                    <h3 className="text-lg font-semibold text-gray-900">Clear All Cached Queries</h3>
-                  </div>
-                  <p className="text-sm text-gray-600 mb-2">
-                    This will permanently delete all cached queries and their embeddings from Lakebase.
-                  </p>
-                  <p className="text-sm text-gray-600">
-                    Future queries will need to go through the Genie API until the cache is rebuilt. This action cannot be undone.
-                  </p>
-                </div>
-                <div className="flex gap-3 px-6 py-4 bg-gray-50 justify-end">
-                  <button
-                    onClick={() => setShowClearConfirm(false)}
-                    disabled={clearing}
-                    className="px-4 py-2 rounded-lg font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={async () => {
-                      setClearing(true);
-                      try {
-                        const result = await api.clearCache();
-                        setShowClearConfirm(false);
-                        setSaved(false);
-                        setTimeout(() => { setSaved(true); setTimeout(() => setSaved(false), 3000); }, 0);
-                      } catch (e) {
-                        setShowClearConfirm(false);
-                      }
-                      setClearing(false);
-                    }}
-                    disabled={clearing}
-                    className="px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90 disabled:opacity-50"
-                  >
-                    {clearing ? 'Clearing...' : 'Yes, Clear Cache'}
-                  </button>
-                </div>
+                    <div className="flex gap-3 px-6 py-4 bg-gray-50 justify-end">
+                      <button
+                        onClick={() => setClearModal(null)}
+                        disabled={clearing}
+                        className="px-4 py-2 rounded-lg font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={async () => {
+                          setClearing(true);
+                          try {
+                            const result = await api.clearCache();
+                            setClearResult(result);
+                            setClearModal('success');
+                          } catch (e) {
+                            setClearResult({ error: e.response?.data?.detail || e.message });
+                            setClearModal('error');
+                          }
+                          setClearing(false);
+                        }}
+                        disabled={clearing}
+                        className="px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90 disabled:opacity-50"
+                      >
+                        {clearing ? 'Clearing...' : 'Yes, Clear Cache'}
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {clearModal === 'success' && (
+                  <>
+                    <div className="p-6 text-center">
+                      <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">
+                        <Save className="w-6 h-6 text-green-600" />
+                      </div>
+                      <h3 className="text-lg font-semibold text-gray-900 mb-2">Cache Cleared</h3>
+                      <p className="text-sm text-gray-600">
+                        {clearResult?.message || `${clearResult?.deleted || 0} cached entries deleted.`}
+                      </p>
+                    </div>
+                    <div className="flex px-6 py-4 bg-gray-50 justify-center">
+                      <button
+                        onClick={() => setClearModal(null)}
+                        className="px-6 py-2 rounded-lg font-medium text-white bg-gray-900 hover:bg-gray-800"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {clearModal === 'error' && (
+                  <>
+                    <div className="p-6 text-center">
+                      <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
+                        <Trash2 className="w-6 h-6 text-db-lava" />
+                      </div>
+                      <h3 className="text-lg font-semibold text-gray-900 mb-2">Failed to Clear Cache</h3>
+                      <p className="text-sm text-gray-600">
+                        {clearResult?.error || 'An unknown error occurred.'}
+                      </p>
+                    </div>
+                    <div className="flex px-6 py-4 bg-gray-50 justify-center">
+                      <button
+                        onClick={() => setClearModal(null)}
+                        className="px-6 py-2 rounded-lg font-medium text-white bg-gray-900 hover:bg-gray-800"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}
