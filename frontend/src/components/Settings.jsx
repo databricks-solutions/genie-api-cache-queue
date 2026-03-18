@@ -71,9 +71,8 @@ const Settings = () => {
           lakebase_schema: server.lakebase_schema || 'public',
           cache_table_name: server.cache_table_name || 'cached_queries',
           query_log_table_name: server.query_log_table_name || 'query_logs',
-          // Client-only fields (from localStorage)
-          auth_mode: localParsed.auth_mode || 'app',
-          // Show token from localStorage if available, otherwise indicate server has it
+          // All fields from server (global across users)
+          auth_mode: server.auth_mode || localParsed.auth_mode || 'app',
           user_pat: localParsed.user_pat || (server.lakebase_service_token_set ? '••••••••' : ''),
           _server_token_set: server.lakebase_service_token_set || false,
         }));
@@ -100,9 +99,9 @@ const Settings = () => {
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Save shared fields to server
+      // Save all fields to server (global config)
       await api.updateServerConfig({
-        // Only send token if user entered a real value (not the placeholder)
+        auth_mode: config.auth_mode || undefined,
         lakebase_service_token: (config.user_pat && config.user_pat !== '••••••••') ? config.user_pat : undefined,
         genie_space_id: config.genie_space_id || undefined,
         sql_warehouse_id: config.sql_warehouse_id || undefined,

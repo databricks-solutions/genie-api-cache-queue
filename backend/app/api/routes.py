@@ -193,7 +193,8 @@ from app.api.config_store import get_effective_setting, update_overrides, get_ov
 
 
 class UIConfigUpdate(BaseModel):
-    lakebase_service_token: Optional[str] = None  # SP/PAT token for Lakebase cache operations
+    auth_mode: Optional[str] = None
+    lakebase_service_token: Optional[str] = None
     user_pat: Optional[str] = None
     genie_space_id: Optional[str] = None
     sql_warehouse_id: Optional[str] = None
@@ -218,6 +219,7 @@ async def get_config():
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)
     return {
+        "auth_mode": overrides.get("auth_mode", "app"),
         "genie_space_id": get_effective_setting("genie_space_id"),
         "sql_warehouse_id": get_effective_setting("sql_warehouse_id"),
         "similarity_threshold": get_effective_setting("similarity_threshold"),
