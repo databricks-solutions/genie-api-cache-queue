@@ -42,6 +42,8 @@ const Settings = () => {
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showUserPat, setShowUserPat] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     // Load from server (source of truth), merge with localStorage for client-only fields
@@ -607,15 +609,7 @@ const Settings = () => {
                   <p className="text-xs text-gray-500">Delete all cached queries from Lakebase. This cannot be undone.</p>
                 </div>
                 <button
-                  onClick={async () => {
-                    if (!window.confirm('Are you sure you want to delete ALL cached queries? This cannot be undone.')) return;
-                    try {
-                      const result = await api.clearCache();
-                      alert(result.message || 'Cache cleared');
-                    } catch (e) {
-                      alert('Failed to clear cache: ' + (e.response?.data?.detail || e.message));
-                    }
-                  }}
+                  onClick={() => setShowClearConfirm(true)}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -624,6 +618,55 @@ const Settings = () => {
               </div>
             </div>
           </div>
+
+          {/* Clear Cache Confirmation Modal */}
+          {showClearConfirm && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 overflow-hidden">
+                <div className="p-6">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                      <Trash2 className="w-5 h-5 text-db-lava" />
+                    </div>
+                    <h3 className="text-lg font-semibold text-gray-900">Clear All Cached Queries</h3>
+                  </div>
+                  <p className="text-sm text-gray-600 mb-2">
+                    This will permanently delete all cached queries and their embeddings from Lakebase.
+                  </p>
+                  <p className="text-sm text-gray-600">
+                    Future queries will need to go through the Genie API until the cache is rebuilt. This action cannot be undone.
+                  </p>
+                </div>
+                <div className="flex gap-3 px-6 py-4 bg-gray-50 justify-end">
+                  <button
+                    onClick={() => setShowClearConfirm(false)}
+                    disabled={clearing}
+                    className="px-4 py-2 rounded-lg font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={async () => {
+                      setClearing(true);
+                      try {
+                        const result = await api.clearCache();
+                        setShowClearConfirm(false);
+                        setSaved(false);
+                        setTimeout(() => { setSaved(true); setTimeout(() => setSaved(false), 3000); }, 0);
+                      } catch (e) {
+                        setShowClearConfirm(false);
+                      }
+                      setClearing(false);
+                    }}
+                    disabled={clearing}
+                    className="px-4 py-2 rounded-lg font-medium text-white bg-db-lava hover:opacity-90 disabled:opacity-50"
+                  >
+                    {clearing ? 'Clearing...' : 'Yes, Clear Cache'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
         </div>
       </div>
