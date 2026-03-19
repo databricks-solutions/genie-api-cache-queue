@@ -14,6 +14,7 @@ import app.services.database as _db
 from app.services.queue_service import queue_service
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
+from app.services.cache_validator import validate_cache_entry
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,13 @@ class QueryProcessor:
             except Exception as e:
                 logger.warning("Cache search failed: %s, continuing without cache", e)
                 cached_result = None
+
+            if cached_result:
+                cache_id, cached_query, sql_query, similarity = cached_result
+                is_valid = await validate_cache_entry(context_text, cached_query, runtime_settings)
+                if not is_valid:
+                    logger.info("LLM validation rejected cache hit id=%s — treating as MISS", cache_id)
+                    cached_result = None
 
             if cached_result:
                 cache_id, cached_query, sql_query, similarity = cached_result
