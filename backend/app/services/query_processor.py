@@ -15,6 +15,7 @@ from app.services.queue_service import queue_service
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
 from app.services.cache_validator import validate_cache_entry
+from app.services.question_normalizer import normalize_question
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,7 @@ class QueryProcessor:
 
             is_follow_up = bool(conversation_history and len(conversation_history) > 0)
             context_text = build_context_text(query_text, conversation_history)
+            context_text = await normalize_question(context_text, runtime_settings)
 
             logger.info("Processing query=%s auth=%s host=%s space=%s follow_up=%s context=%r",
                          query_id[:8], runtime_settings.auth_mode,
@@ -366,6 +368,7 @@ class QueryProcessor:
                     user_email = queued_item.get('user_email')
 
                     context_text = build_context_text(query_text, conv_history)
+                    context_text = await normalize_question(context_text, runtime_settings)
 
                     self._update_status(query_id, QueryStage.PROCESSING_GENIE, query_text, identity)
 
