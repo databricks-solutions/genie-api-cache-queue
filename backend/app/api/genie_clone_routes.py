@@ -25,6 +25,8 @@ from app.api.config_store import get_effective_setting
 from app.api.auth_helpers import extract_bearer_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
+from app.services.question_normalizer import normalize_question, QUESTION_NORMALIZATION_ENABLED
+from app.services.cache_validator import validate_cache_entry, CACHE_VALIDATION_ENABLED
 from app.services.queue_service import queue_service
 import app.services.database as _db
 
@@ -268,6 +270,9 @@ async def _handle_query(
     """
     rs = _build_runtime_settings(token, space_id)
 
+    if QUESTION_NORMALIZATION_ENABLED:
+        query_text = await normalize_question(query_text, rs)
+
     # Generate embedding and check cache
     query_embedding = None
     cached = None
@@ -280,6 +285,13 @@ async def _handle_query(
         )
     except Exception as e:
         logger.warning("Cache lookup failed: %s — proceeding without cache", e)
+
+    if cached and CACHE_VALIDATION_ENABLED:
+        cache_id, cached_query, sql_query, similarity = cached
+        is_valid = await validate_cache_entry(query_text, cached_query, rs)
+        if not is_valid:
+            logger.info("LLM validation rejected cache hit id=%s — treating as MISS", cache_id)
+            cached = None
 
     # --- Cache HIT: execute cached SQL against warehouse ---
     if cached:
