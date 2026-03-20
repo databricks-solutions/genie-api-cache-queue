@@ -116,8 +116,8 @@ class QueryProcessor:
             runtime_settings = RuntimeSettings(runtime_config, user_token, user_email) if runtime_config else RuntimeSettings(None, user_token, user_email)
 
             is_follow_up = bool(conversation_history and len(conversation_history) > 0)
-            context_text = build_context_text(query_text, conversation_history)
-            context_text = await normalize_question(context_text, runtime_settings)
+            original_context_text = build_context_text(query_text, conversation_history)
+            context_text = await normalize_question(original_context_text, runtime_settings)
 
             logger.info("Processing query=%s auth=%s host=%s space=%s follow_up=%s context=%r",
                          query_id[:8], runtime_settings.auth_mode,
@@ -143,14 +143,14 @@ class QueryProcessor:
                 cached_result = None
 
             if cached_result:
-                cache_id, cached_query, sql_query, similarity = cached_result
-                is_valid = await validate_cache_entry(context_text, cached_query, runtime_settings)
+                cache_id, cached_query, sql_query, similarity, cached_original = cached_result
+                is_valid = await validate_cache_entry(original_context_text, cached_original, runtime_settings)
                 if not is_valid:
                     logger.info("LLM validation rejected cache hit id=%s — treating as MISS", cache_id)
                     cached_result = None
 
             if cached_result:
-                cache_id, cached_query, sql_query, similarity = cached_result
+                cache_id, cached_query, sql_query, similarity, cached_original = cached_result
 
                 logger.info("Cache HIT: similarity=%.3f sql=%s", similarity, sql_query[:80])
 
@@ -217,7 +217,8 @@ class QueryProcessor:
                             try:
                                 await _db.db_service.save_query_cache(
                                     context_text, query_embedding, sql_query,
-                                    identity, runtime_settings.genie_space_id, runtime_settings
+                                    identity, runtime_settings.genie_space_id, runtime_settings,
+                                    original_query_text=original_context_text,
                                 )
                             except Exception as e:
                                 logger.warning("Failed to save to cache: %s", e)
@@ -367,8 +368,8 @@ class QueryProcessor:
                     user_token = queued_item.get('user_token')
                     user_email = queued_item.get('user_email')
 
-                    context_text = build_context_text(query_text, conv_history)
-                    context_text = await normalize_question(context_text, runtime_settings)
+                    original_context_text = build_context_text(query_text, conv_history)
+                    context_text = await normalize_question(original_context_text, runtime_settings)
 
                     self._update_status(query_id, QueryStage.PROCESSING_GENIE, query_text, identity)
 
@@ -393,7 +394,8 @@ class QueryProcessor:
                                 try:
                                     await _db.db_service.save_query_cache(
                                         context_text, query_embedding, sql_query,
-                                        identity, runtime_settings.genie_space_id, runtime_settings
+                                        identity, runtime_settings.genie_space_id, runtime_settings,
+                                        original_query_text=original_context_text,
                                     )
                                 except Exception as e:
                                     logger.warning("Failed to save to cache: %s", e)

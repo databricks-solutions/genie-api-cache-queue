@@ -124,7 +124,8 @@ class LocalStorageService:
                 item['id'],
                 item['query_text'],
                 item['sql_query'],
-                float(best_similarity)
+                float(best_similarity),
+                item.get('original_query_text'),
             )
 
         return None
@@ -135,7 +136,8 @@ class LocalStorageService:
         query_embedding: List[float],
         sql_query: str,
         identity: str,
-        genie_space_id: str
+        genie_space_id: str,
+        original_query_text: str = None,
     ) -> int:
         """Save a new query to the cache"""
         new_id = max([item.get('id', 0) for item in self.cache], default=0) + 1
@@ -143,6 +145,7 @@ class LocalStorageService:
         new_item = {
             'id': new_id,
             'query_text': query_text,
+            'original_query_text': original_query_text,
             'sql_query': sql_query,
             'identity': identity,
             'genie_space_id': genie_space_id,

@@ -231,17 +231,20 @@ class DynamicStorageService:
         sql_query: str,
         identity: str,
         genie_space_id: str,
-        runtime_settings=None
+        runtime_settings=None,
+        original_query_text: str = None,
     ) -> int:
         """Save a new query to the cache."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
                 return await backend.save_query_cache(
-                    query_text, query_embedding, sql_query, identity, genie_space_id
+                    query_text, query_embedding, sql_query, identity, genie_space_id,
+                    original_query_text=original_query_text,
                 )
             return backend.save_query_cache(
-                query_text, query_embedding, sql_query, identity, genie_space_id
+                query_text, query_embedding, sql_query, identity, genie_space_id,
+                original_query_text=original_query_text,
             )
         return await self._with_reconnect(_op, runtime_settings)
 
