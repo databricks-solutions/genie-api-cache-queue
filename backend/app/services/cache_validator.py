@@ -17,11 +17,6 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Toggle LLM cache validation. When True, a vector-similarity cache hit is
-# confirmed by an LLM before being returned. When False, only vector similarity
-# is used (original behavior) with no additional LLM call overhead.
-CACHE_VALIDATION_ENABLED = True
-
 # Databricks Foundation Model endpoint used for validation.
 CACHE_VALIDATION_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
@@ -72,7 +67,7 @@ async def validate_cache_entry(
     Returns False if the LLM deems them non-equivalent (downgrade to miss).
     On any error, fails open (returns True) to avoid disrupting the service.
     """
-    if not CACHE_VALIDATION_ENABLED:
+    if runtime_settings is not None and not runtime_settings.cache_validation_enabled:
         return True
 
     try:

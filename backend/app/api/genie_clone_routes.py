@@ -25,8 +25,8 @@ from app.api.config_store import get_effective_setting
 from app.api.auth_helpers import extract_bearer_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
-from app.services.question_normalizer import normalize_question, QUESTION_NORMALIZATION_ENABLED
-from app.services.cache_validator import validate_cache_entry, CACHE_VALIDATION_ENABLED
+from app.services.question_normalizer import normalize_question
+from app.services.cache_validator import validate_cache_entry
 from app.services.queue_service import queue_service
 import app.services.database as _db
 
@@ -273,7 +273,7 @@ async def _handle_query(
     rs = _build_runtime_settings(token, space_id)
 
     original_query_text = query_text
-    if QUESTION_NORMALIZATION_ENABLED:
+    if rs.question_normalization_enabled:
         query_text = await normalize_question(query_text, rs)
 
     # Generate embedding and check cache
@@ -289,7 +289,7 @@ async def _handle_query(
     except Exception as e:
         logger.warning("Cache lookup failed: %s — proceeding without cache", e)
 
-    if cached and CACHE_VALIDATION_ENABLED:
+    if cached and rs.cache_validation_enabled:
         cache_id, cached_query, sql_query, similarity, cached_original = cached
         is_valid = await validate_cache_entry(original_query_text, cached_original, rs)
         if not is_valid:

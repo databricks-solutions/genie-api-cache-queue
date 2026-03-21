@@ -210,6 +210,8 @@ class UIConfigUpdate(BaseModel):
     lakebase_schema: Optional[str] = None
     cache_table_name: Optional[str] = None
     query_log_table_name: Optional[str] = None
+    question_normalization_enabled: Optional[bool] = None
+    cache_validation_enabled: Optional[bool] = None
 
 
 @router.get("/config")
@@ -235,6 +237,8 @@ async def get_config():
         "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
         "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
         "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token")),
+        "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
+        "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
     }
 
 

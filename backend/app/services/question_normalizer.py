@@ -17,11 +17,6 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Toggle question normalization. When True, questions are normalized before
-# embedding generation and cache storage/lookup. When False, raw question text
-# is used (original behavior).
-QUESTION_NORMALIZATION_ENABLED = True
-
 # Databricks Foundation Model endpoint used for normalization.
 QUESTION_NORMALIZATION_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
@@ -73,7 +68,7 @@ async def normalize_question(query_text: str, runtime_settings=None) -> str:
     # Step 1: string normalization
     string_normalized = query_text.lower().strip()
 
-    if not QUESTION_NORMALIZATION_ENABLED:
+    if runtime_settings is not None and not runtime_settings.question_normalization_enabled:
         return string_normalized
 
     # Step 2: LLM normalization
