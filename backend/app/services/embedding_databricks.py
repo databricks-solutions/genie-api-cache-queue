@@ -17,7 +17,7 @@ settings = get_settings()
 class DatabricksEmbeddingService:
     """
     Embedding service using Databricks SDK.
-    Supports Foundation Model endpoints like databricks-bge-large-en.
+    Supports Foundation Model endpoints like databricks-gte-large-en.
     """
 
     def __init__(self):
