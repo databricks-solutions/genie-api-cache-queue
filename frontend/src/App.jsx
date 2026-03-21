@@ -23,7 +23,8 @@ function App() {
       setActiveTab('settings');
     } else {
       const parsed = JSON.parse(config);
-      if (!parsed.genie_space_id || !parsed.sql_warehouse_id) {
+      const hasSpaces = (parsed.genie_spaces && parsed.genie_spaces.length > 0) || parsed.genie_space_id;
+      if (!hasSpaces || !parsed.sql_warehouse_id) {
         setShowConfigWarning(true);
       }
     }

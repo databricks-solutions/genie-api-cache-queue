@@ -182,6 +182,7 @@ const QueueTable = () => {
           <thead className="bg-gray-200">
             <tr>
               <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Time</th>
+              <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Space</th>
               <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Query</th>
               <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Identity</th>
               <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Status</th>
@@ -192,14 +193,14 @@ const QueueTable = () => {
           <tbody className="bg-white divide-y divide-gray-200">
             {loading ? (
               <tr>
-                <td colSpan="6" className="px-6 py-4 text-center text-gray-500">
+                <td colSpan="7" className="px-6 py-4 text-center text-gray-500">
                   <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2" />
                   Loading query logs...
                 </td>
               </tr>
             ) : queryLogs.length === 0 ? (
               <tr>
-                <td colSpan="6" className="px-6 py-4 text-center text-gray-500">
+                <td colSpan="7" className="px-6 py-4 text-center text-gray-500">
                   <FileText className="w-12 h-12 mx-auto mb-2 text-gray-300" />
                   <div className="font-medium">No query logs available</div>
                   <div className="text-sm mt-1">Query logs will appear here once queries are submitted.</div>
@@ -212,6 +213,11 @@ const QueueTable = () => {
                   className="transition-colors hover:bg-gray-200"
                 >
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(log.created_at)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm">
+                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-db-navy/10 text-db-navy">
+                      {api.getSpaceName(log.genie_space_id)}
+                    </span>
+                  </td>
                   <td className="px-6 py-4 text-sm max-w-md text-gray-900">
                     <div className="truncate" title={log.query_text}>{log.query_text}</div>
                   </td>

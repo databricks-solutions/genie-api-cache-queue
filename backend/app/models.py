@@ -21,6 +21,7 @@ class RuntimeConfig(BaseModel):
     auth_mode: Optional[str] = "app"  # "app" or "user"
     user_pat: Optional[str] = None  # Optional: User's Personal Access Token for full API access
     genie_space_id: Optional[str] = None
+    genie_spaces: Optional[list] = None  # List of {"id": "...", "name": "..."}
     sql_warehouse_id: Optional[str] = None
     similarity_threshold: Optional[float] = None
     max_queries_per_minute: Optional[int] = None
