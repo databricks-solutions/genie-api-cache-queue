@@ -187,6 +187,37 @@ async def health_check():
     }
 
 
+@router.get("/space-info/{space_id}")
+async def get_space_info(space_id: str, req: Request):
+    """Fetch Genie Space metadata (name, description) using the caller's token."""
+    import httpx
+
+    token = req.headers.get('X-Forwarded-Access-Token') or settings.databricks_token
+    if not token:
+        raise HTTPException(status_code=401, detail="No token available to query Genie API")
+
+    host = settings.databricks_host
+    if not host:
+        raise HTTPException(status_code=500, detail="DATABRICKS_HOST not configured")
+    if not host.startswith("http"):
+        host = f"https://{host}"
+
+    url = f"{host}/api/2.0/genie/spaces/{space_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail=f"Genie API error: {resp.text}")
+            data = resp.json()
+            return {
+                "space_id": space_id,
+                "name": data.get("display_name") or data.get("title") or data.get("name") or "",
+                "description": data.get("description") or "",
+            }
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to reach Genie API: {e}")
+
+
 # --- Unified config endpoints (accessible by frontend without Bearer token) ---
 
 from app.api.config_store import get_effective_setting, update_overrides, get_overrides
@@ -197,6 +228,7 @@ class UIConfigUpdate(BaseModel):
     lakebase_service_token: Optional[str] = None
     user_pat: Optional[str] = None
     genie_space_id: Optional[str] = None
+    genie_spaces: Optional[list] = None  # List of {"id": "...", "name": "..."}
     sql_warehouse_id: Optional[str] = None
     similarity_threshold: Optional[float] = None
     max_queries_per_minute: Optional[int] = None
@@ -223,6 +255,7 @@ async def get_config():
     return {
         "auth_mode": overrides.get("auth_mode", "app"),
         "genie_space_id": get_effective_setting("genie_space_id"),
+        "genie_spaces": get_effective_setting("genie_spaces") or [],
         "sql_warehouse_id": get_effective_setting("sql_warehouse_id"),
         "similarity_threshold": get_effective_setting("similarity_threshold"),
         "max_queries_per_minute": get_effective_setting("max_queries_per_minute"),
@@ -269,9 +302,9 @@ async def put_config(body: UIConfigUpdate):
     return {"updated": updated, "message": "Configuration updated successfully"}
 
 
-@router.delete("/cache")
-async def clear_cache(req: Request):
-    """Delete all cached queries from Lakebase."""
+@router.get("/cache/count")
+async def cache_count(req: Request):
+    """Return cache entry counts grouped by space_id."""
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
@@ -284,8 +317,31 @@ async def clear_cache(req: Request):
         user_token = req.headers.get('X-Forwarded-Access-Token')
         user_email = req.headers.get('X-Forwarded-Email')
         rs = RuntimeSettings(rc, user_token, user_email)
-        count = await _db.db_service.clear_cache(rs)
-        return {"success": True, "deleted": count, "message": f"Cache cleared ({count} entries deleted)"}
+        result = await _db.db_service.get_cache_count(rs)
+        return result
+    except Exception as e:
+        logger.exception("Error getting cache count")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/cache")
+async def clear_cache(req: Request, space_id: Optional[str] = None):
+    """Delete cached queries, optionally filtered by space_id."""
+    try:
+        overrides = get_overrides()
+        rc = RuntimeConfig(
+            auth_mode=overrides.get("auth_mode", "app"),
+            storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
+            lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
+            lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
+            cache_table_name=get_effective_setting("cache_table_name") or settings.pgvector_table_name or "cached_queries",
+        )
+        user_token = req.headers.get('X-Forwarded-Access-Token')
+        user_email = req.headers.get('X-Forwarded-Email')
+        rs = RuntimeSettings(rc, user_token, user_email)
+        count = await _db.db_service.clear_cache(rs, genie_space_id=space_id)
+        label = f" for space {space_id}" if space_id else ""
+        return {"success": True, "deleted": count, "message": f"Cache cleared{label} ({count} entries deleted)"}
     except Exception as e:
         logger.exception("Error clearing cache")
         raise HTTPException(status_code=500, detail=str(e))

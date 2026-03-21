@@ -2,6 +2,33 @@
 
 Drop-in replacement for the Databricks Genie API that adds semantic caching, rate-limit management, and automatic retry. Deploy as a Databricks App — callers only change the base URL, zero code changes.
 
+## Screenshots
+
+### Chat & Flow Diagram
+Submit queries in natural language and track them in real-time through the processing pipeline (Received → Cache Check → Genie/SQL → Completed).
+
+![Chat & Flow](docs/screenshots/01-chat-flow.png)
+
+### Cache (Lakebase)
+Persistent semantic cache backed by Lakebase (PostgreSQL + pgvector). Shows cached queries across multiple Genie Spaces with SQL, usage counts, and freshness.
+
+![Cache](docs/screenshots/02-cache-lakebase.png)
+
+### Query Logs
+Complete history of all submitted queries with status, cache hit/miss, and multi-space badges.
+
+![Query Logs](docs/screenshots/03-query-logs.png)
+
+### API Reference
+Built-in documentation for both the Drop-in Genie API (same endpoints, just change the URL) and the simplified Proxy API.
+
+![API Reference](docs/screenshots/04-api-reference.png)
+
+### Settings
+Configure Genie Spaces (multi-space support), SQL Warehouse, cache parameters, authentication mode, and Lakebase storage.
+
+![Settings](docs/screenshots/05-settings.png)
+
 ## How It Works
 
 The Genie API has a hard limit of **5 queries per minute per workspace**. This app sits in front of it and handles the three main scenarios:
@@ -50,8 +77,8 @@ Open the app URL and go to the **Settings** tab:
 
 | Field | Description |
 |-------|-------------|
-| **Genie Space ID** | Your Genie Space identifier (required) |
-| **SQL Warehouse ID** | SQL warehouse for query execution (required) |
+| **Genie Spaces** | One or more Genie Spaces with ID and display name (required) |
+| **SQL Warehouse ID** | SQL warehouse for query execution, shared across all spaces (required) |
 | **Storage Backend** | `Local` (in-memory, lost on restart) or `Lakebase` (persistent) |
 
 For **Lakebase** (recommended), also configure:
@@ -151,8 +178,8 @@ All settings are configurable via the UI Settings tab or `PUT /api/config`:
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| `genie_space_id` | Genie Space ID | Required |
-| `sql_warehouse_id` | SQL Warehouse for query execution | Required |
+| `genie_spaces` | List of `{"id": "<your-space-id>", "name": "<your-display-name>"}` Genie Spaces | Required (at least 1) |
+| `sql_warehouse_id` | Your SQL Warehouse ID for query execution (shared across spaces) | Required |
 | `storage_backend` | `lakebase` or `local` | `local` |
 | `lakebase_service_token` | SP credentials for local dev (auto-detected in Databricks Apps) | Local dev only |
 | `lakebase_instance_name` | Autoscaling project name or hostname | Required for Lakebase |
@@ -214,17 +241,17 @@ The included `demo_notebook.ipynb` fires 7 queries in parallel to demonstrate:
 2. **Via the App (first run)** — all queries complete, queue manages rate limits
 3. **Via the App (second run)** — all queries served from cache instantly
 
-Before running, copy `.env.notebook` to your Workspace home and fill in your values:
+Before running, copy `.env.example` to your Workspace home and fill in your values:
 
 ```bash
 # Upload to your Workspace home directory
 databricks workspace import /Workspace/Users/<your-email>/.env \
-  --file .env.notebook --format RAW --profile <profile>
+  --file .env.example --format RAW --profile <profile>
 ```
 
 Then edit `/Workspace/Users/<your-email>/.env` in the workspace with your actual credentials. The notebook auto-detects your username and loads the `.env` from there.
 
-> **Note:** `.env.notebook` is only for the demo notebook. The app itself is configured via the Settings UI or `PUT /api/config`.
+> **Note:** `.env.example` is only for the demo notebook. The app itself is configured via the Settings UI or `PUT /api/config`.
 
 ## Continuous Deployment
 
@@ -240,3 +267,7 @@ databricks apps deploy genie-cache-queue \
 ```bash
 databricks apps logs genie-cache-queue --follow
 ```
+
+## Credits
+
+This project is based on [genie-lakebase-cache](https://github.com/databricks-field-eng/genie-lakebase-cache) by Sean Kim.

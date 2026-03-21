@@ -554,14 +554,37 @@ class PGVectorStorageService:
 
             return dict(stats)
 
-    async def clear_cache(self):
-        """Delete all cached queries."""
+    async def get_cache_count(self):
+        """Return cache entry counts grouped by genie_space_id."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized.")
         async with self.pool.acquire() as conn:
-            count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
-            await conn.execute(f"DELETE FROM {self.table_name}")
-            logger.info("Cache cleared: %d entries deleted from %s", count, self.table_name)
+            rows = await conn.fetch(f"""
+                SELECT COALESCE(genie_space_id, 'unknown') as space_id, COUNT(*) as count
+                FROM {self.table_name}
+                GROUP BY genie_space_id
+            """)
+            total = sum(r['count'] for r in rows)
+            by_space = {r['space_id']: r['count'] for r in rows}
+            return {"total": total, "by_space": by_space}
+
+    async def clear_cache(self, genie_space_id=None):
+        """Delete cached queries, optionally filtered by genie_space_id."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized.")
+        async with self.pool.acquire() as conn:
+            if genie_space_id:
+                count = await conn.fetchval(
+                    f"SELECT COUNT(*) FROM {self.table_name} WHERE genie_space_id = $1", genie_space_id
+                )
+                await conn.execute(
+                    f"DELETE FROM {self.table_name} WHERE genie_space_id = $1", genie_space_id
+                )
+                logger.info("Cache cleared for space %s: %d entries deleted from %s", genie_space_id, count, self.table_name)
+            else:
+                count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
+                await conn.execute(f"DELETE FROM {self.table_name}")
+                logger.info("Cache cleared: %d entries deleted from %s", count, self.table_name)
             return count
 
     async def close(self):
@@ -594,6 +617,7 @@ class PGVectorStorageService:
                 DO UPDATE SET
                     stage = EXCLUDED.stage,
                     from_cache = EXCLUDED.from_cache,
+                    genie_space_id = COALESCE(EXCLUDED.genie_space_id, {self.query_log_table_name}.genie_space_id),
                     updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
                 RETURNING id
             """, query_id, query_text, identity, stage, from_cache, genie_space_id)

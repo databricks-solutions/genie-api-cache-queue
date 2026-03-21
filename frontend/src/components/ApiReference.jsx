@@ -23,7 +23,9 @@ const ApiReference = () => {
 
   const baseUrl = window.location.origin;
   const config = api.getConfig();
-  const spaceId = config.genie_space_id || '<SPACE_ID>';
+  const spaceId = api.getActiveSpaceId() || config.genie_space_id || '<SPACE_ID>';
+  const spaceName = api.getSpaceName(spaceId);
+  const genieSpaces = config.genie_spaces || [];
   const warehouseId = config.sql_warehouse_id || '<WAREHOUSE_ID>';
 
   const copyToClipboard = (text, id) => {
@@ -78,10 +80,31 @@ const ApiReference = () => {
               Todos os endpoints requerem <code className="bg-gray-300 px-1 rounded">Authorization: Bearer &lt;token&gt;</code> (OAuth JWT ou PAT).
             </p>
           </div>
-          {config.genie_space_id && (
-            <div className="p-3 rounded-lg bg-gray-100 border text-xs text-gray-600">
-              <span className="font-medium">Config atual:</span>{' '}
-              space_id={config.genie_space_id}, warehouse_id={config.sql_warehouse_id || 'nao definido'}
+          {(genieSpaces.length > 0 || config.genie_space_id) && (
+            <div className="p-3 rounded-lg bg-gray-100 border text-xs text-gray-600 space-y-1">
+              <div>
+                <span className="font-medium">Config atual:</span>{' '}
+                warehouse_id={config.sql_warehouse_id || 'nao definido'}
+              </div>
+              {genieSpaces.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5 mt-1">
+                  {genieSpaces.map((s) => (
+                    <span
+                      key={s.id}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
+                        s.id === spaceId
+                          ? 'bg-[#0B2026] text-white'
+                          : 'bg-gray-200 text-gray-700'
+                      }`}
+                    >
+                      {s.name || s.id.slice(0, 8)}
+                      <span className="opacity-60 font-mono">{s.id.slice(0, 8)}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div>space_id={config.genie_space_id}</div>
+              )}
             </div>
           )}
         </div>
@@ -252,7 +275,7 @@ H = {"Authorization": f"Bearer {'{TOKEN}'}", "Content-Type": "application/json"}
 
 # 1. Configurar (so precisa uma vez)
 requests.put(f"{'{BASE}'}/api/v1/config", headers=H, json={
-    "genie_space_id": SPACE,
+    "genie_spaces": [{"id": SPACE, "name": "${spaceName || 'My Space'}"}],
     "sql_warehouse_id": "${warehouseId}",
     "similarity_threshold": 0.92,
     "cache_ttl_seconds": 86400,
@@ -327,14 +350,14 @@ for att in data.get("attachments", []):
   -H "Authorization: Bearer $TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
-    "genie_space_id": "${spaceId}",
+    "genie_spaces": ${JSON.stringify(genieSpaces.length > 0 ? genieSpaces : [{ id: spaceId, name: "My Space" }])},
     "sql_warehouse_id": "${warehouseId}",
     "similarity_threshold": 0.92,
     "max_queries_per_minute": 5,
     "cache_ttl_seconds": 86400
   }'`}
                 </pre>
-                <CopyButton text={`curl -X PUT ${baseUrl}/api/v1/config -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"genie_space_id": "${spaceId}", "sql_warehouse_id": "${warehouseId}", "similarity_threshold": 0.92, "max_queries_per_minute": 5, "cache_ttl_seconds": 86400}'`} id="curl-config-put" />
+                <CopyButton text={`curl -X PUT ${baseUrl}/api/v1/config -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"genie_spaces": ${JSON.stringify(genieSpaces.length > 0 ? genieSpaces : [{ id: spaceId, name: "My Space" }])}, "sql_warehouse_id": "${warehouseId}", "similarity_threshold": 0.92, "max_queries_per_minute": 5, "cache_ttl_seconds": 86400}'`} id="curl-config-put" />
               </div>
             </div>
           )}

@@ -271,6 +271,7 @@ async def proxy_save_query_log(body: SaveQueryLogBody, request: Request):
 
 class ServerConfigUpdate(BaseModel):
     genie_space_id: Optional[str] = None
+    genie_spaces: Optional[list] = None  # List of {"id": "...", "name": "..."}
     sql_warehouse_id: Optional[str] = None
     similarity_threshold: Optional[float] = None
     max_queries_per_minute: Optional[int] = None
@@ -294,6 +295,7 @@ async def proxy_get_config(request: Request):
     ttl_hours = _get_effective_setting("cache_ttl_hours") or 0
     return {
         "genie_space_id": _get_effective_setting("genie_space_id"),
+        "genie_spaces": _get_effective_setting("genie_spaces") or [],
         "sql_warehouse_id": _get_effective_setting("sql_warehouse_id"),
         "similarity_threshold": _get_effective_setting("similarity_threshold"),
         "max_queries_per_minute": _get_effective_setting("max_queries_per_minute"),
