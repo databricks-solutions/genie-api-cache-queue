@@ -30,8 +30,10 @@ const Settings = () => {
     cache_ttl_value: '24',
     cache_ttl_unit: 'hours',
     embedding_provider: 'databricks',
-    databricks_embedding_endpoint: 'databricks-bge-large-en',
+    databricks_embedding_endpoint: 'databricks-gte-large-en',
     shared_cache: true,
+    question_normalization_enabled: true,
+    cache_validation_enabled: true,
     storage_backend: 'local',
     lakebase_instance_name: '',
     lakebase_catalog: '',
@@ -66,8 +68,10 @@ const Settings = () => {
           cache_ttl_value: ttl.value,
           cache_ttl_unit: ttl.unit,
           shared_cache: server.shared_cache ?? true,
+          question_normalization_enabled: server.question_normalization_enabled ?? true,
+          cache_validation_enabled: server.cache_validation_enabled ?? true,
           embedding_provider: server.embedding_provider || 'databricks',
-          databricks_embedding_endpoint: server.databricks_embedding_endpoint || 'databricks-bge-large-en',
+          databricks_embedding_endpoint: server.databricks_embedding_endpoint || 'databricks-gte-large-en',
           storage_backend: server.storage_backend === 'pgvector' ? 'lakebase' : (server.storage_backend || 'local'),
           lakebase_instance_name: server.lakebase_instance_name || '',
           lakebase_catalog: server.lakebase_catalog || '',
@@ -112,6 +116,8 @@ const Settings = () => {
         max_queries_per_minute: parseInt(config.max_queries_per_minute) || undefined,
         cache_ttl_seconds: ttlToSeconds(config.cache_ttl_value, config.cache_ttl_unit),
         shared_cache: config.shared_cache,
+        question_normalization_enabled: config.question_normalization_enabled,
+        cache_validation_enabled: config.cache_validation_enabled,
         embedding_provider: config.embedding_provider || undefined,
         databricks_embedding_endpoint: config.databricks_embedding_endpoint || undefined,
         storage_backend: config.storage_backend || undefined,
@@ -388,10 +394,42 @@ const Settings = () => {
                 name="databricks_embedding_endpoint"
                 value={config.databricks_embedding_endpoint}
                 onChange={handleChange}
-                placeholder="databricks-bge-large-en"
+                placeholder="databricks-gte-large-en"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-db-lava focus:border-transparent"
               />
               <p className="text-xs mt-1 text-gray-500">Databricks Foundation Model endpoint</p>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1 text-gray-500">
+                Advanced Options
+              </label>
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <button
+                    type="button"
+                    onClick={() => setConfig(prev => ({ ...prev, question_normalization_enabled: !prev.question_normalization_enabled }))}
+                    className={`w-full p-3 border-2 rounded-lg text-left transition-all ${
+                      config.question_normalization_enabled !== false ? 'border-db-lava bg-gray-200' : 'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <div className="font-medium text-sm text-gray-900">Question Normalization</div>
+                    <div className="text-xs text-gray-500">LLM rewrites questions to improve cache hit rates</div>
+                  </button>
+                </div>
+                <div className="flex-1">
+                  <button
+                    type="button"
+                    onClick={() => setConfig(prev => ({ ...prev, cache_validation_enabled: !prev.cache_validation_enabled }))}
+                    className={`w-full p-3 border-2 rounded-lg text-left transition-all ${
+                      config.cache_validation_enabled !== false ? 'border-db-lava bg-gray-200' : 'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <div className="font-medium text-sm text-gray-900">Cache Validation</div>
+                    <div className="text-xs text-gray-500">LLM confirms cache hits before returning results</div>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
 
