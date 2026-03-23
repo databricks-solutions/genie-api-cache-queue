@@ -40,10 +40,23 @@ async def submit_query(request: QueryRequest, req: Request):
 
         logger.info("Submit query: %r identity=%s", request.query[:50], user_email)
 
+        # Apply per-gateway settings (normalization/validation flags) if a gateway_id is resolvable
+        runtime_config = request.config
+        if runtime_config and runtime_config.genie_space_id:
+            try:
+                gateway = await _db.db_service.get_gateway(runtime_config.genie_space_id)
+                if gateway:
+                    runtime_config = runtime_config.model_copy(update={
+                        "question_normalization_enabled": gateway.get("question_normalization_enabled"),
+                        "cache_validation_enabled": gateway.get("cache_validation_enabled"),
+                    })
+            except Exception:
+                pass
+
         query_id = query_processor.submit_query(
             request.query,
             user_email,
-            runtime_config=request.config,
+            runtime_config=runtime_config,
             user_token=user_token,
             user_email=user_email,
             conversation_id=request.conversation_id,
