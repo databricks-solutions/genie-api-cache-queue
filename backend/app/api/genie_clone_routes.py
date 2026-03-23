@@ -196,6 +196,9 @@ async def _process_genie_background(
             logger.info("Background rate limited, waiting 5s (wait %d/%d)", rate_limit_waits, max_rate_limit_waits)
             await asyncio.sleep(5)
 
+        if msg_id in _synthetic_messages:
+            _synthetic_messages[msg_id].setdefault("_proxy", {})["stage"] = "processing_genie"
+
         try:
             if conversation_id and not conversation_id.startswith(CONV_PREFIX):
                 try:
@@ -235,6 +238,22 @@ async def _process_genie_background(
                 for _att in completed.get("attachments", []):
                     if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
                         _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+
+                actual_result = None
+                if sql_query:
+                    try:
+                        sql_exec = await genie_service.execute_sql(sql_query, rs)
+                        if sql_exec.get("status") == "SUCCEEDED":
+                            actual_result = sql_exec.get("result")
+                    except Exception as e:
+                        logger.warning("execute_sql after cache miss failed: %s", e)
+
+                _synthetic_messages[msg_id]["_proxy"] = {
+                    "stage": "completed",
+                    "from_cache": False,
+                    "sql_query": sql_query,
+                    "result": actual_result,
+                }
                 return
 
             # Non-COMPLETED terminal status
@@ -244,6 +263,7 @@ async def _process_genie_background(
                 "status": result.get("status", "FAILED"),
                 "attachments": [],
                 "error": result.get("error"),
+                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
             }
             return
 
@@ -270,6 +290,7 @@ async def _process_genie_background(
         "status": "FAILED",
         "attachments": [],
         "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
+        "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
     }
 
 
@@ -365,6 +386,7 @@ async def _handle_query(
     # --- Cache MISS → non-blocking background processing ---
     conv_id, msg_id, att_id = _make_synthetic_ids()
     response = _format_executing_response(conv_id, msg_id)
+    response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
     _synthetic_messages[msg_id] = response
 
     asyncio.create_task(_process_genie_background(
@@ -381,7 +403,7 @@ async def _handle_query(
     ))
 
     logger.info("Clone CACHE MISS: queued background task msg_id=%s", msg_id)
-    return response
+    return {k: v for k, v in response.items() if not k.startswith("_")}
 
 
 # ---------------------------------------------------------------------------
