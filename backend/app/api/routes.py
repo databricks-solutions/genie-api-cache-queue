@@ -19,7 +19,6 @@ from app.models import (
     RuntimeConfig
 )
 from app.runtime_config import RuntimeSettings
-from app.services.queue_service import queue_service
 from app.api.genie_clone_routes import _handle_query, _synthetic_messages
 import app.services.database as _db
 from app.config import get_settings
@@ -144,12 +143,8 @@ class QueueRequest(BaseModel):
 
 @router.post("/queue", response_model=List[QueuedQuery])
 async def get_queue_post(request: Optional[QueueRequest] = None):
-    """Get all queued queries."""
-    try:
-        queued = queue_service.get_all_queued()
-        return queued
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Get all queued queries. Queue has been replaced by direct background processing."""
+    return []
 
 
 # Query Logs Endpoints

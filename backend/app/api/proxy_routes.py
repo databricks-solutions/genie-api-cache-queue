@@ -6,7 +6,6 @@ Callers authenticate with their own PAT or OAuth token via Authorization header.
 """
 
 import logging
-import asyncio
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
@@ -17,8 +16,6 @@ from app.models import (
     ProxyQueryStatusResponse,
     RuntimeConfig,
 )
-from app.services.query_processor import query_processor
-from app.services.queue_service import queue_service
 import app.services.database as _db
 from app.config import get_settings
 from app.api.config_store import (
@@ -38,9 +35,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 proxy_router = APIRouter()
-
-SYNC_TIMEOUT_SECONDS = 120
-SYNC_POLL_INTERVAL = 1.0
 
 
 def _build_runtime_config(token: str, body: ProxyQueryRequest) -> RuntimeConfig:
@@ -107,91 +101,36 @@ def _validate_required_ids(runtime_config: RuntimeConfig):
 
 @proxy_router.post("/query", response_model=ProxyQueryResponse)
 async def proxy_submit_query(body: ProxyQueryRequest, request: Request):
-    """Submit a query for async processing. Poll GET /query/{query_id} for results."""
-    token = extract_bearer_token(request)
-    runtime_config = _build_runtime_config(token, body)
-    _validate_required_ids(runtime_config)
-
-    identity = (body.identity
-                or request.headers.get("X-Forwarded-Email")
-                or "api-user")
-
-    try:
-        query_id = query_processor.submit_query(
-            query_text=body.query,
-            identity=identity,
-            runtime_config=runtime_config,
-            user_token=None,
-            user_email=request.headers.get("X-Forwarded-Email"),
-            conversation_id=body.conversation_id,
-            conversation_synced=bool(body.conversation_id),
-            conversation_history=None,
-        )
-        return ProxyQueryResponse(query_id=query_id, status="received")
-    except Exception as e:
-        logger.exception("Error submitting proxy query")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Submit a query for async processing. Poll GET /query/{query_id} for results.
+    NOTE: Use the Genie Clone API (/api/2.0/genie/spaces/{space_id}/start-conversation) instead.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint has been replaced. Use POST /api/2.0/genie/spaces/{space_id}/start-conversation instead.",
+    )
 
 
 @proxy_router.get("/query/{query_id}", response_model=ProxyQueryStatusResponse)
 async def proxy_get_query_status(query_id: str, request: Request):
-    """Poll the status and result of a submitted query."""
+    """Poll the status and result of a submitted query.
+    NOTE: Use the Genie Clone API (/api/2.0/genie/spaces/…/conversations/…/messages/{id}) instead.
+    """
     extract_bearer_token(request)
-
-    raw = queue_service.get_query_status(query_id)
-    if not raw:
-        raise HTTPException(status_code=404, detail=f"Query {query_id} not found")
-
-    return _map_status(raw)
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint has been replaced. Use GET /api/2.0/genie/spaces/{space_id}/conversations/{conv_id}/messages/{msg_id} instead.",
+    )
 
 
 @proxy_router.post("/query/sync", response_model=ProxyQueryStatusResponse)
 async def proxy_submit_query_sync(body: ProxyQueryRequest, request: Request):
-    """Submit a query and wait for the result (blocking, up to 120s timeout)."""
-    token = extract_bearer_token(request)
-    runtime_config = _build_runtime_config(token, body)
-    _validate_required_ids(runtime_config)
-
-    identity = (body.identity
-                or request.headers.get("X-Forwarded-Email")
-                or "api-user")
-
-    try:
-        query_id = query_processor.submit_query(
-            query_text=body.query,
-            identity=identity,
-            runtime_config=runtime_config,
-            user_token=None,
-            user_email=request.headers.get("X-Forwarded-Email"),
-            conversation_id=body.conversation_id,
-            conversation_synced=bool(body.conversation_id),
-            conversation_history=None,
-        )
-    except Exception as e:
-        logger.exception("Error submitting sync proxy query")
-        raise HTTPException(status_code=500, detail=str(e))
-
-    elapsed = 0.0
-    while elapsed < SYNC_TIMEOUT_SECONDS:
-        await asyncio.sleep(SYNC_POLL_INTERVAL)
-        elapsed += SYNC_POLL_INTERVAL
-
-        raw = queue_service.get_query_status(query_id)
-        if not raw:
-            continue
-
-        stage = raw.get("stage", "")
-        if stage in ("completed", "failed"):
-            return _map_status(raw)
-
-    raw = queue_service.get_query_status(query_id) or {}
-    response = _map_status(raw) if raw else ProxyQueryStatusResponse(
-        query_id=query_id, status="timeout", error=f"Query timed out after {SYNC_TIMEOUT_SECONDS} seconds"
+    """Submit a query and wait for the result (blocking, up to 120s timeout).
+    NOTE: Use the Genie Clone API (/api/2.0/genie/spaces/{space_id}/start-conversation) instead.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint has been replaced. Use POST /api/2.0/genie/spaces/{space_id}/start-conversation instead.",
     )
-    if response.status not in ("completed", "failed"):
-        response.status = "timeout"
-        response.error = response.error or f"Query timed out after {SYNC_TIMEOUT_SECONDS} seconds"
-    return response
 
 
 @proxy_router.get("/health")
@@ -222,12 +161,9 @@ async def proxy_list_cache(request: Request):
 
 @proxy_router.get("/queue")
 async def proxy_list_queue(request: Request):
-    """List all queued queries."""
+    """List all queued queries. Queue has been replaced by direct background processing."""
     extract_bearer_token(request)
-    try:
-        return queue_service.get_all_queued()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return []
 
 
 @proxy_router.get("/query-logs")

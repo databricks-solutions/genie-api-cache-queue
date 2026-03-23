@@ -17,7 +17,6 @@ from pathlib import Path
 from app.api.routes import router
 from app.api.genie_clone_routes import genie_clone_router
 from app.api.gateway_routes import gateway_router
-from app.services.query_processor import query_processor
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -29,9 +28,6 @@ async def lifespan(app: FastAPI):
     # Initialize storage backend (creates connection pool if using Lakebase/PGVector)
     from app.services.database import initialize_storage
     storage = await initialize_storage()
-
-    # Start background queue processor
-    queue_task = asyncio.create_task(query_processor.process_queue())
 
     # Start periodic OAuth token refresh for default Lakebase backend
     refresh_task = None
@@ -50,11 +46,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    queue_task.cancel()
     if refresh_task:
         refresh_task.cancel()
     try:
-        tasks = [queue_task] + ([refresh_task] if refresh_task else [])
+        tasks = ([refresh_task] if refresh_task else [])
         await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
         pass

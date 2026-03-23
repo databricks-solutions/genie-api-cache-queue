@@ -27,8 +27,10 @@ from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
-from app.services.queue_service import queue_service
+from app.services.storage_local import get_local_queue as _get_local_queue
 import app.services.database as _db
+
+_rate_limiter = _get_local_queue()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -188,7 +190,7 @@ async def _process_genie_background(
     while attempt <= max_retries:
         # Wait for rate limit slot (does NOT consume an attempt)
         rate_limit_waits = 0
-        while not queue_service.backend.check_rate_limit(identity, rs.max_queries_per_minute):
+        while not _rate_limiter.check_rate_limit(identity, rs.max_queries_per_minute):
             rate_limit_waits += 1
             if rate_limit_waits > max_rate_limit_waits:
                 logger.warning("Background rate limit wait exhausted for msg_id=%s", msg_id)
