@@ -233,12 +233,20 @@ async def _process_genie_background(
                 if real_attachments:
                     completed["attachments"] = real_attachments
 
+                # Set preliminary _proxy BEFORE the await so status polls see valid state
+                completed["_proxy"] = {
+                    "stage": "processing_genie",
+                    "from_cache": False,
+                    "sql_query": sql_query,
+                    "result": None,
+                }
                 _synthetic_messages[msg_id] = completed
                 _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
                 for _att in completed.get("attachments", []):
                     if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
                         _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
 
+                # Now execute SQL (poll arriving here sees stage=processing_genie, not received)
                 actual_result = None
                 if sql_query:
                     try:
@@ -248,6 +256,7 @@ async def _process_genie_background(
                     except Exception as e:
                         logger.warning("execute_sql after cache miss failed: %s", e)
 
+                # Update _proxy to final state
                 _synthetic_messages[msg_id]["_proxy"] = {
                     "stage": "completed",
                     "from_cache": False,

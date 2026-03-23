@@ -65,6 +65,8 @@ async def submit_query(request: QueryRequest, req: Request):
 
         query_id = str(uuid.uuid4())
         msg_id = result.get("message_id")
+        if not msg_id:
+            raise HTTPException(status_code=500, detail="Internal error: no message_id returned")
         _proxy_registry[query_id] = msg_id
 
         return QueryResponse(query_id=query_id, stage=QueryStage.RECEIVED, message="Query submitted successfully")
