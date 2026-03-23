@@ -64,11 +64,11 @@ class QueryResponse(BaseModel):
 
 class QueryStatus(BaseModel):
     query_id: str
-    query_text: str
-    identity: str
+    query_text: Optional[str] = None
+    identity: Optional[str] = None
     stage: QueryStage
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     result: Optional[Union[dict, List[dict], Any]] = None  # Can be dict or list (Genie attachments)
     sql_query: Optional[str] = None
     error: Optional[str] = None
