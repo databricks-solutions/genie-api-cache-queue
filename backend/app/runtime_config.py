@@ -119,12 +119,16 @@ class RuntimeSettings:
     @property
     def question_normalization_enabled(self) -> bool:
         from app.api.config_store import get_effective_setting
+        if self.runtime and self.runtime.question_normalization_enabled is not None:
+            return self.runtime.question_normalization_enabled
         val = get_effective_setting("question_normalization_enabled")
         return val if val is not None else True
 
     @property
     def cache_validation_enabled(self) -> bool:
         from app.api.config_store import get_effective_setting
+        if self.runtime and self.runtime.cache_validation_enabled is not None:
+            return self.runtime.cache_validation_enabled
         val = get_effective_setting("cache_validation_enabled")
         return val if val is not None else True
 

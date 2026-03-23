@@ -96,6 +96,8 @@ def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
         lakebase_schema=get_effective_setting("lakebase_schema") or None,
         cache_table_name=get_effective_setting("cache_table_name") or get_effective_setting("pgvector_table_name") or None,
         shared_cache=gw.get("shared_cache") if gw.get("shared_cache") is not None else get_effective_setting("shared_cache"),
+        question_normalization_enabled=gw.get("question_normalization_enabled") if gw.get("question_normalization_enabled") is not None else get_effective_setting("question_normalization_enabled"),
+        cache_validation_enabled=gw.get("cache_validation_enabled") if gw.get("cache_validation_enabled") is not None else get_effective_setting("cache_validation_enabled"),
     )
     return RuntimeSettings(rc, user_token=token, user_email=None)
 
