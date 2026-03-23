@@ -360,7 +360,7 @@ async def _handle_query(
         }
         _synthetic_messages[msg_id] = response
         _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-        return response
+        return {k: v for k, v in response.items() if not k.startswith("_")}
 
     # --- Cache MISS → non-blocking background processing ---
     conv_id, msg_id, att_id = _make_synthetic_ids()
@@ -426,7 +426,7 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
         stored = _synthetic_messages.get(message_id)
         if not stored:
             raise HTTPException(status_code=404, detail="Message not found")
-        return stored
+        return {k: v for k, v in stored.items() if not k.startswith("_")}
 
     # Real message — proxy to Genie
     path = f"/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
