@@ -180,3 +180,15 @@ class RuntimeSettings:
         if self.runtime and self.runtime.shared_cache is not None:
             return self.runtime.shared_cache
         return True
+
+    @property
+    def question_normalization_enabled(self) -> bool:
+        if self.runtime and self.runtime.question_normalization_enabled is not None:
+            return self.runtime.question_normalization_enabled
+        return True
+
+    @property
+    def cache_validation_enabled(self) -> bool:
+        if self.runtime and self.runtime.cache_validation_enabled is not None:
+            return self.runtime.cache_validation_enabled
+        return True

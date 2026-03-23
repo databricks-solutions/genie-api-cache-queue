@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Embedding configuration
     embedding_provider: str = os.getenv("EMBEDDING_PROVIDER", "databricks")  # databricks or local
-    databricks_embedding_endpoint: str = os.getenv("DATABRICKS_EMBEDDING_ENDPOINT", "databricks-bge-large-en")
+    databricks_embedding_endpoint: str = os.getenv("DATABRICKS_EMBEDDING_ENDPOINT", "databricks-gte-large-en")
     local_embedding_model: str = os.getenv("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     
     # Storage backend selection

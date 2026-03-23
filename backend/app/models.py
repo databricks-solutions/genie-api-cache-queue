@@ -42,6 +42,10 @@ class RuntimeConfig(BaseModel):
     # Cache scope
     shared_cache: Optional[bool] = True  # True = global cache, False = per-user cache
 
+    # Feature flags
+    question_normalization_enabled: Optional[bool] = None  # LLM-based question normalization
+    cache_validation_enabled: Optional[bool] = None  # LLM-based cache hit validation
+
 class QueryRequest(BaseModel):
     query: str
     identity: str

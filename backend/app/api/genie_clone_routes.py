@@ -25,6 +25,8 @@ from app.api.config_store import get_effective_setting
 from app.api.auth_helpers import extract_bearer_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
+from app.services.question_normalizer import normalize_question
+from app.services.cache_validator import validate_cache_entry
 from app.services.queue_service import queue_service
 import app.services.database as _db
 
@@ -151,6 +153,7 @@ async def _process_genie_background(
     rs,
     msg_id: str,
     att_id: str,
+    original_query_text: str = None,
     conversation_id: str = None,
     delay: float = 0,
     max_retries: int = 3,
@@ -192,6 +195,7 @@ async def _process_genie_background(
                         cache_id = await _db.db_service.save_query_cache(
                             query_text, query_embedding, sql_query,
                             identity, space_id, rs,
+                            original_query_text=original_query_text,
                         )
                         logger.info("Background cache SAVED id=%s query=%s", cache_id, query_text[:50])
                     except Exception as e:
@@ -268,6 +272,10 @@ async def _handle_query(
     """
     rs = _build_runtime_settings(token, space_id)
 
+    original_query_text = query_text
+    if rs.question_normalization_enabled:
+        query_text = await normalize_question(query_text, rs)
+
     # Generate embedding and check cache
     query_embedding = None
     cached = None
@@ -281,9 +289,16 @@ async def _handle_query(
     except Exception as e:
         logger.warning("Cache lookup failed: %s — proceeding without cache", e)
 
+    if cached and rs.cache_validation_enabled:
+        cache_id, cached_query, sql_query, similarity, cached_original = cached
+        is_valid = await validate_cache_entry(original_query_text, cached_original, rs)
+        if not is_valid:
+            logger.info("LLM validation rejected cache hit id=%s — treating as MISS", cache_id)
+            cached = None
+
     # --- Cache HIT: execute cached SQL against warehouse ---
     if cached:
-        cache_id, cached_query, sql_query, similarity = cached
+        cache_id, cached_query, sql_query, similarity, cached_original = cached
         logger.info("Clone CACHE HIT: sim=%.3f sql=%s", similarity, sql_query[:80] if sql_query else "")
 
         conv_id, msg_id, att_id = _make_synthetic_ids()
@@ -328,6 +343,7 @@ async def _handle_query(
     asyncio.create_task(_process_genie_background(
         space_id=space_id,
         query_text=query_text,
+        original_query_text=original_query_text,
         query_embedding=query_embedding,
         identity=identity,
         token=token,

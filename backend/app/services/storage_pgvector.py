@@ -292,6 +292,7 @@ class PGVectorStorageService:
             CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id SERIAL PRIMARY KEY,
                 query_text TEXT NOT NULL,
+                original_query_text TEXT,
                 query_embedding vector(1024),
                 sql_query TEXT NOT NULL,
                 identity VARCHAR(255) NOT NULL,
@@ -404,6 +405,7 @@ class PGVectorStorageService:
                 SELECT
                     id,
                     query_text,
+                    original_query_text,
                     sql_query,
                     1 - (query_embedding <=> $1::vector) AS similarity
                 FROM {self.table_name}
@@ -421,7 +423,7 @@ class PGVectorStorageService:
             if row:
                 await self._update_usage(conn, row['id'])
                 logger.info("Cache HIT id=%s similarity=%.3f query=%s", row['id'], row['similarity'], row['query_text'][:50])
-                return (row['id'], row['query_text'], row['sql_query'], float(row['similarity']))
+                return (row['id'], row['query_text'], row['sql_query'], float(row['similarity']), row['original_query_text'])
 
             # Log closest available match for diagnostics
             count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
@@ -455,7 +457,8 @@ class PGVectorStorageService:
         query_embedding: List[float],
         sql_query: str,
         identity: str,
-        genie_space_id: str
+        genie_space_id: str,
+        original_query_text: str = None,
     ) -> int:
         """Save a new query to the cache."""
         if not self.pool:
@@ -468,11 +471,11 @@ class PGVectorStorageService:
 
             row = await conn.fetchrow(f"""
                 INSERT INTO {self.table_name}
-                (query_text, query_embedding, sql_query, identity, genie_space_id,
+                (query_text, original_query_text, query_embedding, sql_query, identity, genie_space_id,
                  created_at, last_used, use_count)
-                VALUES ($1, $2::vector, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
                 RETURNING id
-            """, query_text, embedding_array, sql_query, identity, genie_space_id)
+            """, query_text, original_query_text, embedding_array, sql_query, identity, genie_space_id)
 
             cache_id = row['id']
             logger.info("Saved to cache id=%d", cache_id)

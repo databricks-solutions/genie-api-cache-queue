@@ -102,10 +102,12 @@ class DatabaseService:
         sql_query: str,
         identity: str,
         genie_space_id: str,
-        runtime_settings=None
+        runtime_settings=None,
+        original_query_text: str = None,
     ) -> int:
         return await self.backend.save_query_cache(
-            query_text, query_embedding, sql_query, identity, genie_space_id, runtime_settings
+            query_text, query_embedding, sql_query, identity, genie_space_id, runtime_settings,
+            original_query_text=original_query_text,
         )
 
     async def get_all_cached_queries(self, identity: Optional[str] = None, runtime_settings=None) -> List[dict]:
