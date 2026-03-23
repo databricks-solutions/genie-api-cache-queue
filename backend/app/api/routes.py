@@ -3,6 +3,7 @@ API routes for the Genie Cache application.
 """
 
 import logging
+import uuid
 from fastapi import APIRouter, HTTPException, Request
 from typing import List, Optional
 from datetime import datetime
@@ -18,10 +19,12 @@ from app.models import (
     RuntimeConfig
 )
 from app.runtime_config import RuntimeSettings
-from app.services.query_processor import query_processor
 from app.services.queue_service import queue_service
+from app.api.genie_clone_routes import _handle_query, _synthetic_messages
 import app.services.database as _db
 from app.config import get_settings
+
+_proxy_registry: dict[str, str] = {}
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,45 +33,43 @@ settings = get_settings()
 
 @router.post("/query", response_model=QueryResponse)
 async def submit_query(request: QueryRequest, req: Request):
-    """Submit a new query for processing."""
     try:
-        user_token = req.headers.get('X-Forwarded-Access-Token')
-        user_email = req.headers.get('X-Forwarded-Email')
+        token = req.headers.get("X-Forwarded-Access-Token") or ""
+        identity = req.headers.get("X-Forwarded-Email") or ""
 
-        if not user_email:
-            raise HTTPException(status_code=401, detail="X-Forwarded-Email header missing — request must come through Databricks Apps.")
+        if not identity:
+            raise HTTPException(status_code=401, detail="X-Forwarded-Email header missing.")
 
-        logger.info("Submit query: %r identity=%s", request.query[:50], user_email)
-
-        # Apply per-gateway settings (normalization/validation flags) if a gateway_id is resolvable
-        runtime_config = request.config
-        if runtime_config and runtime_config.genie_space_id:
+        # Resolve gateway: config.genie_space_id may be a gateway UUID
+        gateway = None
+        space_id = request.config.genie_space_id if request.config else None
+        if space_id:
             try:
-                gateway = await _db.db_service.get_gateway(runtime_config.genie_space_id)
-                if gateway:
-                    runtime_config = runtime_config.model_copy(update={
-                        "question_normalization_enabled": gateway.get("question_normalization_enabled"),
-                        "cache_validation_enabled": gateway.get("cache_validation_enabled"),
-                    })
+                gw = await _db.db_service.get_gateway(space_id)
+                if gw:
+                    gateway = gw
+                    space_id = gw["genie_space_id"]
             except Exception:
                 pass
 
-        query_id = query_processor.submit_query(
-            request.query,
-            user_email,
-            runtime_config=runtime_config,
-            user_token=user_token,
-            user_email=user_email,
-            conversation_id=request.conversation_id,
-            conversation_synced=request.conversation_synced,
-            conversation_history=request.conversation_history,
+        if not space_id:
+            raise HTTPException(status_code=400, detail="No gateway or space_id provided.")
+
+        result = await _handle_query(
+            space_id=space_id,
+            query_text=request.query,
+            token=token,
+            identity=identity,
+            gateway=gateway,
         )
 
-        return QueryResponse(
-            query_id=query_id,
-            stage=QueryStage.RECEIVED,
-            message="Query submitted successfully"
-        )
+        query_id = str(uuid.uuid4())
+        msg_id = result.get("message_id")
+        _proxy_registry[query_id] = msg_id
+
+        return QueryResponse(query_id=query_id, stage=QueryStage.RECEIVED, message="Query submitted successfully")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error submitting query")
         raise HTTPException(status_code=500, detail=str(e))
@@ -79,13 +80,41 @@ class StatusRequest(BaseModel):
 
 @router.post("/query/{query_id}/status", response_model=QueryStatus)
 async def get_query_status_post(query_id: str, request: Optional[StatusRequest] = None):
-    """Get the status of a specific query."""
-    status = queue_service.get_query_status(query_id)
-
-    if not status:
+    msg_id = _proxy_registry.get(query_id)
+    if not msg_id:
         raise HTTPException(status_code=404, detail=f"Query {query_id} not found")
 
-    return QueryStatus(**status)
+    msg = _synthetic_messages.get(msg_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail=f"Query {query_id} not found")
+
+    proxy = msg.get("_proxy", {})
+    stage_str = proxy.get("stage", "received")
+    from_cache = proxy.get("from_cache", False)
+    sql_query = proxy.get("sql_query")
+    result = proxy.get("result")
+    error = msg.get("error")
+
+    _stage_map = {
+        "received":         QueryStage.RECEIVED,
+        "checking_cache":   QueryStage.CHECKING_CACHE,
+        "cache_hit":        QueryStage.CACHE_HIT,
+        "cache_miss":       QueryStage.CACHE_MISS,
+        "processing_genie": QueryStage.PROCESSING_GENIE,
+        "executing_sql":    QueryStage.EXECUTING_SQL,
+        "completed":        QueryStage.COMPLETED,
+        "failed":           QueryStage.FAILED,
+    }
+    stage = _stage_map.get(stage_str, QueryStage.RECEIVED)
+
+    return QueryStatus(
+        query_id=query_id,
+        stage=stage,
+        from_cache=from_cache,
+        sql_query=sql_query,
+        result=result,
+        error=str(error) if error else None,
+    )
 
 
 class CacheRequest(BaseModel):
