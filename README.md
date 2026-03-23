@@ -140,11 +140,12 @@ Configure once in the **Settings** page. These apply as defaults for all gateway
 
 | Field | Description |
 |-------|-------------|
-| **Storage Backend** | `Local` (in-memory, lost on restart) or `Lakebase` (persistent) |
 | **Lakebase Instance Name** | Autoscaling project name or direct hostname |
-| **Lakebase Schema** | Usually `public` |
-| **Lakebase Service Token** | SP `client_id:client_secret` or PAT (local dev only) |
-| **Embedding Provider** | Foundation Model API endpoint for semantic similarity |
+| **Lakebase Catalog / Schema** | Usually `default` / `public` |
+| **Lakebase Service Token** | The app's built-in SP handles authentication automatically — only set this to override |
+| **Embedding Provider** | `databricks` (Foundation Model API) or `local` |
+| **Question Normalization** | LLM rewrites questions before embedding to improve cache hit rate |
+| **Cache Validation** | LLM validates cached results are relevant before returning them |
 
 ---
 
