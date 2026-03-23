@@ -352,6 +352,12 @@ async def _handle_query(
                 },
             ],
         }
+        response["_proxy"] = {
+            "stage": "completed",
+            "from_cache": True,
+            "sql_query": sql_query,
+            "result": sql_result,
+        }
         _synthetic_messages[msg_id] = response
         _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
         return response
