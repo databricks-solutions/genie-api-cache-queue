@@ -22,8 +22,15 @@ compute:
 
 # Environment variables
 # DATABRICKS_HOST and DATABRICKS_TOKEN are automatically provided by Databricks Apps
-# Set other variables through Databricks Apps UI or CLI (see DATABRICKS_APPS.md)
-env: []
+env:
+  - name: STORAGE_BACKEND
+    value: pgvector
+  - name: LAKEBASE_INSTANCE
+    value: genie-cache
+  - name: LAKEBASE_CATALOG
+    value: default
+  - name: LAKEBASE_SCHEMA
+    value: public
 
 # Static files served by FastAPI (not needed here)
 

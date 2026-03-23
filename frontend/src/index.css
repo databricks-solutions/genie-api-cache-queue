@@ -4,11 +4,11 @@
 
 body {
   margin: 0;
-  font-family: 'DM Sans', Arial, sans-serif;
+  font-family: 'DM Sans', -apple-system, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #F9F7F4;
-  color: #0B2026;
+  background-color: #FFFFFF;
+  color: #161616;
 }
 
 code {

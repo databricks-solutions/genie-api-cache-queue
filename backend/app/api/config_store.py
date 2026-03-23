@@ -3,10 +3,10 @@ Shared server configuration overrides.
 Both proxy_routes and genie_clone_routes read from here.
 Updated via PUT /api/config.
 
-Config is persisted to a JSON file for the lifetime of the app instance.
-In Databricks Apps, this persists within a running deployment but not across
-new deployments (fresh container = fresh /tmp). After a new deployment, the
-user must re-save Settings once to repopulate the server config.
+Config is persisted to /tmp for the lifetime of the running container.
+Credentials (lakebase_service_token) are NOT stored here — they come from:
+  - DATABRICKS_TOKEN env var (auto-injected by Databricks Apps, used for Lakebase)
+  - Databricks Secrets referenced in app.yaml (for production credential management)
 """
 
 import json
@@ -21,12 +21,12 @@ _settings = get_settings()
 # In-memory overrides
 _server_config_overrides: dict = {}
 
-# Persist config to a file in the app's data directory
+# Non-sensitive config persisted to /tmp (survives within a running instance)
 _CONFIG_FILE = Path(os.getenv("CONFIG_PERSIST_PATH", "/tmp/genie_cache_config.json"))
 
 
 def _load_persisted_config():
-    """Load config from disk on startup."""
+    """Load non-sensitive config from /tmp on startup."""
     try:
         if _CONFIG_FILE.exists():
             data = json.loads(_CONFIG_FILE.read_text())
@@ -37,10 +37,12 @@ def _load_persisted_config():
 
 
 def _save_persisted_config():
-    """Save current overrides to disk."""
+    """Persist non-sensitive config to /tmp."""
     try:
         _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _CONFIG_FILE.write_text(json.dumps(_server_config_overrides))
+        # Never write credentials to disk
+        safe = {k: v for k, v in _server_config_overrides.items() if 'token' not in k and 'secret' not in k and 'pat' not in k}
+        _CONFIG_FILE.write_text(json.dumps(safe))
     except Exception as e:
         logger.warning("Could not persist config: %s", e)
 
@@ -57,7 +59,7 @@ def get_effective_setting(key: str):
 
 
 def update_overrides(updates: dict):
-    """Apply a batch of config overrides and persist to disk."""
+    """Apply a batch of config overrides. Credentials are kept in memory only (not written to disk)."""
     _server_config_overrides.update(updates)
     _save_persisted_config()
 

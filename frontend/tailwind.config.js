@@ -17,6 +17,20 @@ export default {
           yellow: '#7D5319',
           gold: '#F7B73C',
         },
+        dbx: {
+          bg: '#FFFFFF',
+          sidebar: '#F7F7F7',
+          text: '#161616',
+          'text-secondary': '#6F6F6F',
+          'text-link': '#0E538B',
+          blue: '#2272B4',
+          'blue-hover': 'rgba(34,114,180,0.08)',
+          border: '#EBEBEB',
+          'border-input': '#CBCBCB',
+          'status-green-bg': '#F3FCF6',
+          'code-bg': '#F7F7F7',
+          'new-btn': 'rgba(255,73,73,0.08)',
+        },
         // Override default gray palette to warm brand-aligned tones
         gray: {
           50: '#FAFAF8',
@@ -33,7 +47,7 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['"DM Sans"', 'Arial', 'sans-serif'],
+        sans: ['"DM Sans"', '-apple-system', 'system-ui', '"Segoe UI"', 'Roboto', '"Helvetica Neue"', 'Arial', 'sans-serif'],
       },
     },
   },

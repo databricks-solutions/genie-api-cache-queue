@@ -40,18 +40,14 @@ def _parse_validation_result(result: dict) -> bool | None:
 
 
 def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
-    """Build a WorkspaceClient instance respecting the current auth mode."""
-    if runtime_settings and runtime_settings.auth_mode == "user":
+    """Build a WorkspaceClient using user's OAuth token (X-Forwarded-Access-Token)."""
+    if runtime_settings:
         token = runtime_settings.databricks_token
         if not token:
-            raise RuntimeError("User Auth mode requires a Personal Access Token")
+            raise RuntimeError("No user token available for cache validation (X-Forwarded-Access-Token missing)")
         config = Config(host=runtime_settings.databricks_host, token=token, auth_type="pat")
-        client = WorkspaceClient(config=config)
-    else:
-        # SP / env-var auth: WorkspaceClient picks up credentials from the SDK chain automatically
-        client = WorkspaceClient()
-
-    return client, CACHE_VALIDATION_LLM_ENDPOINT
+        return WorkspaceClient(config=config), CACHE_VALIDATION_LLM_ENDPOINT
+    return WorkspaceClient(), CACHE_VALIDATION_LLM_ENDPOINT
 
 
 async def validate_cache_entry(

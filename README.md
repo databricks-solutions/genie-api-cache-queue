@@ -1,41 +1,14 @@
 # Genie Cache & Queue
 
-Drop-in replacement for the Databricks Genie API that adds semantic caching, rate-limit management, and automatic retry. Deploy as a Databricks App — callers only change the base URL, zero code changes.
+Drop-in replacement for the Databricks Genie API with semantic caching, rate-limit management, and multi-gateway support. Deploy as a Databricks App — callers only change the base URL, zero code changes required.
 
-## Screenshots
+The Genie API has a hard limit of **5 queries per minute per workspace**. This app sits in front of it:
 
-### Chat & Flow Diagram
-Submit queries in natural language and track them in real-time through the processing pipeline (Received → Cache Check → Genie/SQL → Completed).
+- **Cache hit** — Re-executes the cached SQL against the warehouse (fresh data, no Genie call)
+- **Cache miss** — Calls Genie in the background, queues if rate-limited, retries with exponential backoff
+- **Rate limit** — Manages the 5 QPM limit transparently with a queue and backoff
 
-![Chat & Flow](docs/screenshots/01-chat-flow.png)
-
-### Cache (Lakebase)
-Persistent semantic cache backed by Lakebase (PostgreSQL + pgvector). Shows cached queries across multiple Genie Spaces with SQL, usage counts, and freshness.
-
-![Cache](docs/screenshots/02-cache-lakebase.png)
-
-### Query Logs
-Complete history of all submitted queries with status, cache hit/miss, and multi-space badges.
-
-![Query Logs](docs/screenshots/03-query-logs.png)
-
-### API Reference
-Built-in documentation for both the Drop-in Genie API (same endpoints, just change the URL) and the simplified Proxy API.
-
-![API Reference](docs/screenshots/04-api-reference.png)
-
-### Settings
-Configure Genie Spaces (multi-space support), SQL Warehouse, cache parameters, authentication mode, and Lakebase storage.
-
-![Settings](docs/screenshots/05-settings.png)
-
-## How It Works
-
-The Genie API has a hard limit of **5 queries per minute per workspace**. This app sits in front of it and handles the three main scenarios:
-
-1. **Cache hit** — Re-executes the cached SQL against the warehouse (fresh data, no Genie call)
-2. **Cache miss** — Calls Genie in background, queues if rate-limited, retries with exponential backoff
-3. **Rate limit** — Manages the 5 QPM limit transparently with a queue and backoff
+Each **gateway** is a named configuration that maps to one Genie Space and SQL Warehouse. Gateways have independent caches, queues, and settings.
 
 ## Architecture
 
@@ -43,12 +16,13 @@ The Genie API has a hard limit of **5 queries per minute per workspace**. This a
 Caller (OAuth)
     |
     v
-Clone API (/api/2.0/genie/*)     <-- Same endpoints as Genie
+App (/api/2.0/genie/* or /api/v1/ or /api/gateways/)
     |
-    +-- Embedding Service          <-- Databricks Foundation Model (caller's OAuth)
-    +-- Cache (Lakebase/PGVector)  <-- SP OAuth (admin-configured)
-    +-- Genie API                  <-- Caller's OAuth (only on cache miss)
-    +-- SQL Warehouse              <-- Caller's OAuth (execute cached SQL)
+    +-- Gateway Config (DB)         <-- name, space_id, warehouse_id, settings
+    +-- Embedding Service           <-- caller's OAuth (semantic similarity)
+    +-- Cache (Lakebase/PGVector)   <-- app SP OAuth, scoped per gateway
+    +-- Genie API                   <-- caller's OAuth (on cache miss only)
+    +-- SQL Warehouse               <-- caller's OAuth (re-execute cached SQL)
 ```
 
 ## Quick Start
@@ -71,48 +45,112 @@ databricks apps deploy genie-cache-queue \
   --source-code-path /Workspace/Users/<your-email>/genie-cache-queue
 ```
 
-### 2. Configure
+### 2. Create a Gateway
 
-Open the app URL and go to the **Settings** tab:
+Open the app URL. On the **Gateways** home page, click **+** to create a new gateway:
 
-| Field | Description |
-|-------|-------------|
-| **Genie Spaces** | One or more Genie Spaces with ID and display name (required) |
-| **SQL Warehouse ID** | SQL warehouse for query execution, shared across all spaces (required) |
-| **Storage Backend** | `Local` (in-memory, lost on restart) or `Lakebase` (persistent) |
-
-For **Lakebase** (recommended), also configure:
+![Gateway List](docs/screenshots/01-gateway-list.png)
 
 | Field | Description |
 |-------|-------------|
-| **Lakebase Service Token** | SP `client_id:client_secret` or PAT for cache operations |
-| **Lakebase Instance Name** | Autoscaling project name or direct hostname |
-| **Lakebase Schema** | Usually `public` |
+| **Name** | Display name for this gateway (e.g. `Retail Analytics`) |
+| **Genie Space** | Select from spaces auto-discovered in your workspace |
+| **SQL Warehouse** | Select from available warehouses |
+| **Advanced** | Similarity threshold, cache TTL, rate limit, normalization/validation |
 
-Click **Save Configuration**.
+### 3. Use the Endpoint
 
-### 3. Use
+From the gateway's **Overview** tab, copy the ready-to-use endpoint URL:
 
-Change the base URL in your application:
+![Gateway Detail Overview](docs/screenshots/02-gateway-detail-overview.png)
+
+Change the base URL in your application — everything else stays the same:
 
 ```python
-# Before (direct Genie)
+# Before (direct Genie — hits 5 QPM limit)
 BASE = "https://<workspace>.cloud.databricks.com"
 
-# After (with cache + retry)
+# After (with cache + retry — same endpoints, same auth)
 BASE = "https://<app-name>.aws.databricksapps.com"
 
-# Same code, same endpoints, same auth
-r = requests.post(f"{BASE}/api/2.0/genie/spaces/{SPACE}/start-conversation",
+# Use gateway ID instead of space ID
+r = requests.post(f"{BASE}/api/2.0/genie/spaces/{GATEWAY_ID}/start-conversation",
     headers={"Authorization": f"Bearer {TOKEN}"},
     json={"content": "How many customers?"})
 ```
 
+---
+
+## Playground
+
+Use the built-in **Playground** to test queries interactively. The pipeline visualizer shows each step in real time.
+
+**Cache Miss** — first time a question is asked, it goes through Genie:
+
+![Cache Miss](docs/screenshots/07-playground-cache-miss.png)
+
+**Cache Hit** — same question again, Genie is bypassed entirely:
+
+![Cache Hit](docs/screenshots/08-playground-cache-hit.png)
+
+---
+
+## Gateway Management
+
+Each gateway has a detail page with five tabs.
+
+**Metrics** — cache hit rate, total queries (7-day window), and cache entry count:
+
+![Gateway Metrics](docs/screenshots/03-gateway-detail-metrics.png)
+
+**Cache** — all cached queries with SQL, usage count, and freshness:
+
+![Gateway Cache](docs/screenshots/04-gateway-detail-cache.png)
+
+**Logs** — full query history scoped to this gateway with status and cache hit/miss badge:
+
+![Gateway Logs](docs/screenshots/05-gateway-detail-logs.png)
+
+**Settings** — per-gateway overrides for threshold, TTL, rate limit, normalization, and validation:
+
+![Gateway Settings](docs/screenshots/06-gateway-detail-settings.png)
+
+### Gateway Configuration Reference
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `name` | Unique display name | Required |
+| `genie_space_id` | Databricks Genie Space ID | Required |
+| `sql_warehouse_id` | SQL Warehouse for query execution | Required |
+| `similarity_threshold` | Cache match threshold (0–1) | 0.92 |
+| `cache_ttl_hours` | Cache freshness in hours (0 = unlimited) | 24 |
+| `max_queries_per_minute` | Rate limit per workspace | 5 |
+| `question_normalization_enabled` | Normalize questions before embedding | true |
+| `cache_validation_enabled` | Validate cache hits with LLM | true |
+| `embedding_provider` | `databricks` or custom endpoint | `databricks` |
+| `shared_cache` | Share cache across all users | true |
+
+---
+
+## Global Settings
+
+Configure once in the **Settings** page. These apply as defaults for all gateways:
+
+![Settings](docs/screenshots/09-settings.png)
+
+| Field | Description |
+|-------|-------------|
+| **Storage Backend** | `Local` (in-memory, lost on restart) or `Lakebase` (persistent) |
+| **Lakebase Instance Name** | Autoscaling project name or direct hostname |
+| **Lakebase Schema** | Usually `public` |
+| **Lakebase Service Token** | SP `client_id:client_secret` or PAT (local dev only) |
+| **Embedding Provider** | Foundation Model API endpoint for semantic similarity |
+
+---
+
 ## Lakebase Setup (Persistent Cache)
 
-For production use, Lakebase provides persistent vector-based caching with pgvector.
-
-Inside Databricks Apps, the app automatically uses its **built-in Service Principal** (injected as `DATABRICKS_CLIENT_ID`/`SECRET`). You only need to grant this SP access to your Lakebase project — no manual credential configuration required.
+For production use, Lakebase provides persistent vector-based caching with pgvector. Inside Databricks Apps, the app automatically uses its **built-in Service Principal** — no manual credential configuration required.
 
 ### 1. Grant the App's SP Access to Lakebase
 
@@ -147,19 +185,19 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "<app-sp-client
 
 > **Important:**
 > - Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication. See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
-> - **Do not create the cache tables manually.** Let the app create them on first use — this ensures the SP owns the tables and can manage indexes. If tables were already created by a different user, drop them first so the app's SP recreates them as owner.
+> - **Do not create the cache tables manually.** Let the app create them on first use. If tables were already created by a different user, drop them first so the app's SP recreates them as owner.
 
 ### 3. Configure in Settings
 
-Set the **Storage Backend** to `Lakebase`, the **Instance Name** to your project name, and the **Lakebase Service Token** to the app SP's `<client_id>:<client_secret>`.
-
-> **Note:** Inside Databricks Apps, the actual Lakebase connection uses the app's built-in SP (auto-detected). The Lakebase Service Token in Settings is used as a fallback for local development only.
+Set **Storage Backend** to `Lakebase` and fill in the **Instance Name**. The app creates the required tables (cache, query_logs, gateways) automatically on first use.
 
 ### Local Development
 
-For local development (outside Databricks Apps), the app cannot auto-detect SP credentials. Configure the Lakebase Service Token in Settings or `.env` with either:
+For local development (outside Databricks Apps), configure the **Lakebase Service Token** in Settings or `.env`:
 - **Service Principal:** `<client_id>:<client_secret>` (recommended)
 - **PAT:** `dapi...` (simpler, for development)
+
+---
 
 ## Authentication
 
@@ -170,38 +208,28 @@ For local development (outside Databricks Apps), the app cannot auto-detect SP c
 | Embeddings | Caller's OAuth | Same |
 | **Lakebase cache** | **App's built-in SP** | Auto-detected from `DATABRICKS_CLIENT_ID`/`SECRET` |
 
-**Callers don't need Lakebase access.** The app's SP handles all cache operations.
+**Callers don't need Lakebase access.** The app's SP handles all cache operations transparently.
 
-## Configuration Reference
-
-All settings are configurable via the UI Settings tab or `PUT /api/config`:
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `genie_spaces` | List of `{"id": "<your-space-id>", "name": "<your-display-name>"}` Genie Spaces | Required (at least 1) |
-| `sql_warehouse_id` | Your SQL Warehouse ID for query execution (shared across spaces) | Required |
-| `storage_backend` | `lakebase` or `local` | `local` |
-| `lakebase_service_token` | SP credentials for local dev (auto-detected in Databricks Apps) | Local dev only |
-| `lakebase_instance_name` | Autoscaling project name or hostname | Required for Lakebase |
-| `similarity_threshold` | Cache match threshold (0–1) | 0.92 |
-| `max_queries_per_minute` | Rate limit per workspace | 5 |
-| `cache_ttl_seconds` | Cache freshness in seconds (0 = unlimited) | 86400 (24h) |
-| `shared_cache` | Share cache across all users | true |
+---
 
 ## API Reference
 
+Three API families are available. Full documentation is built into the app:
+
+![API Reference](docs/screenshots/10-api-reference.png)
+
 ### Clone API (Drop-in Replacement)
 
-All endpoints mirror the official [Databricks Genie API](https://docs.databricks.com/api/workspace/genie):
+All endpoints mirror the official [Databricks Genie API](https://docs.databricks.com/api/workspace/genie). Use the **gateway ID** where you would normally use the Genie Space ID:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/2.0/genie/spaces/{id}/start-conversation` | Start conversation (cache + queue) |
+| POST | `/api/2.0/genie/spaces/{gateway_id}/start-conversation` | Start conversation (cache + queue) |
 | POST | `.../conversations/{cid}/messages` | Follow-up message |
 | GET | `.../conversations/{cid}/messages/{mid}` | Poll for result |
 | GET | `.../messages/{mid}/attachments/{aid}/query-result` | Get query data |
 | POST | `.../messages/{mid}/attachments/{aid}/execute-query` | Re-execute query |
-| GET | `/api/2.0/genie/spaces/{id}` | Space metadata (proxy) |
+| GET | `/api/2.0/genie/spaces/{gateway_id}` | Space metadata (proxied) |
 
 ### Proxy API (REST)
 
@@ -213,11 +241,31 @@ Simplified REST API for external applications:
 | GET | `/api/v1/query/{id}` | Poll query status |
 | POST | `/api/v1/query/sync` | Submit and wait (up to 120s) |
 | GET | `/api/v1/health` | Health check |
-| GET | `/api/v1/config` | Get configuration |
-| PUT | `/api/v1/config` | Update configuration |
 | GET | `/api/v1/cache` | List cached queries |
 | GET | `/api/v1/queue` | List queued queries |
 | GET | `/api/v1/query-logs` | Recent query logs |
+
+### Gateway Management API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/gateways` | List all gateways (with stats) |
+| POST | `/api/gateways` | Create a new gateway |
+| GET | `/api/gateways/{id}` | Get gateway details |
+| PUT | `/api/gateways/{id}` | Update gateway settings |
+| DELETE | `/api/gateways/{id}` | Delete a gateway |
+| GET | `/api/gateways/{id}/metrics` | Cache hit rate, total queries, cache entries |
+| GET | `/api/gateways/{id}/cache` | List cached queries for this gateway |
+| DELETE | `/api/gateways/{id}/cache` | Clear cache for this gateway |
+| GET | `/api/gateways/{id}/logs` | Query logs scoped to this gateway |
+| GET | `/api/workspace/genie-spaces` | List available Genie Spaces |
+| GET | `/api/workspace/warehouses` | List available SQL warehouses |
+| GET | `/api/workspace/serving-endpoints` | List available LLM serving endpoints |
+| GET | `/api/settings` | Get global settings |
+| PUT | `/api/settings` | Update global settings |
+| POST | `/api/settings/test-connection` | Test Lakebase connection |
+
+---
 
 ## Local Development
 
@@ -241,17 +289,14 @@ The included `demo_notebook.ipynb` fires 7 queries in parallel to demonstrate:
 2. **Via the App (first run)** — all queries complete, queue manages rate limits
 3. **Via the App (second run)** — all queries served from cache instantly
 
-Before running, copy `.env.example` to your Workspace home and fill in your values:
+Before running, upload `.env.example` to your Workspace home and fill in your values:
 
 ```bash
-# Upload to your Workspace home directory
 databricks workspace import /Workspace/Users/<your-email>/.env \
   --file .env.example --format RAW --profile <profile>
 ```
 
-Then edit `/Workspace/Users/<your-email>/.env` in the workspace with your actual credentials. The notebook auto-detects your username and loads the `.env` from there.
-
-> **Note:** `.env.example` is only for the demo notebook. The app itself is configured via the Settings UI or `PUT /api/config`.
+The notebook auto-detects your username and loads the `.env` from there.
 
 ## Continuous Deployment
 
@@ -260,11 +305,8 @@ Then edit `/Workspace/Users/<your-email>/.env` in the workspace with your actual
 databricks sync . /Workspace/Users/<your-email>/genie-cache-queue
 databricks apps deploy genie-cache-queue \
   --source-code-path /Workspace/Users/<your-email>/genie-cache-queue
-```
 
-## View Logs
-
-```bash
+# View logs
 databricks apps logs genie-cache-queue --follow
 ```
 

@@ -8,7 +8,6 @@ from typing import List, Optional
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 from app.config import get_settings
-from app.auth import get_service_principal_client
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -24,52 +23,15 @@ class DatabricksEmbeddingService:
         self.default_endpoint = settings.databricks_embedding_endpoint
 
     def _get_workspace_client(self, runtime_settings=None) -> tuple[WorkspaceClient, str]:
-        """Get WorkspaceClient and endpoint name based on auth mode."""
+        """Get WorkspaceClient using user's OAuth token (X-Forwarded-Access-Token)."""
         if runtime_settings:
-            endpoint = runtime_settings.databricks_embedding_endpoint
-
-            if runtime_settings.auth_mode == "user":
-                token = runtime_settings.databricks_token
-                if not token:
-                    raise RuntimeError("User Auth mode requires a Personal Access Token")
-
-                logger.debug("Using User PAT for embeddings")
-                config = Config(
-                    host=runtime_settings.databricks_host,
-                    token=token,
-                    auth_type="pat"
-                )
-                client = WorkspaceClient(config=config)
-            else:
-                logger.debug("Using Service Principal for embeddings")
-                client = get_service_principal_client()
-                if not client:
-                    # Fallback to runtime_settings token (from DATABRICKS_TOKEN env var)
-                    token = runtime_settings.databricks_token
-                    if token:
-                        logger.debug("SP not available, falling back to runtime token for embeddings")
-                        config = Config(
-                            host=runtime_settings.databricks_host,
-                            token=token,
-                        )
-                        client = WorkspaceClient(config=config)
-                    else:
-                        raise RuntimeError("No authentication available for embeddings")
-
-            return client, endpoint
-        else:
-            if settings.databricks_token:
-                config = Config(
-                    host=settings.databricks_host,
-                    token=settings.databricks_token
-                )
-                client = WorkspaceClient(config=config)
-            else:
-                client = get_service_principal_client()
-                if not client:
-                    raise RuntimeError("No authentication available")
-
-            return client, self.default_endpoint
+            token = runtime_settings.databricks_token
+            if not token:
+                raise RuntimeError("No user token available for embeddings (X-Forwarded-Access-Token missing)")
+            config = Config(host=runtime_settings.databricks_host, token=token, auth_type="pat")
+            return WorkspaceClient(config=config), runtime_settings.databricks_embedding_endpoint
+        config = Config(host=settings.databricks_host, token=settings.databricks_token, auth_type="pat")
+        return WorkspaceClient(config=config), self.default_endpoint
 
     def get_embedding(self, text: str, runtime_settings=None) -> List[float]:
         """Generate embedding for a single text using Databricks SDK."""

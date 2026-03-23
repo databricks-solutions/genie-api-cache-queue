@@ -45,7 +45,7 @@ class GenieService:
             token = runtime_settings.databricks_token
 
             if not token or (isinstance(token, str) and token.strip() == ""):
-                logger.warning("Empty token in runtime_settings (auth_mode=%s)", runtime_settings.auth_mode)
+                logger.warning("Empty X-Forwarded-Access-Token — Genie call will fail")
 
             return (
                 f"{host}/api/2.0/genie",
@@ -258,10 +258,24 @@ class GenieService:
                     if status in ["SUCCEEDED", "FAILED", "CANCELED"]:
                         break
 
+            # Extract columns from manifest and combine with data_array
+            manifest = data.get("manifest", {})
+            schema_cols = manifest.get("schema", {}).get("columns", [])
+            columns = [c.get("name", "") for c in schema_cols]
+            raw_result = data.get("result") or {}
+            data_array = raw_result.get("data_array", []) if isinstance(raw_result, dict) else []
+            row_count = raw_result.get("row_count", len(data_array)) if isinstance(raw_result, dict) else 0
+
+            structured_result = {
+                "columns": columns,
+                "data_array": data_array,
+                "row_count": row_count,
+            } if status == "SUCCEEDED" else None
+
             return {
                 "statement_id": statement_id,
                 "status": status,
-                "result": data.get("result"),
+                "result": structured_result,
                 "error": data.get("status", {}).get("error")
             }
 

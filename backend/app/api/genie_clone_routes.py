@@ -54,8 +54,22 @@ def _extract_token(request: Request) -> str:
     return extract_bearer_token(request)
 
 
-def _build_runtime_settings(token: str, space_id: str):
+async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:
+    """Resolve space_id: if it matches a gateway UUID, return (real_genie_space_id, gateway_config).
+    Otherwise return (space_id, None) for backward compatibility."""
+    try:
+        gateway = await _db.db_service.get_gateway(space_id)
+        if gateway:
+            logger.info("Resolved gateway_id=%s -> genie_space_id=%s", space_id, gateway["genie_space_id"])
+            return gateway["genie_space_id"], gateway
+    except Exception:
+        pass
+    return space_id, None
+
+
+def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
     """Build RuntimeSettings using server config overrides (PUT /config) + env defaults.
+    If a gateway config is provided, its per-gateway settings override globals.
     Uses server PAT for Lakebase cache, caller OAuth for Genie/SQL."""
     from app.models import RuntimeConfig
     from app.runtime_config import RuntimeSettings
@@ -63,22 +77,25 @@ def _build_runtime_settings(token: str, space_id: str):
     # For Lakebase: use service token from server config (set via Settings UI), fallback to caller token
     lakebase_pat = get_effective_setting("lakebase_service_token") or token
 
+    # Per-gateway overrides take priority over global settings
+    gw = gateway or {}
+
     rc = RuntimeConfig(
         auth_mode="user",
         user_pat=lakebase_pat,
         genie_space_id=space_id,
-        sql_warehouse_id=get_effective_setting("sql_warehouse_id") or None,
-        similarity_threshold=get_effective_setting("similarity_threshold"),
-        max_queries_per_minute=get_effective_setting("max_queries_per_minute"),
-        cache_ttl_hours=get_effective_setting("cache_ttl_hours"),
-        embedding_provider=get_effective_setting("embedding_provider"),
-        databricks_embedding_endpoint=get_effective_setting("databricks_embedding_endpoint"),
-        storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else (get_effective_setting("storage_backend") or None),
+        sql_warehouse_id=gw.get("sql_warehouse_id") or get_effective_setting("sql_warehouse_id") or None,
+        similarity_threshold=gw.get("similarity_threshold") or get_effective_setting("similarity_threshold"),
+        max_queries_per_minute=gw.get("max_queries_per_minute") or get_effective_setting("max_queries_per_minute"),
+        cache_ttl_hours=gw.get("cache_ttl_hours") or get_effective_setting("cache_ttl_hours"),
+        embedding_provider=gw.get("embedding_provider") or get_effective_setting("embedding_provider"),
+        databricks_embedding_endpoint=gw.get("databricks_embedding_endpoint") or get_effective_setting("databricks_embedding_endpoint"),
+        storage_backend="lakebase",
         lakebase_instance_name=get_effective_setting("lakebase_instance_name") or get_effective_setting("lakebase_instance") or None,
         lakebase_catalog=get_effective_setting("lakebase_catalog") or None,
         lakebase_schema=get_effective_setting("lakebase_schema") or None,
         cache_table_name=get_effective_setting("cache_table_name") or get_effective_setting("pgvector_table_name") or None,
-        shared_cache=get_effective_setting("shared_cache"),
+        shared_cache=gw.get("shared_cache") if gw.get("shared_cache") is not None else get_effective_setting("shared_cache"),
     )
     return RuntimeSettings(rc, user_token=token, user_email=None)
 
@@ -264,13 +281,15 @@ async def _handle_query(
     token: str,
     identity: str,
     conversation_id: str = None,
+    gateway: dict = None,
 ):
     """
     Shared handler for start-conversation and create-message.
     1. Check cache → if hit, return COMPLETED immediately.
     2. If miss → return EXECUTING_QUERY and process in background.
+    space_id must already be the real Genie space_id (resolved by caller).
     """
-    rs = _build_runtime_settings(token, space_id)
+    rs = _build_runtime_settings(token, space_id, gateway=gateway)
 
     original_query_text = query_text
     if rs.question_normalization_enabled:
@@ -363,26 +382,29 @@ async def _handle_query(
 
 @genie_clone_router.get("/spaces/{space_id}")
 async def clone_get_space(space_id: str, request: Request):
-    """Proxy GET space metadata to real Genie API."""
+    """Proxy GET space metadata to real Genie API. Resolves gateway_id if needed."""
     token = _extract_token(request)
-    return await _proxy_passthrough(request, "GET", f"/api/2.0/genie/spaces/{space_id}", token)
+    real_space_id, _ = await _resolve_gateway_space_id(space_id)
+    return await _proxy_passthrough(request, "GET", f"/api/2.0/genie/spaces/{real_space_id}", token)
 
 
 @genie_clone_router.post("/spaces/{space_id}/start-conversation")
 async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request):
     """Clone of POST /api/2.0/genie/spaces/{space_id}/start-conversation.
-    Returns immediately. Cache hit → COMPLETED. Cache miss → EXECUTING_QUERY (poll get-message)."""
+    Accepts gateway_id (our UUID) or real Genie space_id. Returns immediately."""
     token = _extract_token(request)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
-    return await _handle_query(space_id, body.content, token, identity)
+    real_space_id, gateway = await _resolve_gateway_space_id(space_id)
+    return await _handle_query(real_space_id, body.content, token, identity, gateway=gateway)
 
 
 @genie_clone_router.post("/spaces/{space_id}/conversations/{conversation_id}/messages")
 async def clone_create_message(space_id: str, conversation_id: str, body: GenieContentBody, request: Request):
-    """Clone of POST create-message. Follow-up messages with cache + queue support."""
+    """Clone of POST create-message. Resolves gateway_id if needed."""
     token = _extract_token(request)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
-    return await _handle_query(space_id, body.content, token, identity, conversation_id=conversation_id)
+    real_space_id, gateway = await _resolve_gateway_space_id(space_id)
+    return await _handle_query(real_space_id, body.content, token, identity, conversation_id=conversation_id, gateway=gateway)
 
 
 @genie_clone_router.get(

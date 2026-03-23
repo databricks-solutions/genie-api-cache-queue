@@ -5,10 +5,8 @@ Allows frontend to override environment variables with user-provided config.
 
 import logging
 from typing import Optional
-from urllib.parse import quote_plus
 from app.config import get_settings
 from app.models import RuntimeConfig
-from app.auth import get_service_principal_token
 
 logger = logging.getLogger(__name__)
 _base_settings = get_settings()
@@ -20,57 +18,8 @@ class RuntimeSettings:
     def __init__(self, runtime_config: Optional[RuntimeConfig] = None, user_token: Optional[str] = None, user_email: Optional[str] = None):
         self.base = _base_settings
         self.runtime = runtime_config
-        self.user_token = user_token
+        self.user_token = user_token  # X-Forwarded-Access-Token (Genie/SQL/Workspace)
         self.user_email = user_email
-
-        if self.runtime and self.runtime.lakebase_instance_name and self.runtime.user_pat:
-            logger.info("Runtime Lakebase config: instance=%s, table=%s",
-                        self.runtime.lakebase_instance_name, self.full_table_name)
-
-    @property
-    def postgres_connection_string(self) -> str:
-        if self.runtime and self.runtime.lakebase_instance_name:
-            db_user = self.user_email if self.user_email else self.base.postgres_user
-            user = quote_plus(db_user)
-            # For Lakebase, prefer PAT (full API access) over OAuth proxy token
-            password_source = ((self.runtime.user_pat if self.runtime else None) or
-                               self.user_token)
-            if not password_source:
-                raise ValueError("Lakebase requires an OAuth token or PAT.")
-            password = quote_plus(password_source)
-            host = self.runtime.lakebase_instance_name
-            port = self.base.postgres_port
-            database = "databricks_postgres"
-            return f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        return self.base.postgres_connection_string
-
-    @property
-    def full_table_name(self) -> str:
-        catalog = (self.runtime.lakebase_catalog if self.runtime and self.runtime.lakebase_catalog
-                  else self.base.lakebase_catalog)
-        schema = (self.runtime.lakebase_schema if self.runtime and self.runtime.lakebase_schema
-                 else self.base.lakebase_schema)
-        table = (self.runtime.cache_table_name if self.runtime and self.runtime.cache_table_name
-                else self.base.pgvector_table_name)
-        if catalog:
-            return f"{catalog}.{schema}.{table}"
-        return table
-
-    @property
-    def query_log_table_name(self) -> str:
-        catalog = (self.runtime.lakebase_catalog if self.runtime and self.runtime.lakebase_catalog
-                  else self.base.lakebase_catalog)
-        schema = (self.runtime.lakebase_schema if self.runtime and self.runtime.lakebase_schema
-                 else self.base.lakebase_schema)
-        table = (self.runtime.query_log_table_name if self.runtime and self.runtime.query_log_table_name
-                else "query_logs")
-        if catalog:
-            return f"{catalog}.{schema}.{table}"
-        return table
-
-    @property
-    def auth_mode(self) -> str:
-        return self.runtime.auth_mode if self.runtime and self.runtime.auth_mode else "app"
 
     @property
     def databricks_host(self) -> str:
@@ -79,26 +28,28 @@ class RuntimeSettings:
 
     @property
     def databricks_token(self) -> str:
-        # Priority 1: User's OAuth token from Databricks Apps proxy (X-Forwarded-Access-Token)
-        if self.user_token and self.user_token.strip():
-            logger.debug("Using user OAuth token from request header")
-            return self.user_token.strip()
+        """Token for Genie/SQL Warehouse/Workspace API calls.
+        Always X-Forwarded-Access-Token (user's OAuth token injected by Databricks Apps).
+        Lakebase uses DATABRICKS_TOKEN env var separately — never this property.
+        """
+        if not self.user_token or not self.user_token.strip():
+            logger.error("No X-Forwarded-Access-Token available — request outside Databricks Apps context?")
+            return ""
+        return self.user_token.strip()
 
-        if self.auth_mode == "user":
-            # Priority 2: PAT from frontend localStorage config
-            if self.runtime and self.runtime.user_pat and self.runtime.user_pat.strip():
-                return self.runtime.user_pat.strip()
-            else:
-                logger.error("User Auth mode requires a Personal Access Token or OAuth token")
-                return ""
+    @property
+    def gateway_id(self) -> str:
+        return self.runtime.gateway_id if self.runtime and self.runtime.gateway_id else None
 
-        # Priority 3: Service principal token (App Auth mode)
-        sp_token = get_service_principal_token()
-        if sp_token:
-            return sp_token
+    @property
+    def cache_namespace(self) -> str:
+        return self.gateway_id or self.genie_space_id
 
-        logger.warning("Falling back to DATABRICKS_TOKEN env var")
-        return self.base.databricks_token
+    @property
+    def caching_enabled(self) -> bool:
+        if self.runtime and hasattr(self.runtime, 'caching_enabled') and self.runtime.caching_enabled is not None:
+            return self.runtime.caching_enabled
+        return True
 
     @property
     def genie_space_id(self) -> str:
@@ -160,35 +111,48 @@ class RuntimeSettings:
         return self.base.local_embeddings_file
 
     @property
-    def catalog_name(self) -> str:
-        return self.base.catalog_name
-
-    @property
-    def schema_name(self) -> str:
-        return self.base.schema_name
-
-    @property
-    def cache_table_name_setting(self) -> str:
-        return self.base.cache_table_name
-
-    @property
-    def local_embedding_model(self) -> str:
-        return self.base.local_embedding_model
-
-    @property
     def shared_cache(self) -> bool:
         if self.runtime and self.runtime.shared_cache is not None:
             return self.runtime.shared_cache
-        return True
+        return self.base.shared_cache
 
     @property
     def question_normalization_enabled(self) -> bool:
-        if self.runtime and self.runtime.question_normalization_enabled is not None:
-            return self.runtime.question_normalization_enabled
-        return True
+        from app.api.config_store import get_effective_setting
+        val = get_effective_setting("question_normalization_enabled")
+        return val if val is not None else True
 
     @property
     def cache_validation_enabled(self) -> bool:
-        if self.runtime and self.runtime.cache_validation_enabled is not None:
-            return self.runtime.cache_validation_enabled
-        return True
+        from app.api.config_store import get_effective_setting
+        val = get_effective_setting("cache_validation_enabled")
+        return val if val is not None else True
+
+    @property
+    def full_table_name(self) -> str:
+        from urllib.parse import quote_plus
+        catalog = (self.runtime.lakebase_catalog if self.runtime and self.runtime.lakebase_catalog
+                  else self.base.lakebase_catalog)
+        schema = (self.runtime.lakebase_schema if self.runtime and self.runtime.lakebase_schema
+                 else self.base.lakebase_schema)
+        table = (self.runtime.cache_table_name if self.runtime and self.runtime.cache_table_name
+                else self.base.pgvector_table_name)
+        if catalog:
+            return f"{catalog}.{schema}.{table}"
+        return table
+
+    @property
+    def query_log_table_name(self) -> str:
+        catalog = (self.runtime.lakebase_catalog if self.runtime and self.runtime.lakebase_catalog
+                  else self.base.lakebase_catalog)
+        schema = (self.runtime.lakebase_schema if self.runtime and self.runtime.lakebase_schema
+                 else self.base.lakebase_schema)
+        table = (self.runtime.query_log_table_name if self.runtime and self.runtime.query_log_table_name
+                else "query_logs")
+        if catalog:
+            return f"{catalog}.{schema}.{table}"
+        return table
+
+    @property
+    def postgres_connection_string(self) -> str:
+        return self.base.postgres_connection_string

@@ -27,13 +27,14 @@ async def initialize_storage():
     if settings.storage_backend == "pgvector":
         from app.services.storage_pgvector import PGVectorStorageService
 
-        # Use PAT if available, otherwise SP token (Databricks Apps)
-        token = settings.databricks_token
+        # Lakebase uses: 1) lakebase_service_token from Settings UI (config_store override)
+        #               2) DATABRICKS_TOKEN env var (auto-injected by Databricks Apps)
+        from app.api.config_store import get_effective_setting
+        token = get_effective_setting("lakebase_service_token") or settings.databricks_token
         if not token:
-            from app.auth import get_service_principal_token
-            token = get_service_principal_token()
-            if token:
-                logger.info("Using Service Principal token for Lakebase initialization")
+            raise RuntimeError("No token available for Lakebase. Set DATABRICKS_TOKEN or configure Lakebase Service Token in Settings.")
+        src = "Settings override" if get_effective_setting("lakebase_service_token") else "DATABRICKS_TOKEN env"
+        logger.info("Lakebase token source: %s", src)
 
         default_backend = PGVectorStorageService(
             connection_string=settings.postgres_connection_string,
@@ -85,14 +86,14 @@ class DatabaseService:
         query_embedding: List[float],
         identity: str,
         threshold: float = None,
-        genie_space_id: Optional[str] = None,
+        gateway_id: Optional[str] = None,
         runtime_settings=None,
         shared_cache: bool = True
     ) -> Optional[Tuple[int, str, str, float]]:
         if threshold is None:
             threshold = settings.similarity_threshold
         return await self.backend.search_similar_query(
-            query_embedding, identity, threshold, genie_space_id, runtime_settings, shared_cache=shared_cache
+            query_embedding, identity, threshold, gateway_id, runtime_settings, shared_cache=shared_cache
         )
 
     async def save_query_cache(
@@ -101,26 +102,48 @@ class DatabaseService:
         query_embedding: List[float],
         sql_query: str,
         identity: str,
-        genie_space_id: str,
+        gateway_id: str,
         runtime_settings=None,
         original_query_text: str = None,
+        genie_space_id: str = None,
     ) -> int:
         return await self.backend.save_query_cache(
-            query_text, query_embedding, sql_query, identity, genie_space_id, runtime_settings,
+            query_text, query_embedding, sql_query, identity, gateway_id, runtime_settings,
             original_query_text=original_query_text,
+            genie_space_id=genie_space_id,
         )
 
-    async def get_all_cached_queries(self, identity: Optional[str] = None, runtime_settings=None) -> List[dict]:
-        return await self.backend.get_all_cached_queries(identity, runtime_settings)
+    async def get_all_cached_queries(self, identity: Optional[str] = None, runtime_settings=None, gateway_id: Optional[str] = None) -> List[dict]:
+        return await self.backend.get_all_cached_queries(identity, runtime_settings, gateway_id=gateway_id)
 
-    async def save_query_log(self, query_id, query_text, identity, stage, from_cache=False, genie_space_id=None, runtime_settings=None):
-        return await self.backend.save_query_log(query_id, query_text, identity, stage, from_cache, genie_space_id, runtime_settings)
+    async def save_query_log(self, query_id, query_text, identity, stage, from_cache=False, gateway_id=None, runtime_settings=None):
+        return await self.backend.save_query_log(query_id, query_text, identity, stage, from_cache, gateway_id, runtime_settings)
 
-    async def get_query_logs(self, identity=None, limit=50, runtime_settings=None):
-        return await self.backend.get_query_logs(identity, limit, runtime_settings)
+    async def get_query_logs(self, identity=None, limit=50, runtime_settings=None, gateway_id=None):
+        return await self.backend.get_query_logs(identity, limit, runtime_settings, gateway_id=gateway_id)
 
     async def get_cache_count(self, runtime_settings=None):
         return await self.backend.get_cache_count(runtime_settings)
 
-    async def clear_cache(self, runtime_settings=None, genie_space_id=None) -> int:
-        return await self.backend.clear_cache(runtime_settings, genie_space_id=genie_space_id)
+    async def clear_cache(self, runtime_settings=None, gateway_id=None) -> int:
+        return await self.backend.clear_cache(runtime_settings, gateway_id=gateway_id)
+
+    # --- Gateway CRUD ---
+
+    async def create_gateway(self, config: dict) -> dict:
+        return await self.backend.create_gateway(config)
+
+    async def get_gateway(self, gateway_id: str):
+        return await self.backend.get_gateway(gateway_id)
+
+    async def list_gateways(self) -> list:
+        return await self.backend.list_gateways()
+
+    async def update_gateway(self, gateway_id: str, updates: dict):
+        return await self.backend.update_gateway(gateway_id, updates)
+
+    async def delete_gateway(self, gateway_id: str) -> bool:
+        return await self.backend.delete_gateway(gateway_id)
+
+    async def get_gateway_stats(self, gateway_id: str) -> dict:
+        return await self.backend.get_gateway_stats(gateway_id)

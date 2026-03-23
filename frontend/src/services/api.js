@@ -15,7 +15,6 @@ const _syncServerConfig = async () => {
       const local = JSON.parse(localStorage.getItem('databricks_config') || '{}');
       const merged = {
         ...local,
-        auth_mode: server.auth_mode || local.auth_mode || 'app',
         genie_space_id: server.genie_space_id || local.genie_space_id,
         genie_spaces: (server.genie_spaces && server.genie_spaces.length > 0)
           ? server.genie_spaces
@@ -91,8 +90,6 @@ const withConfig = (data = {}) => {
     return {
       ...data,
       config: {
-        auth_mode: config.auth_mode || 'app',
-        user_pat: (config.user_pat && config.user_pat !== '••••••••') ? config.user_pat : undefined,
         storage_backend: config.storage_backend || 'local',
         genie_space_id: activeSpaceId,
         sql_warehouse_id: config.sql_warehouse_id,
@@ -197,6 +194,68 @@ export const api = {
 
   fetchSpaceInfo: async (spaceId) => {
     const response = await axios.get(`${API_BASE_URL}/space-info/${encodeURIComponent(spaceId)}`);
+    return response.data;
+  },
+
+  // Gateway CRUD
+  listGateways: async () => {
+    const response = await axios.get(`${API_BASE_URL}/gateways`);
+    return response.data;
+  },
+  createGateway: async (config) => {
+    const response = await axios.post(`${API_BASE_URL}/gateways`, config);
+    return response.data;
+  },
+  getGateway: async (gatewayId) => {
+    const response = await axios.get(`${API_BASE_URL}/gateways/${gatewayId}`);
+    return response.data;
+  },
+  updateGateway: async (gatewayId, updates) => {
+    const response = await axios.put(`${API_BASE_URL}/gateways/${gatewayId}`, updates);
+    return response.data;
+  },
+  deleteGateway: async (gatewayId) => {
+    const response = await axios.delete(`${API_BASE_URL}/gateways/${gatewayId}`);
+    return response.data;
+  },
+  getGatewayMetrics: async (gatewayId) => {
+    const response = await axios.get(`${API_BASE_URL}/gateways/${gatewayId}/metrics`);
+    return response.data;
+  },
+  getGatewayCache: async (gatewayId) => {
+    const response = await axios.get(`${API_BASE_URL}/gateways/${gatewayId}/cache`);
+    return response.data;
+  },
+  clearGatewayCache: async (gatewayId) => {
+    const response = await axios.delete(`${API_BASE_URL}/gateways/${gatewayId}/cache`);
+    return response.data;
+  },
+  getGatewayLogs: async (gatewayId, limit = 50) => {
+    const response = await axios.get(`${API_BASE_URL}/gateways/${gatewayId}/logs?limit=${limit}`);
+    return response.data;
+  },
+  listGenieSpaces: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/genie-spaces`);
+    return response.data;
+  },
+  listWarehouses: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/warehouses`);
+    return response.data;
+  },
+  listServingEndpoints: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/serving-endpoints`);
+    return response.data;
+  },
+  testLakebaseConnection: async () => {
+    const response = await axios.post(`${API_BASE_URL}/settings/test-connection`);
+    return response.data;
+  },
+  getSettings: async () => {
+    const response = await axios.get(`${API_BASE_URL}/settings`);
+    return response.data;
+  },
+  updateSettings: async (settings) => {
+    const response = await axios.put(`${API_BASE_URL}/settings`, settings);
     return response.data;
   },
 

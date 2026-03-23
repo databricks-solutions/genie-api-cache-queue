@@ -29,6 +29,7 @@ class LocalStorageService:
         self.cache_file = cache_file
         self.embeddings_file = embeddings_file
         self.cache_ttl_hours = cache_ttl_hours
+        self._gateways: Dict = {}
         self._ensure_data_dir()
         self._load_data()
 
@@ -180,6 +181,49 @@ class LocalStorageService:
         if genie_space_id:
             results = [item for item in results if item.get('genie_space_id') == genie_space_id]
         return results
+
+    # --- Gateway CRUD ---
+
+    def create_gateway(self, config: Dict) -> Dict:
+        """Create a new gateway configuration."""
+        gateway_id = config["id"]
+        self._gateways[gateway_id] = config
+        logger.info("Gateway created: id=%s name=%s", gateway_id, config.get("name"))
+        return config
+
+    def get_gateway(self, gateway_id: str) -> Optional[Dict]:
+        """Get a gateway configuration by ID."""
+        return self._gateways.get(gateway_id)
+
+    def list_gateways(self) -> List[Dict]:
+        """List all gateway configurations."""
+        return list(self._gateways.values())
+
+    def update_gateway(self, gateway_id: str, updates: Dict) -> Optional[Dict]:
+        """Update a gateway configuration."""
+        if gateway_id not in self._gateways:
+            return None
+        self._gateways[gateway_id].update(updates)
+        self._gateways[gateway_id]["updated_at"] = datetime.now().isoformat()
+        logger.info("Gateway updated: id=%s fields=%s", gateway_id, list(updates.keys()))
+        return self._gateways[gateway_id]
+
+    def delete_gateway(self, gateway_id: str) -> bool:
+        """Delete a gateway configuration."""
+        if gateway_id not in self._gateways:
+            return False
+        del self._gateways[gateway_id]
+        logger.info("Gateway deleted: id=%s", gateway_id)
+        return True
+
+    def get_gateway_stats(self, gateway_id: str) -> Dict:
+        """Get cache and query stats for a gateway."""
+        gw = self._gateways.get(gateway_id)
+        if not gw:
+            return {"cache_count": 0, "query_count_7d": 0}
+        space_id = gw.get("genie_space_id")
+        cache_count = sum(1 for item in self.cache if item.get("genie_space_id") == space_id)
+        return {"cache_count": cache_count, "query_count_7d": 0}
 
 
 class LocalQueueService:

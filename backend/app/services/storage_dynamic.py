@@ -122,6 +122,17 @@ class DynamicStorageService:
             logger.info("Lakebase connection initialized")
             return backend
 
+    async def _ensure_default_pool(self):
+        """Reinitialize the default backend pool if it is closed."""
+        backend = self.default_backend
+        if hasattr(backend, 'pool') and backend.pool is not None and backend.pool._closed:
+            logger.warning("Default Lakebase pool is closed — reinitializing")
+            try:
+                await backend.initialize()
+                logger.info("Default Lakebase pool reinitialized")
+            except Exception as e:
+                logger.error("Failed to reinitialize pool: %s", e)
+
     async def refresh_default_backend(self):
         """Refresh the default Lakebase backend by re-initializing."""
         cache_key = self._DEFAULT_KEY
@@ -144,8 +155,8 @@ class DynamicStorageService:
                 except Exception:
                     pass
 
-            from app.auth import get_service_principal_token
-            token = settings.databricks_token or get_service_principal_token()
+            from app.api.config_store import get_effective_setting
+            token = get_effective_setting("lakebase_service_token") or settings.databricks_token
 
             new_backend = PGVectorStorageService(
                 connection_string=settings.postgres_connection_string,
@@ -174,7 +185,8 @@ class DynamicStorageService:
                 from app.api.config_store import get_effective_setting
                 sp_token = get_effective_setting("lakebase_service_token")
                 if not rt.lakebase_instance_name:
-                    raise ValueError("Lakebase requires 'Lakebase Instance Name' in Settings.")
+                    # No instance specified — fall back to the default backend (initialized at startup)
+                    return self.default_backend
                 if not sp_token:
                     raise ValueError(
                         "Lakebase requires a Service Principal token. "
@@ -204,7 +216,7 @@ class DynamicStorageService:
         query_embedding: List[float],
         identity: str,
         threshold: float,
-        genie_space_id: Optional[str] = None,
+        gateway_id: Optional[str] = None,
         runtime_settings=None,
         shared_cache: bool = True
     ) -> Optional[Tuple[int, str, str, float]]:
@@ -214,12 +226,12 @@ class DynamicStorageService:
             ttl = runtime_settings.cache_ttl_hours if runtime_settings and hasattr(runtime_settings, 'cache_ttl_hours') else None
             if hasattr(backend, 'pool'):
                 return await backend.search_similar_query(
-                    query_embedding, identity, threshold, genie_space_id,
+                    query_embedding, identity, threshold, gateway_id,
                     cache_ttl_hours=ttl, shared_cache=shared_cache
                 )
             return backend.search_similar_query(
                 query_embedding, identity, threshold,
-                genie_space_id=genie_space_id,
+                gateway_id=gateway_id,
                 cache_ttl_hours=ttl, shared_cache=shared_cache
             )
         return await self._with_reconnect(_op, runtime_settings)
@@ -230,20 +242,22 @@ class DynamicStorageService:
         query_embedding: List[float],
         sql_query: str,
         identity: str,
-        genie_space_id: str,
+        gateway_id: str,
         runtime_settings=None,
         original_query_text: str = None,
+        genie_space_id: str = None,
     ) -> int:
         """Save a new query to the cache."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
                 return await backend.save_query_cache(
-                    query_text, query_embedding, sql_query, identity, genie_space_id,
+                    query_text, query_embedding, sql_query, identity, gateway_id,
                     original_query_text=original_query_text,
+                    genie_space_id=genie_space_id,
                 )
             return backend.save_query_cache(
-                query_text, query_embedding, sql_query, identity, genie_space_id,
+                query_text, query_embedding, sql_query, identity, gateway_id,
                 original_query_text=original_query_text,
             )
         return await self._with_reconnect(_op, runtime_settings)
@@ -251,13 +265,14 @@ class DynamicStorageService:
     async def get_all_cached_queries(
         self,
         identity: Optional[str] = None,
-        runtime_settings=None
+        runtime_settings=None,
+        gateway_id: Optional[str] = None,
     ) -> List[dict]:
-        """Get all cached queries."""
+        """Get all cached queries, optionally filtered by gateway_id."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
-                return await backend.get_all_cached_queries(identity)
+                return await backend.get_all_cached_queries(identity, gateway_id=gateway_id)
             return backend.get_all_cached_queries(identity)
         return await self._with_reconnect(_op, runtime_settings)
 
@@ -268,7 +283,7 @@ class DynamicStorageService:
         identity: str,
         stage: str,
         from_cache: bool = False,
-        genie_space_id: Optional[str] = None,
+        gateway_id: Optional[str] = None,
         runtime_settings=None
     ) -> Optional[int]:
         """Save a query log entry."""
@@ -276,7 +291,7 @@ class DynamicStorageService:
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
                 return await backend.save_query_log(
-                    query_id, query_text, identity, stage, from_cache, genie_space_id
+                    query_id, query_text, identity, stage, from_cache, gateway_id
                 )
             return None
         try:
@@ -289,13 +304,14 @@ class DynamicStorageService:
         self,
         identity: Optional[str] = None,
         limit: int = 50,
-        runtime_settings=None
+        runtime_settings=None,
+        gateway_id: Optional[str] = None,
     ) -> List[dict]:
-        """Get query logs."""
+        """Get query logs, optionally filtered by identity and/or gateway_id."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
-                return await backend.get_query_logs(identity, limit)
+                return await backend.get_query_logs(identity, limit, gateway_id=gateway_id)
             return []
         try:
             return await self._with_reconnect(_op, runtime_settings)
@@ -312,11 +328,58 @@ class DynamicStorageService:
             return {"total": 0, "by_space": {}}
         return await self._with_reconnect(_op, runtime_settings)
 
-    async def clear_cache(self, runtime_settings=None, genie_space_id=None) -> int:
+    async def clear_cache(self, runtime_settings=None, gateway_id=None) -> int:
         """Delete cached queries, optionally filtered by genie_space_id."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'clear_cache'):
-                return await backend.clear_cache(genie_space_id=genie_space_id)
+                return await backend.clear_cache(gateway_id=gateway_id)
             return 0
         return await self._with_reconnect(_op, runtime_settings)
+
+    # --- Gateway CRUD (delegates to default backend) ---
+
+    async def create_gateway(self, config: dict) -> dict:
+        """Create a new gateway configuration."""
+        await self._ensure_default_pool()
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.create_gateway(config)
+        return backend.create_gateway(config)
+
+    async def get_gateway(self, gateway_id: str):
+        """Get a gateway configuration by ID."""
+        await self._ensure_default_pool()
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.get_gateway(gateway_id)
+        return backend.get_gateway(gateway_id)
+
+    async def list_gateways(self) -> list:
+        """List all gateway configurations."""
+        await self._ensure_default_pool()
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.list_gateways()
+        return backend.list_gateways()
+
+    async def update_gateway(self, gateway_id: str, updates: dict):
+        """Update a gateway configuration."""
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.update_gateway(gateway_id, updates)
+        return backend.update_gateway(gateway_id, updates)
+
+    async def delete_gateway(self, gateway_id: str) -> bool:
+        """Delete a gateway configuration."""
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.delete_gateway(gateway_id)
+        return backend.delete_gateway(gateway_id)
+
+    async def get_gateway_stats(self, gateway_id: str) -> dict:
+        """Get cache and query stats for a gateway."""
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.get_gateway_stats(gateway_id)
+        return backend.get_gateway_stats(gateway_id)

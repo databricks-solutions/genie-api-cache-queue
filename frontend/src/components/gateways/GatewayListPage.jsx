@@ -1,0 +1,223 @@
+import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Plus, Search, Layers, Loader2 } from 'lucide-react'
+import { api } from '../../services/api'
+import DataTable from '../shared/DataTable'
+import StatusBadge from '../shared/StatusBadge'
+import EmptyState from '../shared/EmptyState'
+import GatewayCreateModal from './GatewayCreateModal'
+
+export default function GatewayListPage() {
+  const navigate = useNavigate()
+  const [gateways, setGateways] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [search, setSearch] = useState('')
+  const [showCreate, setShowCreate] = useState(false)
+
+  const fetchGateways = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const data = await api.listGateways()
+      setGateways(Array.isArray(data) ? data : data.gateways || [])
+    } catch (err) {
+      setError(err.response?.data?.detail || err.message || 'Failed to load gateways')
+      setGateways([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchGateways()
+  }, [])
+
+  const filtered = gateways.filter((gw) => {
+    if (!search) return true
+    const q = search.toLowerCase()
+    return (
+      (gw.name || '').toLowerCase().includes(q) ||
+      (gw.genie_space_id || '').toLowerCase().includes(q) ||
+      (gw.genie_space_name || '').toLowerCase().includes(q)
+    )
+  })
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return '-'
+    const d = new Date(dateStr)
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+
+  const columns = [
+    {
+      key: 'name',
+      label: 'Name',
+      width: '22%',
+      render: (val, row) => (
+        <span
+          className="text-[#0E538B] hover:underline cursor-pointer font-medium"
+          onClick={(e) => {
+            e.stopPropagation()
+            navigate(`/gateways/${row.id}`)
+          }}
+        >
+          {val}
+        </span>
+      ),
+    },
+    {
+      key: 'genie_space_name',
+      label: 'Genie Space',
+      width: '18%',
+      render: (val, row) => val || row.genie_space_id?.substring(0, 12) + '...' || '-',
+    },
+    {
+      key: 'status',
+      label: 'Status',
+      width: '10%',
+      render: (val) => <StatusBadge status={val || 'active'} />,
+    },
+    {
+      key: 'caching_enabled',
+      label: 'Cache',
+      width: '7%',
+      render: (val) => (
+        <span className={`inline-flex items-center gap-1 text-[12px] font-medium ${val !== false ? 'text-[#24A148]' : 'text-[#CBCBCB]'}`}>
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${val !== false ? 'bg-[#24A148]' : 'bg-[#CBCBCB]'}`} />
+          {val !== false ? 'On' : 'Off'}
+        </span>
+      ),
+    },
+    {
+      key: 'cache_entries',
+      label: 'Cache Entries',
+      width: '10%',
+      render: (val) => (val != null ? val.toLocaleString() : '-'),
+    },
+    {
+      key: 'max_queries_per_minute',
+      label: 'Rate Limit (QPM)',
+      width: '12%',
+      render: (val) => (val != null ? val : '-'),
+    },
+    {
+      key: 'question_normalization_enabled',
+      label: 'Normalization',
+      width: '10%',
+      render: (val) => (
+        <span className={val ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val ? 'Enabled' : 'Disabled'}>
+          {val ? '●' : '○'}
+        </span>
+      ),
+    },
+    {
+      key: 'cache_validation_enabled',
+      label: 'Validation',
+      width: '9%',
+      render: (val) => (
+        <span className={val ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val ? 'Enabled' : 'Disabled'}>
+          {val ? '●' : '○'}
+        </span>
+      ),
+    },
+    {
+      key: 'updated_at',
+      label: 'Last Modified',
+      width: '12%',
+      render: (val) => formatDate(val),
+    },
+  ]
+
+  const handleCreated = (newGateway) => {
+    setShowCreate(false)
+    if (newGateway?.id) {
+      navigate(`/gateways/${newGateway.id}`)
+    } else {
+      fetchGateways()
+    }
+  }
+
+  return (
+    <div className="p-6">
+      {/* Header */}
+      <div className="flex items-start justify-between mb-5">
+        <div>
+          <h1 className="text-[22px] font-medium text-[#161616]">Genie Cache Gateway</h1>
+          <p className="text-[13px] text-[#6F6F6F] mt-0.5">
+            Intelligent caching gateway for Databricks Genie API
+          </p>
+        </div>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="flex items-center gap-2 bg-[#2272B4] text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-[#1b5e96] transition-colors"
+        >
+          <Plus size={16} />
+          Gateway
+        </button>
+      </div>
+
+      {/* Search bar */}
+      {!loading && gateways.length > 0 && (
+        <div className="mb-4">
+          <div className="relative w-72">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6F6F6F]" />
+            <input
+              type="text"
+              placeholder="Search by name or destination"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full h-8 pl-9 pr-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] placeholder:text-[#6F6F6F] focus:outline-none focus:border-[#2272B4]"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Content */}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 size={24} className="animate-spin text-[#6F6F6F]" />
+        </div>
+      ) : error ? (
+        <div className="text-center py-12">
+          <p className="text-[13px] text-red-600 mb-2">{error}</p>
+          <button
+            onClick={fetchGateways}
+            className="text-[13px] text-[#0E538B] hover:underline"
+          >
+            Retry
+          </button>
+        </div>
+      ) : gateways.length === 0 ? (
+        <EmptyState
+          icon={Layers}
+          title="No gateways yet"
+          description="Create a gateway to start caching Genie queries and accelerating your analytics."
+          action={
+            <button
+              onClick={() => setShowCreate(true)}
+              className="flex items-center gap-2 bg-[#2272B4] text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-[#1b5e96] transition-colors"
+            >
+              <Plus size={16} />
+              Create your first gateway
+            </button>
+          }
+        />
+      ) : (
+        <DataTable
+          columns={columns}
+          data={filtered}
+          onRowClick={(row) => navigate(`/gateways/${row.id}`)}
+          emptyMessage="No gateways match your search"
+        />
+      )}
+
+      {/* Create modal */}
+      <GatewayCreateModal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreated={handleCreated}
+      />
+    </div>
+  )
+}

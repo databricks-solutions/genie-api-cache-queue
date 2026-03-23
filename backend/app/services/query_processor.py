@@ -119,28 +119,33 @@ class QueryProcessor:
             original_context_text = build_context_text(query_text, conversation_history)
             context_text = await normalize_question(original_context_text, runtime_settings)
 
-            logger.info("Processing query=%s auth=%s host=%s space=%s follow_up=%s context=%r",
-                         query_id[:8], runtime_settings.auth_mode,
-                         runtime_settings.databricks_host, runtime_settings.genie_space_id,
+            logger.info("Processing query=%s host=%s space=%s follow_up=%s context=%r",
+                         query_id[:8], runtime_settings.databricks_host, runtime_settings.genie_space_id,
                          is_follow_up, context_text[:100])
 
-            self._update_status(query_id, QueryStage.RECEIVED, query_text, identity)
+            gw_id = runtime_settings.gateway_id  # Use as log namespace
+            self._update_status(query_id, QueryStage.RECEIVED, query_text, identity, gateway_id=gw_id)
             self._update_status(query_id, QueryStage.CHECKING_CACHE, query_text, identity)
 
             query_embedding = embedding_service.get_embedding(context_text, runtime_settings)
 
-            try:
-                cached_result = await _db.db_service.search_similar_query(
-                    query_embedding,
-                    identity,
-                    runtime_settings.similarity_threshold,
-                    runtime_settings.genie_space_id,
-                    runtime_settings,
-                    shared_cache=runtime_settings.shared_cache
-                )
-            except Exception as e:
-                logger.warning("Cache search failed: %s, continuing without cache", e)
-                cached_result = None
+            caching_enabled = runtime_settings.caching_enabled
+
+            cached_result = None
+            if caching_enabled:
+                try:
+                    cached_result = await _db.db_service.search_similar_query(
+                        query_embedding,
+                        identity,
+                        runtime_settings.similarity_threshold,
+                        runtime_settings.cache_namespace,
+                        runtime_settings,
+                        shared_cache=runtime_settings.shared_cache
+                    )
+                except Exception as e:
+                    logger.warning("Cache search failed: %s, continuing without cache", e)
+            else:
+                logger.info("Caching disabled for this gateway — skipping cache lookup")
 
             if cached_result:
                 cache_id, cached_query, sql_query, similarity, cached_original = cached_result
@@ -213,19 +218,30 @@ class QueryProcessor:
                         sql_query = genie_result.get('sql_query', '')
                         new_conversation_id = genie_result.get('conversation_id')
 
-                        if sql_query:
+                        if sql_query and caching_enabled:
                             try:
                                 await _db.db_service.save_query_cache(
                                     context_text, query_embedding, sql_query,
-                                    identity, runtime_settings.genie_space_id, runtime_settings,
+                                    identity, runtime_settings.cache_namespace, runtime_settings,
                                     original_query_text=original_context_text,
+                                    genie_space_id=runtime_settings.genie_space_id,
                                 )
                             except Exception as e:
                                 logger.warning("Failed to save to cache: %s", e)
 
+                        # Execute SQL to get actual tabular results
+                        actual_result = None
+                        if sql_query:
+                            try:
+                                sql_exec = await genie_service.execute_sql(sql_query, runtime_settings)
+                                if sql_exec.get('status') == 'SUCCEEDED':
+                                    actual_result = sql_exec.get('result')
+                            except Exception as e:
+                                logger.warning("Failed to execute SQL for result: %s", e)
+
                         self._update_status(
                             query_id, QueryStage.COMPLETED, query_text, identity,
-                            sql_query=sql_query, result=genie_result.get('result'),
+                            sql_query=sql_query, result=actual_result,
                             from_cache=False,
                             conversation_id=new_conversation_id,
                         )
@@ -309,8 +325,8 @@ class QueryProcessor:
             if query_id in self.active_queries:
                 del self.active_queries[query_id]
 
-    def _update_status(self, query_id, stage, query_text, identity, **kwargs):
-        """Update query status."""
+    def _update_status(self, query_id, stage, query_text, identity, gateway_id=None, **kwargs):
+        """Update query status and auto-save log on terminal stages."""
         now = datetime.now().isoformat()
         existing_status = queue_service.get_query_status(query_id)
 
@@ -324,6 +340,27 @@ class QueryProcessor:
             **kwargs
         }
         queue_service.save_query_status(query_id, status_data)
+
+        # Auto-save log on terminal stages using gateway_id from status data
+        effective_gw_id = gateway_id or (existing_status or {}).get('gateway_id')
+        if effective_gw_id:
+            status_data['gateway_id'] = effective_gw_id
+
+        if stage in (QueryStage.COMPLETED, QueryStage.FAILED) and effective_gw_id:
+            import asyncio
+            async def _save_log():
+                try:
+                    await _db.db_service.save_query_log(
+                        query_id, query_text, identity, stage.value,
+                        kwargs.get('from_cache', False), effective_gw_id
+                    )
+                except Exception as e:
+                    logger.warning("Failed to auto-save query log: %s", e)
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(_save_log())
+            except Exception:
+                pass
 
     def submit_query(
         self, query_text, identity, runtime_config=None,
@@ -394,15 +431,25 @@ class QueryProcessor:
                                 try:
                                     await _db.db_service.save_query_cache(
                                         context_text, query_embedding, sql_query,
-                                        identity, runtime_settings.genie_space_id, runtime_settings,
+                                        identity, runtime_settings.cache_namespace, runtime_settings,
                                         original_query_text=original_context_text,
                                     )
                                 except Exception as e:
                                     logger.warning("Failed to save to cache: %s", e)
 
+                            # Execute SQL to get actual tabular results
+                            actual_result = None
+                            if sql_query:
+                                try:
+                                    sql_exec = await genie_service.execute_sql(sql_query, runtime_settings)
+                                    if sql_exec.get('status') == 'SUCCEEDED':
+                                        actual_result = sql_exec.get('result')
+                                except Exception as e:
+                                    logger.warning("Failed to execute SQL for result: %s", e)
+
                             self._update_status(
                                 query_id, QueryStage.COMPLETED, query_text, identity,
-                                sql_query=sql_query, result=genie_result.get('result'),
+                                sql_query=sql_query, result=actual_result,
                                 from_cache=False,
                                 conversation_id=new_conversation_id,
                             )

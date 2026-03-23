@@ -39,18 +39,14 @@ QUESTION:
 
 
 def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
-    """Build a WorkspaceClient instance respecting the current auth mode."""
-    if runtime_settings and runtime_settings.auth_mode == "user":
+    """Build a WorkspaceClient using user's OAuth token (X-Forwarded-Access-Token)."""
+    if runtime_settings:
         token = runtime_settings.databricks_token
         if not token:
-            raise RuntimeError("User Auth mode requires a Personal Access Token")
+            raise RuntimeError("No user token available for question normalization (X-Forwarded-Access-Token missing)")
         config = Config(host=runtime_settings.databricks_host, token=token, auth_type="pat")
-        client = WorkspaceClient(config=config)
-    else:
-        # SP / env-var auth: WorkspaceClient picks up credentials from the SDK chain automatically
-        client = WorkspaceClient()
-
-    return client, QUESTION_NORMALIZATION_LLM_ENDPOINT
+        return WorkspaceClient(config=config), QUESTION_NORMALIZATION_LLM_ENDPOINT
+    return WorkspaceClient(), QUESTION_NORMALIZATION_LLM_ENDPOINT
 
 
 async def normalize_question(query_text: str, runtime_settings=None) -> str:

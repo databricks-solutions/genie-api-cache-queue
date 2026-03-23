@@ -18,8 +18,7 @@ class QueryStage(str, Enum):
 
 class RuntimeConfig(BaseModel):
     """Runtime configuration provided by frontend."""
-    auth_mode: Optional[str] = "app"  # "app" or "user"
-    user_pat: Optional[str] = None  # Optional: User's Personal Access Token for full API access
+    gateway_id: Optional[str] = None
     genie_space_id: Optional[str] = None
     genie_spaces: Optional[list] = None  # List of {"id": "...", "name": "..."}
     sql_warehouse_id: Optional[str] = None
@@ -45,11 +44,12 @@ class RuntimeConfig(BaseModel):
     # Feature flags
     question_normalization_enabled: Optional[bool] = None  # LLM-based question normalization
     cache_validation_enabled: Optional[bool] = None  # LLM-based cache hit validation
+    caching_enabled: Optional[bool] = None  # Enable/disable semantic cache entirely
 
 class QueryRequest(BaseModel):
     query: str
-    identity: str
     config: Optional[RuntimeConfig] = None
+    gateway_id: Optional[str] = None
     # Multi-turn conversation support
     conversation_id: Optional[str] = None           # Genie conversation_id from previous turn
     conversation_synced: Optional[bool] = None       # Whether Genie has seen all prior messages
@@ -81,7 +81,8 @@ class CachedQuery(BaseModel):
     query_text: str
     sql_query: str
     identity: str
-    genie_space_id: str
+    gateway_id: str
+    genie_space_id: Optional[str] = None  # audit/reference only
     created_at: datetime
     last_used: datetime
     use_count: int
@@ -104,7 +105,7 @@ class QueryLog(BaseModel):
     stage: str
     created_at: datetime
     from_cache: bool = False
-    genie_space_id: Optional[str] = None
+    gateway_id: Optional[str] = None
 
 
 class GenieAPIResponse(BaseModel):
@@ -143,3 +144,61 @@ class ProxyQueryStatusResponse(BaseModel):
     from_cache: bool = False
     error: Optional[str] = None
     conversation_id: Optional[str] = None
+
+
+# --- Gateway CRUD models ---
+
+class GatewayConfig(BaseModel):
+    """Gateway configuration stored in database."""
+    id: str
+    name: str
+    genie_space_id: str
+    sql_warehouse_id: str
+    similarity_threshold: float = 0.92
+    max_queries_per_minute: int = 5
+    cache_ttl_hours: float = 24
+    question_normalization_enabled: bool = True
+    cache_validation_enabled: bool = True
+    caching_enabled: bool = True
+    embedding_provider: str = "databricks"
+    databricks_embedding_endpoint: str = "databricks-gte-large-en"
+    shared_cache: bool = True
+    status: str = "active"
+    created_by: Optional[str] = None
+    description: str = ""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # Stats (populated on list/get, not stored)
+    cache_count: Optional[int] = None
+    query_count_7d: Optional[int] = None
+
+
+class GatewayCreateRequest(BaseModel):
+    name: str
+    genie_space_id: str
+    sql_warehouse_id: Optional[str] = None
+    similarity_threshold: Optional[float] = None
+    max_queries_per_minute: Optional[int] = None
+    cache_ttl_hours: Optional[float] = None
+    question_normalization_enabled: Optional[bool] = None
+    cache_validation_enabled: Optional[bool] = None
+    embedding_provider: Optional[str] = None
+    databricks_embedding_endpoint: Optional[str] = None
+    shared_cache: Optional[bool] = None
+    description: Optional[str] = ""
+
+
+class GatewayUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    similarity_threshold: Optional[float] = None
+    max_queries_per_minute: Optional[int] = None
+    cache_ttl_hours: Optional[float] = None
+    question_normalization_enabled: Optional[bool] = None
+    cache_validation_enabled: Optional[bool] = None
+    caching_enabled: Optional[bool] = None
+    embedding_provider: Optional[str] = None
+    databricks_embedding_endpoint: Optional[str] = None
+    shared_cache: Optional[bool] = None
+    sql_warehouse_id: Optional[str] = None
+    status: Optional[str] = None
+    description: Optional[str] = None

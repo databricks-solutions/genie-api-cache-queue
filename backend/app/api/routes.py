@@ -32,16 +32,17 @@ settings = get_settings()
 async def submit_query(request: QueryRequest, req: Request):
     """Submit a new query for processing."""
     try:
-        logger.info("Submit query: %r identity=%s auth=%s",
-                     request.query[:50], request.identity,
-                     request.config.auth_mode if request.config else "default")
-
         user_token = req.headers.get('X-Forwarded-Access-Token')
         user_email = req.headers.get('X-Forwarded-Email')
 
+        if not user_email:
+            raise HTTPException(status_code=401, detail="X-Forwarded-Email header missing — request must come through Databricks Apps.")
+
+        logger.info("Submit query: %r identity=%s", request.query[:50], user_email)
+
         query_id = query_processor.submit_query(
             request.query,
-            request.identity,
+            user_email,
             runtime_config=request.config,
             user_token=user_token,
             user_email=user_email,
@@ -119,7 +120,7 @@ class SaveQueryLogRequest(BaseModel):
     identity: str
     stage: str
     from_cache: bool = False
-    genie_space_id: Optional[str] = None
+    gateway_id: Optional[str] = None
     config: Optional[RuntimeConfig] = None
 
 
@@ -137,7 +138,7 @@ async def save_query_log_post(request: SaveQueryLogRequest, req: Request):
             request.identity,
             request.stage,
             request.from_cache,
-            request.genie_space_id,
+            request.gateway_id,
             runtime_settings
         )
 
@@ -168,7 +169,7 @@ async def get_query_logs_post(request: QueryLogRequest, req: Request):
                 identity=log['identity'],
                 stage=log['stage'],
                 from_cache=log['from_cache'],
-                genie_space_id=log.get('genie_space_id'),
+                gateway_id=log.get("gateway_id"),
                 created_at=datetime.fromisoformat(log['created_at'])
             )
             for log in logs
@@ -179,11 +180,12 @@ async def get_query_logs_post(request: QueryLogRequest, req: Request):
 
 
 @router.get("/health")
-async def health_check():
+async def health_check(req: Request):
     """Health check endpoint."""
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "user_email": req.headers.get('X-Forwarded-Email'),
     }
 
 
@@ -224,10 +226,8 @@ from app.api.config_store import get_effective_setting, update_overrides, get_ov
 
 
 class UIConfigUpdate(BaseModel):
-    auth_mode: Optional[str] = None
     lakebase_service_token: Optional[str] = None
-    user_pat: Optional[str] = None
-    genie_space_id: Optional[str] = None
+    gateway_id: Optional[str] = None
     genie_spaces: Optional[list] = None  # List of {"id": "...", "name": "..."}
     sql_warehouse_id: Optional[str] = None
     similarity_threshold: Optional[float] = None
@@ -253,7 +253,6 @@ async def get_config():
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)
     return {
-        "auth_mode": overrides.get("auth_mode", "app"),
         "genie_space_id": get_effective_setting("genie_space_id"),
         "genie_spaces": get_effective_setting("genie_spaces") or [],
         "sql_warehouse_id": get_effective_setting("sql_warehouse_id"),
@@ -269,7 +268,9 @@ async def get_config():
         "lakebase_schema": settings.lakebase_schema or overrides.get("lakebase_schema"),
         "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
         "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
-        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token")),
+        # True if any Lakebase token is available (custom override in memory OR auto-injected DATABRICKS_TOKEN)
+        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or settings.databricks_token),
+        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if settings.databricks_token else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
     }
@@ -284,9 +285,6 @@ async def put_config(body: UIConfigUpdate):
         if field == "cache_ttl_seconds":
             batch["cache_ttl_hours"] = value / 3600
             updated["cache_ttl_seconds"] = value
-        elif field == "user_pat":
-            batch["lakebase_service_token"] = value
-            updated["lakebase_service_token"] = "***"
         elif field == "lakebase_service_token":
             batch[field] = value
             updated[field] = "***"
@@ -308,7 +306,6 @@ async def cache_count(req: Request):
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
-            auth_mode=overrides.get("auth_mode", "app"),
             storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
             lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
             lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
@@ -330,7 +327,6 @@ async def clear_cache(req: Request, space_id: Optional[str] = None):
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
-            auth_mode=overrides.get("auth_mode", "app"),
             storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
             lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
             lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
@@ -339,7 +335,7 @@ async def clear_cache(req: Request, space_id: Optional[str] = None):
         user_token = req.headers.get('X-Forwarded-Access-Token')
         user_email = req.headers.get('X-Forwarded-Email')
         rs = RuntimeSettings(rc, user_token, user_email)
-        count = await _db.db_service.clear_cache(rs, genie_space_id=space_id)
+        count = await _db.db_service.clear_cache(rs, gateway_id=space_id)
         label = f" for space {space_id}" if space_id else ""
         return {"success": True, "deleted": count, "message": f"Cache cleared{label} ({count} entries deleted)"}
     except Exception as e:

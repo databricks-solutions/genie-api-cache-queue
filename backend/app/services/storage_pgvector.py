@@ -67,6 +67,9 @@ class PGVectorStorageService:
         self.cache_ttl_hours = cache_ttl_hours
         self.pool = None
         self.oauth_token = None
+        # Gateway table in same schema as cache table
+        schema_prefix = self.table_name.rsplit('.', 1)[0] if '.' in self.table_name else 'public'
+        self.gateway_table_name = f"{schema_prefix}.gateway_configs"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -148,6 +151,93 @@ class PGVectorStorageService:
             await register_vector(conn)
             await self._ensure_table(conn)
             await self._ensure_query_log_table(conn)
+            await self._ensure_gateway_table(conn)
+            await self._migrate_genie_space_id_columns(conn)
+            await self._migrate_original_query_text(conn)
+            await self._migrate_caching_enabled(conn)
+
+    async def _migrate_genie_space_id_columns(self, conn):
+        """Migration: ensure both gateway_id and genie_space_id columns exist.
+        gateway_id = external identifier (UUID) used for all operations.
+        genie_space_id = internal Genie space ID, kept for audit/reference.
+        """
+        for table in [self.table_name, self.query_log_table_name]:
+            parts = table.split(".")
+            tbl = parts[-1]
+            schema = parts[-2] if len(parts) >= 2 else "public"
+
+            # Add gateway_id if missing (may have been renamed from genie_space_id)
+            has_gw_col = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='gateway_id'",
+                schema, tbl
+            )
+            if not has_gw_col:
+                # Check if old column still exists — if so, rename it
+                has_old = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='genie_space_id'",
+                    schema, tbl
+                )
+                if has_old:
+                    try:
+                        await conn.execute(f'ALTER TABLE {table} RENAME COLUMN genie_space_id TO gateway_id')
+                        logger.info("Migrated %s: genie_space_id → gateway_id", table)
+                    except Exception as e:
+                        logger.warning("Rename failed for %s (may need ADD instead): %s", table, e)
+                        try:
+                            await conn.execute(f'ALTER TABLE {table} ADD COLUMN gateway_id VARCHAR(255)')
+                            logger.info("Added gateway_id column to %s", table)
+                        except Exception as e2:
+                            logger.warning("ADD COLUMN also failed for %s: %s", table, e2)
+                else:
+                    try:
+                        await conn.execute(f'ALTER TABLE {table} ADD COLUMN gateway_id VARCHAR(255)')
+                        logger.info("Added gateway_id column to %s", table)
+                    except Exception as e:
+                        logger.warning("Could not add gateway_id to %s: %s", table, e)
+
+            # Add genie_space_id back as audit column if missing
+            has_audit_col = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='genie_space_id'",
+                schema, tbl
+            )
+            if not has_audit_col:
+                try:
+                    await conn.execute(f'ALTER TABLE {table} ADD COLUMN genie_space_id VARCHAR(255)')
+                    logger.info("Added audit genie_space_id column to %s", table)
+                except Exception as e:
+                    logger.warning("Could not add genie_space_id to %s: %s", table, e)
+
+    async def _migrate_original_query_text(self, conn):
+        """Migration: add original_query_text column to cached_queries if missing."""
+        try:
+            parts = self.table_name.split('.')
+            schema = parts[-2] if len(parts) >= 2 else 'public'
+            tbl = parts[-1]
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='original_query_text'",
+                schema, tbl
+            )
+            if not exists:
+                await conn.execute(f'ALTER TABLE {self.table_name} ADD COLUMN original_query_text TEXT')
+                logger.info("Added original_query_text column to %s", self.table_name)
+        except Exception as e:
+            logger.warning("Could not add original_query_text to %s: %s", self.table_name, e)
+
+    async def _migrate_caching_enabled(self, conn):
+        """Migration: add caching_enabled column to gateway_configs if missing."""
+        try:
+            parts = self.gateway_table_name.split('.')
+            schema = parts[-2] if len(parts) >= 2 else 'public'
+            tbl = parts[-1]
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name='caching_enabled'",
+                schema, tbl
+            )
+            if not exists:
+                await conn.execute(f'ALTER TABLE {self.gateway_table_name} ADD COLUMN caching_enabled BOOLEAN DEFAULT true')
+                logger.info("Added caching_enabled column to %s", self.gateway_table_name)
+        except Exception as e:
+            logger.warning("Could not add caching_enabled to %s: %s", self.gateway_table_name, e)
 
     async def _build_connection_string_with_creds(self, hostname, quote_plus, uuid):
         """Generate OAuth credentials and build connection string for a Lakebase hostname."""
@@ -296,7 +386,7 @@ class PGVectorStorageService:
                 query_embedding vector(1024),
                 sql_query TEXT NOT NULL,
                 identity VARCHAR(255) NOT NULL,
-                genie_space_id VARCHAR(255) NOT NULL,
+                gateway_id VARCHAR(255) NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
                 last_used TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
                 use_count INTEGER DEFAULT 1
@@ -307,7 +397,7 @@ class PGVectorStorageService:
         for idx_sql in [
             f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.table_name} USING ivfflat (query_embedding vector_cosine_ops) WITH (lists = 100)",
             f"CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx ON {self.table_name} (identity)",
-            f"CREATE INDEX IF NOT EXISTS {idx_base}_space_idx ON {self.table_name} (genie_space_id)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_space_idx ON {self.table_name} (gateway_id)",
         ]:
             try:
                 await conn.execute(idx_sql)
@@ -326,7 +416,7 @@ class PGVectorStorageService:
                 query_text TEXT NOT NULL,
                 identity VARCHAR(255) NOT NULL,
                 stage VARCHAR(50) NOT NULL,
-                genie_space_id VARCHAR(255),
+                gateway_id VARCHAR(255),
                 from_cache BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC'),
                 updated_at TIMESTAMPTZ DEFAULT (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
@@ -345,12 +435,38 @@ class PGVectorStorageService:
 
         logger.info("Query log table '%s' initialized", self.query_log_table_name)
 
+    async def _ensure_gateway_table(self, conn):
+        """Create the gateway_configs table if it does not exist."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.gateway_table_name} (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                genie_space_id TEXT NOT NULL,
+                sql_warehouse_id TEXT NOT NULL,
+                similarity_threshold FLOAT DEFAULT 0.92,
+                max_queries_per_minute INT DEFAULT 5,
+                cache_ttl_hours FLOAT DEFAULT 24,
+                question_normalization_enabled BOOLEAN DEFAULT true,
+                cache_validation_enabled BOOLEAN DEFAULT true,
+                caching_enabled BOOLEAN DEFAULT true,
+                embedding_provider TEXT DEFAULT 'databricks',
+                databricks_embedding_endpoint TEXT DEFAULT 'databricks-gte-large-en',
+                shared_cache BOOLEAN DEFAULT true,
+                status TEXT DEFAULT 'active',
+                created_by TEXT,
+                description TEXT DEFAULT '',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("Gateway table '%s' initialized", self.gateway_table_name)
+
     async def search_similar_query(
         self,
         query_embedding: List[float],
         identity: str,
         threshold: float = 0.92,
-        genie_space_id: Optional[str] = None,
+        gateway_id: Optional[str] = None,
         cache_ttl_hours: float = None,
         shared_cache: bool = True
     ) -> Optional[Tuple[int, str, str, float]]:
@@ -386,9 +502,9 @@ class PGVectorStorageService:
             threshold_param_idx = param_idx
             param_idx += 1
 
-            if genie_space_id:
-                filters.append(f"genie_space_id = ${param_idx}")
-                params.append(genie_space_id)
+            if gateway_id:
+                filters.append(f"gateway_id = ${param_idx}")
+                params.append(gateway_id)
                 param_idx += 1
 
             # Freshness window: only match entries within TTL (0 = no limit)
@@ -416,7 +532,7 @@ class PGVectorStorageService:
 
             logger.info("Cache search: table=%s threshold=%.2f ttl=%s shared=%s space=%s filters=%d SQL: %s params_count=%d",
                         self.table_name, threshold, ttl or "unlimited", shared_cache,
-                        genie_space_id or "any", len(filters), where_clause[:200], len(params))
+                        gateway_id or "any", len(filters), where_clause[:200], len(params))
 
             row = await conn.fetchrow(query, *params)
 
@@ -457,8 +573,9 @@ class PGVectorStorageService:
         query_embedding: List[float],
         sql_query: str,
         identity: str,
-        genie_space_id: str,
+        gateway_id: str,
         original_query_text: str = None,
+        genie_space_id: str = None,  # audit/reference only
     ) -> int:
         """Save a new query to the cache."""
         if not self.pool:
@@ -471,11 +588,11 @@ class PGVectorStorageService:
 
             row = await conn.fetchrow(f"""
                 INSERT INTO {self.table_name}
-                (query_text, original_query_text, query_embedding, sql_query, identity, genie_space_id,
+                (query_text, original_query_text, query_embedding, sql_query, identity, gateway_id, genie_space_id,
                  created_at, last_used, use_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
                 RETURNING id
-            """, query_text, original_query_text, embedding_array, sql_query, identity, genie_space_id)
+            """, query_text, original_query_text, embedding_array, sql_query, identity, gateway_id, genie_space_id)
 
             cache_id = row['id']
             logger.info("Saved to cache id=%d", cache_id)
@@ -484,7 +601,7 @@ class PGVectorStorageService:
     async def get_all_cached_queries(
         self,
         identity: Optional[str] = None,
-        genie_space_id: Optional[str] = None,
+        gateway_id: Optional[str] = None,
         limit: int = 100
     ) -> List[Dict]:
         """Get all cached queries (no TTL filtering - shows full history)."""
@@ -501,9 +618,9 @@ class PGVectorStorageService:
                 params.append(identity)
                 param_idx += 1
 
-            if genie_space_id:
-                where_clauses.append(f"genie_space_id = ${param_idx}")
-                params.append(genie_space_id)
+            if gateway_id:
+                where_clauses.append(f"gateway_id = ${param_idx}")
+                params.append(gateway_id)
                 param_idx += 1
 
             where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
@@ -511,7 +628,7 @@ class PGVectorStorageService:
 
             query = f"""
                 SELECT
-                    id, query_text, sql_query, identity, genie_space_id,
+                    id, query_text, sql_query, identity, gateway_id,
                     created_at, last_used, use_count
                 FROM {self.table_name}
                 {where_sql}
@@ -527,7 +644,7 @@ class PGVectorStorageService:
                     'query_text': row['query_text'],
                     'sql_query': row['sql_query'],
                     'identity': row['identity'],
-                    'genie_space_id': row['genie_space_id'],
+                    'gateway_id': row['gateway_id'],
                     'created_at': _to_utc_iso(row['created_at']),
                     'last_used': _to_utc_iso(row['last_used']),
                     'use_count': row['use_count']
@@ -545,7 +662,7 @@ class PGVectorStorageService:
                 SELECT
                     COUNT(*) as total_queries,
                     COUNT(DISTINCT identity) as unique_identities,
-                    COUNT(DISTINCT genie_space_id) as unique_spaces,
+                    COUNT(DISTINCT gateway_id) as unique_spaces,
                     SUM(use_count) as total_uses,
                     AVG(use_count) as avg_uses_per_query,
                     MAX(last_used) as most_recent_use
@@ -555,32 +672,32 @@ class PGVectorStorageService:
             return dict(stats)
 
     async def get_cache_count(self):
-        """Return cache entry counts grouped by genie_space_id."""
+        """Return cache entry counts grouped by gateway_id."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized.")
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(f"""
-                SELECT COALESCE(genie_space_id, 'unknown') as space_id, COUNT(*) as count
+                SELECT COALESCE(gateway_id, 'unknown') as space_id, COUNT(*) as count
                 FROM {self.table_name}
-                GROUP BY genie_space_id
+                GROUP BY gateway_id
             """)
             total = sum(r['count'] for r in rows)
             by_space = {r['space_id']: r['count'] for r in rows}
             return {"total": total, "by_space": by_space}
 
-    async def clear_cache(self, genie_space_id=None):
-        """Delete cached queries, optionally filtered by genie_space_id."""
+    async def clear_cache(self, gateway_id=None):
+        """Delete cached queries, optionally filtered by gateway_id."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized.")
         async with self.pool.acquire() as conn:
-            if genie_space_id:
+            if gateway_id:
                 count = await conn.fetchval(
-                    f"SELECT COUNT(*) FROM {self.table_name} WHERE genie_space_id = $1", genie_space_id
+                    f"SELECT COUNT(*) FROM {self.table_name} WHERE gateway_id = $1", gateway_id
                 )
                 await conn.execute(
-                    f"DELETE FROM {self.table_name} WHERE genie_space_id = $1", genie_space_id
+                    f"DELETE FROM {self.table_name} WHERE gateway_id = $1", gateway_id
                 )
-                logger.info("Cache cleared for space %s: %d entries deleted from %s", genie_space_id, count, self.table_name)
+                logger.info("Cache cleared for space %s: %d entries deleted from %s", gateway_id, count, self.table_name)
             else:
                 count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
                 await conn.execute(f"DELETE FROM {self.table_name}")
@@ -600,7 +717,8 @@ class PGVectorStorageService:
         identity: str,
         stage: str,
         from_cache: bool = False,
-        genie_space_id: Optional[str] = None
+        gateway_id: Optional[str] = None,
+        genie_space_id: Optional[str] = None,  # audit/reference only
     ) -> int:
         """Save a query log entry"""
         if not self.pool:
@@ -609,50 +727,52 @@ class PGVectorStorageService:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(f"""
                 INSERT INTO {self.query_log_table_name}
-                (query_id, query_text, identity, stage, from_cache, genie_space_id, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6,
+                (query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7,
                         CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
                         CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 ON CONFLICT (query_id)
                 DO UPDATE SET
                     stage = EXCLUDED.stage,
                     from_cache = EXCLUDED.from_cache,
+                    gateway_id = COALESCE(EXCLUDED.gateway_id, {self.query_log_table_name}.gateway_id),
                     genie_space_id = COALESCE(EXCLUDED.genie_space_id, {self.query_log_table_name}.genie_space_id),
                     updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
                 RETURNING id
-            """, query_id, query_text, identity, stage, from_cache, genie_space_id)
+            """, query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id)
 
             return row['id']
 
     async def get_query_logs(
         self,
         identity: Optional[str] = None,
-        limit: int = 50
+        limit: int = 50,
+        gateway_id: Optional[str] = None,
     ) -> List[dict]:
-        """Get query logs, optionally filtered by identity"""
+        """Get query logs, optionally filtered by identity and/or gateway_id."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
 
         async with self.pool.acquire() as conn:
+            filters = []
+            params: list = []
             if identity:
-                query = f"""
-                    SELECT query_id, query_text, identity, stage, genie_space_id,
-                           from_cache, created_at, updated_at
-                    FROM {self.query_log_table_name}
-                    WHERE identity = $1
-                    ORDER BY created_at DESC
-                    LIMIT $2
-                """
-                rows = await conn.fetch(query, identity, limit)
-            else:
-                query = f"""
-                    SELECT query_id, query_text, identity, stage, genie_space_id,
-                           from_cache, created_at, updated_at
-                    FROM {self.query_log_table_name}
-                    ORDER BY created_at DESC
-                    LIMIT $1
-                """
-                rows = await conn.fetch(query, limit)
+                params.append(identity)
+                filters.append(f"identity = ${len(params)}")
+            if gateway_id:
+                params.append(gateway_id)
+                filters.append(f"gateway_id = ${len(params)}")
+            where = f"WHERE {' AND '.join(filters)}" if filters else ""
+            params.append(limit)
+            query = f"""
+                SELECT query_id, query_text, identity, stage, gateway_id,
+                       from_cache, created_at, updated_at
+                FROM {self.query_log_table_name}
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ${len(params)}
+            """
+            rows = await conn.fetch(query, *params)
 
             return [
                 {
@@ -660,10 +780,182 @@ class PGVectorStorageService:
                     'query_text': row['query_text'],
                     'identity': row['identity'],
                     'stage': row['stage'],
-                    'genie_space_id': row['genie_space_id'],
+                    'gateway_id': row['gateway_id'],
                     'from_cache': row['from_cache'],
                     'created_at': _to_utc_iso(row['created_at']),
                     'updated_at': _to_utc_iso(row['updated_at'])
                 }
                 for row in rows
             ]
+
+    # --- Gateway CRUD ---
+
+    async def create_gateway(self, config: dict) -> dict:
+        """Create a new gateway configuration."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"""
+                INSERT INTO {self.gateway_table_name}
+                (id, name, gateway_id, sql_warehouse_id, similarity_threshold,
+                 max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
+                 cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                 shared_cache, status, created_by, description, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            """,
+                config["id"], config["name"], config["gateway_id"], config["sql_warehouse_id"],
+                config.get("similarity_threshold", 0.92), config.get("max_queries_per_minute", 5),
+                config.get("cache_ttl_hours", 24), config.get("question_normalization_enabled", True),
+                config.get("cache_validation_enabled", True), config.get("caching_enabled", True),
+                config.get("embedding_provider", "databricks"),
+                config.get("databricks_embedding_endpoint", "databricks-gte-large-en"),
+                config.get("shared_cache", True), config.get("status", "active"),
+                config.get("created_by"), config.get("description", ""),
+                config.get("created_at"), config.get("updated_at"),
+            )
+            logger.info("Gateway created in DB: id=%s name=%s", config["id"], config["name"])
+            return config
+
+    async def get_gateway(self, gateway_id: str) -> Optional[dict]:
+        """Get a gateway configuration by ID."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(f"""
+                SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
+                       max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
+                       cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                       shared_cache, status, created_by, description, created_at, updated_at
+                FROM {self.gateway_table_name}
+                WHERE id = $1
+            """, gateway_id)
+
+            if not row:
+                return None
+            return self._row_to_gateway_dict(row)
+
+    async def list_gateways(self) -> list:
+        """List all gateway configurations."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(f"""
+                SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
+                       max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
+                       cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                       shared_cache, status, created_by, description, created_at, updated_at
+                FROM {self.gateway_table_name}
+                ORDER BY created_at DESC
+            """)
+            return [self._row_to_gateway_dict(row) for row in rows]
+
+    async def update_gateway(self, gateway_id: str, updates: dict) -> Optional[dict]:
+        """Update a gateway configuration."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        # Build dynamic SET clause from provided updates
+        allowed_fields = {
+            "name", "similarity_threshold", "max_queries_per_minute", "cache_ttl_hours",
+            "question_normalization_enabled", "cache_validation_enabled", "caching_enabled",
+            "embedding_provider", "databricks_embedding_endpoint", "shared_cache", "status", "description",
+        }
+        set_parts = []
+        params = []
+        param_idx = 1
+        for key, value in updates.items():
+            if key in allowed_fields and value is not None:
+                set_parts.append(f"{key} = ${param_idx}")
+                params.append(value)
+                param_idx += 1
+
+        if not set_parts:
+            return await self.get_gateway(gateway_id)
+
+        set_parts.append(f"updated_at = NOW()")
+        params.append(gateway_id)
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(f"""
+                UPDATE {self.gateway_table_name}
+                SET {', '.join(set_parts)}
+                WHERE id = ${param_idx}
+            """, *params)
+
+            if result == "UPDATE 0":
+                return None
+
+            logger.info("Gateway updated in DB: id=%s fields=%s", gateway_id, list(updates.keys()))
+            return await self.get_gateway(gateway_id)
+
+    async def delete_gateway(self, gateway_id: str) -> bool:
+        """Delete a gateway configuration."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(f"""
+                DELETE FROM {self.gateway_table_name} WHERE id = $1
+            """, gateway_id)
+            deleted = result != "DELETE 0"
+            if deleted:
+                logger.info("Gateway deleted from DB: id=%s", gateway_id)
+            return deleted
+
+    async def get_gateway_stats(self, gateway_id: str) -> dict:
+        """Get cache and query stats for a gateway."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        gw = await self.get_gateway(gateway_id)
+        if not gw:
+            return {"cache_count": 0, "query_count_7d": 0}
+
+        space_id = gw.get("genie_space_id")  # internal Genie space ID for reference
+        async with self.pool.acquire() as conn:
+            # All cache ops use gateway_id as namespace key
+            cache_count = await conn.fetchval(f"""
+                SELECT COUNT(*) FROM {self.table_name}
+                WHERE gateway_id = $1
+            """, gateway_id) or 0
+
+            query_count = await conn.fetchval(f"""
+                SELECT COUNT(*) FROM {self.query_log_table_name}
+                WHERE gateway_id = $1
+                  AND created_at > NOW() - INTERVAL '7 days'
+            """, gateway_id) or 0
+
+            cache_hits = await conn.fetchval(f"""
+                SELECT COUNT(*) FROM {self.query_log_table_name}
+                WHERE gateway_id = $1
+                  AND from_cache = true
+                  AND created_at > NOW() - INTERVAL '7 days'
+            """, gateway_id) or 0
+
+            return {"cache_count": cache_count, "query_count_7d": query_count, "cache_hits_7d": cache_hits}
+
+    def _row_to_gateway_dict(self, row) -> dict:
+        """Convert a database row to a gateway dict."""
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "genie_space_id": row["genie_space_id"],
+            "sql_warehouse_id": row["sql_warehouse_id"],
+            "similarity_threshold": row["similarity_threshold"],
+            "max_queries_per_minute": row["max_queries_per_minute"],
+            "cache_ttl_hours": row["cache_ttl_hours"],
+            "question_normalization_enabled": row["question_normalization_enabled"],
+            "cache_validation_enabled": row["cache_validation_enabled"],
+            "caching_enabled": row["caching_enabled"] if "caching_enabled" in row.keys() else True,
+            "embedding_provider": row["embedding_provider"],
+            "databricks_embedding_endpoint": row["databricks_embedding_endpoint"],
+            "shared_cache": row["shared_cache"],
+            "status": row["status"],
+            "created_by": row["created_by"],
+            "description": row["description"],
+            "created_at": _to_utc_iso(row["created_at"]),
+            "updated_at": _to_utc_iso(row["updated_at"]),
+        }
