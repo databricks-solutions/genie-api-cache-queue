@@ -15,7 +15,7 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
             {columns.map((col) => (
               <th
                 key={col.key}
-                className="text-left text-[13px] font-medium text-[#161616] bg-white px-2 py-1"
+                className={`text-[13px] font-medium text-[#161616] bg-white px-2 py-1 ${col.align === 'center' ? 'text-center' : 'text-left'}`}
                 style={{
                   padding: '4px 8px',
                   borderBottom: '1px solid #EBEBEB',
@@ -37,10 +37,11 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
               {columns.map((col) => (
                 <td
                   key={col.key}
-                  className="text-[13px] text-[#161616]"
+                  className={`text-[13px] text-[#161616] ${col.align === 'center' ? 'text-center' : ''}`}
                   style={{
                     padding: '8px',
                     borderBottom: '1px solid #EBEBEB',
+                    verticalAlign: 'middle',
                   }}
                 >
                   {col.render ? col.render(row[col.key], row) : row[col.key]}

@@ -76,16 +76,17 @@ export default function GatewayListPage() {
       key: 'status',
       label: 'Status',
       width: '10%',
+      align: 'center',
       render: (val) => <StatusBadge status={val || 'active'} />,
     },
     {
       key: 'caching_enabled',
       label: 'Cache',
       width: '7%',
+      align: 'center',
       render: (val) => (
-        <span className={`inline-flex items-center gap-1 text-[12px] font-medium ${val !== false ? 'text-[#24A148]' : 'text-[#CBCBCB]'}`}>
-          <span className={`inline-block w-1.5 h-1.5 rounded-full ${val !== false ? 'bg-[#24A148]' : 'bg-[#CBCBCB]'}`} />
-          {val !== false ? 'On' : 'Off'}
+        <span className={val !== false ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val !== false ? 'Enabled' : 'Disabled'}>
+          {val !== false ? '●' : '○'}
         </span>
       ),
     },
@@ -93,18 +94,21 @@ export default function GatewayListPage() {
       key: 'cache_entries',
       label: 'Cache Entries',
       width: '10%',
+      align: 'center',
       render: (val) => (val != null ? val.toLocaleString() : '-'),
     },
     {
       key: 'max_queries_per_minute',
       label: 'Rate Limit (QPM)',
       width: '12%',
+      align: 'center',
       render: (val) => (val != null ? val : '-'),
     },
     {
       key: 'question_normalization_enabled',
       label: 'Normalization',
       width: '10%',
+      align: 'center',
       render: (val) => (
         <span className={val ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val ? 'Enabled' : 'Disabled'}>
           {val ? '●' : '○'}
@@ -115,6 +119,7 @@ export default function GatewayListPage() {
       key: 'cache_validation_enabled',
       label: 'Validation',
       width: '9%',
+      align: 'center',
       render: (val) => (
         <span className={val ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val ? 'Enabled' : 'Disabled'}>
           {val ? '●' : '○'}
