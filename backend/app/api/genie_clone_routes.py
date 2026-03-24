@@ -178,8 +178,13 @@ async def _process_genie_background(
     conversation_id: str = None,
     delay: float = 0,
     max_retries: int = 3,
+    gateway_id: str = None,
 ):
     """Call Genie in the background. Updates _synthetic_messages when done."""
+    logger.info(
+        "Background task STARTED msg_id=%s space=%s token_len=%d host=%s",
+        msg_id, space_id, len(token) if token else 0, rs.databricks_host,
+    )
     if delay:
         await asyncio.sleep(delay)
 
@@ -218,7 +223,7 @@ async def _process_genie_background(
                     try:
                         cache_id = await _db.db_service.save_query_cache(
                             query_text, query_embedding, sql_query,
-                            identity, space_id, rs,
+                            identity, gateway_id or space_id, rs,
                             original_query_text=original_query_text,
                         )
                         logger.info("Background cache SAVED id=%s query=%s", cache_id, query_text[:50])
@@ -265,6 +270,21 @@ async def _process_genie_background(
                     "sql_query": sql_query,
                     "result": actual_result,
                 }
+
+                # Save query log
+                try:
+                    await _db.db_service.save_query_log(
+                        query_id=msg_id,
+                        query_text=original_query_text or query_text,
+                        identity=identity,
+                        stage="completed",
+                        from_cache=False,
+                        gateway_id=gateway_id,
+                        runtime_settings=rs,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to save cache miss query log: %s", e)
+
                 return
 
             # Non-COMPLETED terminal status
@@ -335,9 +355,10 @@ async def _handle_query(
     try:
         query_embedding = embedding_service.get_embedding(query_text, rs)
         logger.info("Embedding generated: len=%s for query=%s", len(query_embedding) if query_embedding else None, query_text[:40])
+        cache_namespace = gateway.get("id") if gateway else space_id
         cached = await _db.db_service.search_similar_query(
             query_embedding, identity, rs.similarity_threshold,
-            space_id, rs, shared_cache=rs.shared_cache,
+            cache_namespace, rs, shared_cache=rs.shared_cache,
         )
     except Exception as e:
         logger.warning("Cache lookup failed: %s — proceeding without cache", e)
@@ -384,14 +405,34 @@ async def _handle_query(
                 },
             ],
         }
+        # Extract inner result (same format as cache miss)
+        actual_result = None
+        if sql_result and sql_result.get("status") == "SUCCEEDED":
+            actual_result = sql_result.get("result")
+
         response["_proxy"] = {
             "stage": "completed",
             "from_cache": True,
             "sql_query": sql_query,
-            "result": sql_result,
+            "result": actual_result,
         }
         _synthetic_messages[msg_id] = response
         _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+
+        # Save query log
+        try:
+            await _db.db_service.save_query_log(
+                query_id=msg_id,
+                query_text=original_query_text,
+                identity=identity,
+                stage="completed",
+                from_cache=True,
+                gateway_id=gateway.get("id") if gateway else None,
+                runtime_settings=rs,
+            )
+        except Exception as e:
+            logger.warning("Failed to save cache hit query log: %s", e)
+
         return {k: v for k, v in response.items() if not k.startswith("_")}
 
     # --- Cache MISS → non-blocking background processing ---
@@ -400,7 +441,7 @@ async def _handle_query(
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
     _synthetic_messages[msg_id] = response
 
-    asyncio.create_task(_process_genie_background(
+    task = asyncio.create_task(_process_genie_background(
         space_id=space_id,
         query_text=query_text,
         original_query_text=original_query_text,
@@ -411,9 +452,25 @@ async def _handle_query(
         msg_id=msg_id,
         att_id=att_id,
         conversation_id=conversation_id,
+        gateway_id=gateway.get("id") if gateway else None,
     ))
 
-    logger.info("Clone CACHE MISS: queued background task msg_id=%s", msg_id)
+    def _on_task_done(t):
+        exc = t.exception() if not t.cancelled() else None
+        if exc:
+            logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
+            _synthetic_messages[msg_id] = {
+                "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+                "message_id": msg_id,
+                "status": "FAILED",
+                "attachments": [],
+                "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
+                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+            }
+
+    task.add_done_callback(_on_task_done)
+
+    logger.info("Clone CACHE MISS: queued background task msg_id=%s token_len=%d host=%s", msg_id, len(token) if token else 0, rs.databricks_host)
     return {k: v for k, v in response.items() if not k.startswith("_")}
 
 

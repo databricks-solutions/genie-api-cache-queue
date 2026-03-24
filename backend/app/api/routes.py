@@ -39,17 +39,31 @@ async def submit_query(request: QueryRequest, req: Request):
         if not identity:
             raise HTTPException(status_code=401, detail="X-Forwarded-Email header missing.")
 
-        # Resolve gateway: config.genie_space_id may be a gateway UUID
+        # Resolve gateway: prefer gateway_id, fall back to genie_space_id
         gateway = None
-        space_id = request.config.genie_space_id if request.config else None
-        if space_id:
-            try:
-                gw = await _db.db_service.get_gateway(space_id)
-                if gw:
-                    gateway = gw
-                    space_id = gw["genie_space_id"]
-            except Exception:
-                pass
+        space_id = None
+        if request.config:
+            # Try gateway_id first (frontend sends this when a gateway is selected)
+            gw_id = getattr(request.config, "gateway_id", None)
+            if gw_id:
+                try:
+                    gw = await _db.db_service.get_gateway(gw_id)
+                    if gw:
+                        gateway = gw
+                        space_id = gw["genie_space_id"]
+                except Exception:
+                    pass
+
+            # Fall back to genie_space_id (which itself might be a gateway UUID)
+            if not space_id and request.config.genie_space_id:
+                space_id = request.config.genie_space_id
+                try:
+                    gw = await _db.db_service.get_gateway(space_id)
+                    if gw:
+                        gateway = gw
+                        space_id = gw["genie_space_id"]
+                except Exception:
+                    pass
 
         if not space_id:
             raise HTTPException(status_code=400, detail="No gateway or space_id provided.")
@@ -226,6 +240,7 @@ async def health_check(req: Request):
         "timestamp": datetime.now().isoformat(),
         "user_email": req.headers.get('X-Forwarded-Email'),
     }
+
 
 
 @router.get("/space-info/{space_id}")

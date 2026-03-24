@@ -65,7 +65,7 @@ class GenieService:
         url = f"{base_url}/spaces/{space_id}/start-conversation"
         payload = {"content": query}
 
-        logger.info("Genie start-conversation space=%s query=%r", space_id, query[:80])
+        logger.info("Genie start-conversation space=%s query=%r url=%s token_len=%d", space_id, query[:80], url, len(headers.get("Authorization", "")) if headers else 0)
 
         async with httpx.AsyncClient() as client:
             response = await client.post(url, headers=headers, json=payload, timeout=30.0)
@@ -85,9 +85,9 @@ class GenieService:
                 raise GenieConfigError(response.status_code, detail)
 
             if not response.is_success:
-                logger.error("Genie API error %d: %s", response.status_code, response.text[:200])
-
-            response.raise_for_status()
+                body = response.text[:500]
+                logger.error("Genie API error %d: %s", response.status_code, body)
+                raise Exception(f"Genie API {response.status_code}: {body}")
             data = response.json()
 
             conversation_id = data.get("conversation_id")

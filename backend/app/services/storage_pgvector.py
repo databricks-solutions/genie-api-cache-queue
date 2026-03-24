@@ -862,6 +862,7 @@ class PGVectorStorageService:
             "name", "similarity_threshold", "max_queries_per_minute", "cache_ttl_hours",
             "question_normalization_enabled", "cache_validation_enabled", "caching_enabled",
             "embedding_provider", "databricks_embedding_endpoint", "shared_cache", "status", "description",
+            "sql_warehouse_id", "genie_space_id",
         }
         set_parts = []
         params = []
