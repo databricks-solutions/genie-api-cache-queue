@@ -25,6 +25,7 @@ from app.api.config_store import get_effective_setting
 from app.api.auth_helpers import extract_bearer_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError
+from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
 from app.services.storage_local import get_local_queue as _get_local_queue
@@ -348,6 +349,7 @@ async def _handle_query(
 
     original_query_text = query_text
     if rs.question_normalization_enabled:
+        query_text = await split_by_intent(query_text, rs)
         query_text = await normalize_question(query_text, rs)
 
     # Generate embedding and check cache
