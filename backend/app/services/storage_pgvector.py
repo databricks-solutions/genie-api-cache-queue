@@ -798,13 +798,13 @@ class PGVectorStorageService:
         async with self.pool.acquire() as conn:
             await conn.execute(f"""
                 INSERT INTO {self.gateway_table_name}
-                (id, name, gateway_id, sql_warehouse_id, similarity_threshold,
+                (id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                  max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
                  cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
                  shared_cache, status, created_by, description, created_at, updated_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             """,
-                config["id"], config["name"], config["gateway_id"], config["sql_warehouse_id"],
+                config["id"], config["name"], config["genie_space_id"], config["sql_warehouse_id"],
                 config.get("similarity_threshold", 0.92), config.get("max_queries_per_minute", 5),
                 config.get("cache_ttl_hours", 24), config.get("question_normalization_enabled", True),
                 config.get("cache_validation_enabled", True), config.get("caching_enabled", True),

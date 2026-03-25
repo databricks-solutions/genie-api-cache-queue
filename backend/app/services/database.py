@@ -27,13 +27,25 @@ async def initialize_storage():
     if settings.storage_backend == "pgvector":
         from app.services.storage_pgvector import PGVectorStorageService
 
-        # Lakebase uses: 1) lakebase_service_token from Settings UI (config_store override)
-        #               2) DATABRICKS_TOKEN env var (auto-injected by Databricks Apps)
+        # Token resolution order:
+        # 1) lakebase_service_token from Settings UI (config_store override)
+        # 2) Service principal OAuth token (Databricks Apps auto-injects
+        #    DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET)
         from app.api.config_store import get_effective_setting
-        token = get_effective_setting("lakebase_service_token") or settings.databricks_token
+        from app.auth import get_service_principal_token
+
+        token = get_effective_setting("lakebase_service_token")
+        if token:
+            src = "Settings override"
+        else:
+            token = get_service_principal_token()
+            src = "Service principal OAuth"
         if not token:
-            raise RuntimeError("No token available for Lakebase. Set DATABRICKS_TOKEN or configure Lakebase Service Token in Settings.")
-        src = "Settings override" if get_effective_setting("lakebase_service_token") else "DATABRICKS_TOKEN env"
+            raise RuntimeError(
+                "No token available for Lakebase. Ensure the app's service principal "
+                "credentials (DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET) are "
+                "configured, or set Lakebase Service Token in Settings."
+            )
         logger.info("Lakebase token source: %s", src)
 
         default_backend = PGVectorStorageService(
