@@ -26,7 +26,6 @@ class DynamicStorageService:
     def __init__(self, default_backend):
         self.default_backend = default_backend
         self._pgvector_backends = {}
-        self._token_expiry = {}
         self._creation_lock = asyncio.Lock()
 
     def _get_cache_key(self, runtime_settings):
@@ -43,61 +42,29 @@ class DynamicStorageService:
             return f"{instance}:{table}"
         return self._DEFAULT_KEY
 
-    def _is_token_expired(self, cache_key):
-        """Check if the JWT will expire soon (within 10 minutes)."""
-        if cache_key not in self._token_expiry:
-            return True
-        return (self._token_expiry[cache_key] - time.time()) < 600
-
-    async def _invalidate_backend(self, runtime_settings):
-        """Close and evict the cached backend under lock to avoid concurrent invalidation."""
-        async with self._creation_lock:
-            cache_key = self._get_cache_key(runtime_settings)
-            old = self._pgvector_backends.pop(cache_key, None)
-            self._token_expiry.pop(cache_key, None)
-        if old and hasattr(old, 'close'):
-            try:
-                await old.close()
-            except Exception:
-                pass
-        logger.info("Lakebase backend invalidated — will reconnect on next call")
 
     async def _get_or_create_pgvector_backend(self, runtime_settings):
         """Get or create a PGVector backend. Only one coroutine creates at a time."""
         cache_key = self._get_cache_key(runtime_settings)
 
-        # Fast path: backend exists and is fresh — no lock needed
-        if cache_key in self._pgvector_backends and not self._is_token_expired(cache_key):
+        # Fast path: backend exists
+        if cache_key in self._pgvector_backends:
             return self._pgvector_backends[cache_key]
 
-        # Slow path: need to create or refresh — serialize with lock so only
-        # one coroutine initializes the pool at a time.
+        # Slow path: create under lock
         async with self._creation_lock:
-            # Re-check: another coroutine may have already created it while we waited
-            if cache_key in self._pgvector_backends and not self._is_token_expired(cache_key):
+            if cache_key in self._pgvector_backends:
                 return self._pgvector_backends[cache_key]
-
-            if cache_key in self._pgvector_backends and self._is_token_expired(cache_key):
-                old = self._pgvector_backends.pop(cache_key, None)
-                if old and hasattr(old, 'close'):
-                    try:
-                        await old.close()
-                    except Exception:
-                        pass
 
             logger.info("Creating Lakebase connection: instance=%s table=%s",
                         runtime_settings.runtime.lakebase_instance_name,
                         runtime_settings.full_table_name)
 
             from app.services.storage_pgvector import PGVectorStorageService
-            ttl = runtime_settings.cache_ttl_hours if hasattr(runtime_settings, 'cache_ttl_hours') else 24
-
-            from app.config import get_settings
             from app.api.config_store import get_effective_setting
-            _s = get_settings()
-
-            # Lakebase connections MUST use the Service Principal token.
             from app.auth import get_service_principal_token
+
+            ttl = runtime_settings.cache_ttl_hours if hasattr(runtime_settings, 'cache_ttl_hours') else 24
             sp_token = get_effective_setting("lakebase_service_token") or get_service_principal_token()
             if not sp_token:
                 raise ValueError(
@@ -105,13 +72,12 @@ class DynamicStorageService:
                     "Configure 'Lakebase Service Token' in Settings or ensure "
                     "DATABRICKS_CLIENT_ID/SECRET are set."
                 )
-            effective_token = sp_token
 
             backend = PGVectorStorageService(
                 connection_string=runtime_settings.postgres_connection_string,
                 table_name=runtime_settings.full_table_name,
                 query_log_table_name=runtime_settings.query_log_table_name,
-                databricks_pat=effective_token,
+                databricks_pat=sp_token,
                 databricks_host=runtime_settings.databricks_host,
                 lakebase_instance_name=runtime_settings.runtime.lakebase_instance_name if runtime_settings.runtime else None,
                 cache_ttl_hours=ttl
@@ -119,75 +85,49 @@ class DynamicStorageService:
 
             await backend.initialize()
             self._pgvector_backends[cache_key] = backend
-            self._token_expiry[cache_key] = time.time() + 3000
             logger.info("Lakebase connection initialized")
             return backend
 
-    async def _ensure_default_pool(self):
-        """Reinitialize the default backend pool if it is closed."""
-        backend = self.default_backend
-        if not hasattr(backend, 'pool'):
-            return
-        if backend.pool is not None and not backend.pool._closed:
+    async def _proactive_refresh(self, backend):
+        """Refresh a backend's JWT if it is expiring soon. Thread-safe via creation lock."""
+        if not hasattr(backend, 'is_token_expiring_soon') or not backend.is_token_expiring_soon():
             return
         async with self._creation_lock:
-            # Re-check after acquiring lock (another coroutine may have fixed it)
-            if backend.pool is not None and not backend.pool._closed:
+            # Re-check after acquiring lock
+            if not backend.is_token_expiring_soon():
                 return
-            logger.warning("Default Lakebase pool is closed — reinitializing")
+            logger.info("Proactively refreshing Lakebase JWT")
+            await backend.reinitialize()
+
+    async def _ensure_backend_healthy(self, backend):
+        """Ensure backend pool is open and JWT is fresh."""
+        if hasattr(backend, 'pool') and backend.pool is not None and backend.pool._closed:
+            async with self._creation_lock:
+                if backend.pool is not None and not backend.pool._closed:
+                    return
+                logger.warning("Lakebase pool is closed — reinitializing")
+                await backend.reinitialize()
+            return
+        await self._proactive_refresh(backend)
+
+    async def refresh_all_backends(self):
+        """Proactively refresh all backends whose JWT is expiring soon. Called by background loop."""
+        for cache_key, backend in list(self._pgvector_backends.items()):
             try:
-                await backend.initialize()
-                self._token_expiry[self._DEFAULT_KEY] = time.time() + 3000
-                logger.info("Default Lakebase pool reinitialized")
+                await self._proactive_refresh(backend)
             except Exception as e:
-                logger.error("Failed to reinitialize pool: %s", e)
-
-    async def refresh_default_backend(self):
-        """Refresh the default Lakebase backend by re-initializing."""
-        cache_key = self._DEFAULT_KEY
-        if cache_key not in self._pgvector_backends:
-            return
-        if not self._is_token_expired(cache_key):
-            return
-
-        logger.info("Refreshing default Lakebase backend")
+                logger.error("Background refresh failed for %s: %s", cache_key, e)
+        # Also check default backend (may not be in _pgvector_backends)
         try:
-            from app.config import get_settings
-            from app.services.storage_pgvector import PGVectorStorageService
-
-            settings = get_settings()
-
-            old = self._pgvector_backends.pop(cache_key, None)
-            if old and hasattr(old, 'close'):
-                try:
-                    await old.close()
-                except Exception:
-                    pass
-
-            from app.api.config_store import get_effective_setting
-            token = get_effective_setting("lakebase_service_token") or settings.databricks_token
-
-            new_backend = PGVectorStorageService(
-                connection_string=settings.postgres_connection_string,
-                table_name=settings.full_table_name,
-                cache_ttl_hours=settings.cache_ttl_hours,
-                databricks_pat=token,
-                databricks_host=settings.databricks_host,
-                lakebase_instance_name=settings.lakebase_instance,
-            )
-            await new_backend.initialize()
-            self._pgvector_backends[cache_key] = new_backend
-            self._token_expiry[cache_key] = time.time() + 3000
-            self.default_backend = new_backend
-            logger.info("Default backend refreshed")
-        except Exception:
-            logger.exception("Failed to refresh default backend")
+            await self._proactive_refresh(self.default_backend)
+        except Exception as e:
+            logger.error("Background refresh failed for default backend: %s", e)
 
     async def _resolve_backend(self, runtime_settings):
         """Resolve which backend to use, initializing lazily if needed.
-        When Lakebase is configured, it MUST use the SP token — no fallback to local."""
+        Proactively refreshes JWT before it expires."""
         if not runtime_settings:
-            await self._ensure_default_pool()
+            await self._ensure_backend_healthy(self.default_backend)
             return self.default_backend
         if hasattr(runtime_settings, 'runtime') and runtime_settings.runtime:
             rt = runtime_settings.runtime
@@ -196,7 +136,7 @@ class DynamicStorageService:
                 from app.auth import get_service_principal_token
                 sp_token = get_effective_setting("lakebase_service_token") or get_service_principal_token()
                 if not rt.lakebase_instance_name:
-                    await self._ensure_default_pool()
+                    await self._ensure_backend_healthy(self.default_backend)
                     return self.default_backend
                 if not sp_token:
                     raise ValueError(
@@ -204,7 +144,9 @@ class DynamicStorageService:
                         "Configure 'Lakebase Service Token' in Settings or ensure "
                         "DATABRICKS_CLIENT_ID/SECRET are set."
                     )
-                return await self._get_or_create_pgvector_backend(runtime_settings)
+                backend = await self._get_or_create_pgvector_backend(runtime_settings)
+                await self._proactive_refresh(backend)
+                return backend
             if rt.storage_backend == 'local':
                 return self.default_backend
         return self.default_backend
@@ -214,21 +156,17 @@ class DynamicStorageService:
         try:
             return await operation()
         except Exception as first_err:
-            cache_key = self._get_cache_key(runtime_settings)
-            if cache_key not in self._pgvector_backends:
+            backend = await self._resolve_backend(runtime_settings)
+            if not hasattr(backend, 'reinitialize'):
                 raise
-            logger.warning("Lakebase error: %s (%s) — reinitializing pool",
+            logger.warning("Lakebase error: %s (%s) — reinitializing",
                           type(first_err).__name__, first_err)
-            async with self._creation_lock:
-                backend = self._pgvector_backends.get(cache_key)
-                if backend and hasattr(backend, 'initialize'):
-                    try:
-                        await backend.initialize()
-                        self._token_expiry[cache_key] = time.time() + 3000
-                        logger.info("Lakebase pool reinitialized for key=%s", cache_key)
-                    except Exception as reinit_err:
-                        logger.error("Lakebase reinitialize failed: %s", reinit_err)
-                        raise first_err
+            try:
+                async with self._creation_lock:
+                    await backend.reinitialize()
+            except Exception as reinit_err:
+                logger.error("Reinitialize failed: %s", reinit_err)
+                raise first_err
             return await operation()
 
     async def search_similar_query(
@@ -361,7 +299,7 @@ class DynamicStorageService:
 
     async def create_gateway(self, config: dict) -> dict:
         """Create a new gateway configuration."""
-        await self._ensure_default_pool()
+        await self._ensure_backend_healthy(self.default_backend)
         backend = self.default_backend
         if hasattr(backend, 'pool'):
             return await backend.create_gateway(config)
@@ -369,7 +307,7 @@ class DynamicStorageService:
 
     async def get_gateway(self, gateway_id: str):
         """Get a gateway configuration by ID."""
-        await self._ensure_default_pool()
+        await self._ensure_backend_healthy(self.default_backend)
         backend = self.default_backend
         if hasattr(backend, 'pool'):
             return await backend.get_gateway(gateway_id)
@@ -377,7 +315,7 @@ class DynamicStorageService:
 
     async def list_gateways(self) -> list:
         """List all gateway configurations."""
-        await self._ensure_default_pool()
+        await self._ensure_backend_healthy(self.default_backend)
         backend = self.default_backend
         if hasattr(backend, 'pool'):
             return await backend.list_gateways()

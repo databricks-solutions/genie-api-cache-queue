@@ -67,6 +67,7 @@ class PGVectorStorageService:
         self.cache_ttl_hours = cache_ttl_hours
         self.pool = None
         self.oauth_token = None
+        self.jwt_expires_at = 0  # epoch timestamp when the current JWT expires
         # Gateway table in same schema as cache table
         schema_prefix = self.table_name.rsplit('.', 1)[0] if '.' in self.table_name else 'public'
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
@@ -80,6 +81,25 @@ class PGVectorStorageService:
             return table_name
         else:
             return f"public.{table_name}"
+
+    def is_token_expiring_soon(self, buffer_seconds: int = 600) -> bool:
+        """Check if the Lakebase JWT will expire within buffer_seconds."""
+        if self.jwt_expires_at == 0:
+            return False  # no JWT tracking (non-Lakebase or unknown TTL)
+        import time
+        return (self.jwt_expires_at - time.time()) < buffer_seconds
+
+    async def reinitialize(self):
+        """Generate a fresh JWT and create a new connection pool.
+        Atomic swap: new pool is created before old pool is closed."""
+        old_pool = self.pool
+        logger.info("Reinitializing Lakebase pool (JWT expiring soon)")
+        await self.initialize()
+        if old_pool and old_pool is not self.pool:
+            try:
+                await old_pool.close()
+            except Exception:
+                pass
 
     async def initialize(self):
         """Initialize connection pool and ensure table exists"""
@@ -350,10 +370,14 @@ class PGVectorStorageService:
 
     def _build_autoscaling_connection_string(self, hostname: str, endpoint_name: str, quote_plus) -> str:
         """Generate JWT credential for Autoscaling Lakebase and build connection string."""
+        import time
         client = self._get_lakebase_sdk_client()
         cred = client.postgres.generate_database_credential(endpoint=endpoint_name)
         username = client.current_user.me().user_name
-        logger.info("Autoscaling JWT credential generated for %s", username)
+
+        expires_in = getattr(cred, 'expires_in', None) or 3600
+        self.jwt_expires_at = time.time() + expires_in
+        logger.info("Autoscaling JWT generated for %s (expires_in=%ds)", username, expires_in)
 
         return f"postgresql://{quote_plus(username)}:{quote_plus(cred.token)}@{hostname}:5432/databricks_postgres"
 

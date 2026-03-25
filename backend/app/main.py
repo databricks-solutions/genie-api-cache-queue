@@ -29,20 +29,20 @@ async def lifespan(app: FastAPI):
     from app.services.database import initialize_storage
     storage = await initialize_storage()
 
-    # Start periodic OAuth token refresh for default Lakebase backend
+    # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
     if settings.storage_backend == "pgvector" and settings.lakebase_instance:
         async def _token_refresh_loop():
             while True:
-                await asyncio.sleep(45 * 60)  # Every 45 minutes
+                await asyncio.sleep(30 * 60)  # Every 30 minutes
                 try:
-                    logger.info("Background token refresh: checking default backend")
-                    await storage.refresh_default_backend()
+                    logger.info("Background JWT refresh: checking all backends")
+                    await storage.refresh_all_backends()
                 except Exception as e:
-                    logger.error("Background token refresh failed: %s", e)
+                    logger.error("Background JWT refresh failed: %s", e)
 
         refresh_task = asyncio.create_task(_token_refresh_loop())
-        logger.info("Started async OAuth token refresh task (every 45 min)")
+        logger.info("Started background JWT refresh task (every 30 min)")
 
     yield
 

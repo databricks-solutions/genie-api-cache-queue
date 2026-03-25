@@ -78,9 +78,7 @@ async def initialize_storage():
 
     # Register default PGVector backend for reuse by per-user lakebase requests
     if settings.storage_backend == "pgvector" and settings.lakebase_instance:
-        import time
         _storage_backend._pgvector_backends[DynamicStorageService._DEFAULT_KEY] = default_backend
-        _storage_backend._token_expiry[DynamicStorageService._DEFAULT_KEY] = time.time() + 3300
 
     db_service = DatabaseService()
     return _storage_backend
