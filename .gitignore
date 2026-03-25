@@ -58,3 +58,6 @@ htmlcov/
 
 # Test evidence (local only)
 test-evidence/
+
+# Claude Code
+CLAUDE.md

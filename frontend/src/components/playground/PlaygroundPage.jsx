@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom'
 import axios from 'axios'
 import { api } from '../../services/api'
 import PipelineVisualizer from './PipelineVisualizer'
-import { Play, Copy, Check, Loader, ChevronDown, Database, Zap, Plus, X } from 'lucide-react'
+import { Play, Copy, Check, Loader, ChevronDown, Database, Zap, Plus, X, Trash2 } from 'lucide-react'
 
 const POLL_INTERVAL = 2000
 
@@ -210,26 +210,25 @@ export default function PlaygroundPage() {
 
   const [queryText, setQueryText] = useState('')
   const [identity, setIdentity] = useState('')
-  const [running, setRunning] = useState(false)
 
   // Multi-tab conversation state — ephemeral, no persistence
-  const [tabs, setTabs] = useState(() => [{ id: Date.now(), label: 'Conversation 1', messages: [] }])
+  const [tabs, setTabs] = useState(() => [{ id: Date.now(), label: 'Conversation 1', messages: [], running: false }])
   const [activeTabId, setActiveTabId] = useState(() => tabs[0]?.id)
+  const nextTabNumber = useRef(2)
 
-  const pollRef = useRef(null)
-  const stageTimestamps = useRef({})
+  // Per-tab polling: Map<tabId, { interval, queryId, stageTimestamps }>
+  const pollMapRef = useRef(new Map())
   const dropdownRef = useRef(null)
   const messagesEndRef = useRef(null)
-  const activeQueryId = useRef(null)
   const activeTabIdRef = useRef(activeTabId)
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0]
   const messages = activeTab?.messages || []
+  const running = activeTab?.running || false
 
-  // Use ref-based updater to avoid stale closure in polling callbacks
-  const setMessages = useCallback((updater) => {
-    const tabId = activeTabIdRef.current
+  // Per-tab message updater (uses explicit tabId to avoid stale closures in polling)
+  const setTabMessages = useCallback((tabId, updater) => {
     setTabs(prev => prev.map(t =>
       t.id === tabId
         ? { ...t, messages: typeof updater === 'function' ? updater(t.messages) : updater }
@@ -237,20 +236,44 @@ export default function PlaygroundPage() {
     ))
   }, [])
 
+  // Convenience: update messages on the currently active tab
+  const setMessages = useCallback((updater) => {
+    setTabMessages(activeTabIdRef.current, updater)
+  }, [setTabMessages])
+
+  const setTabRunning = useCallback((tabId, value) => {
+    setTabs(prev => prev.map(t => t.id === tabId ? { ...t, running: value } : t))
+  }, [])
+
   const handleNewTab = () => {
     const newId = Date.now()
-    const newTab = { id: newId, label: `Conversation ${tabs.length + 1}`, messages: [] }
-    setTabs(prev => [...prev, newTab])
+    setTabs(prev => {
+      // Find the next available number that doesn't clash with any existing tab label
+      const usedNumbers = new Set(prev.map(t => {
+        const m = t.label.match(/^Conversation (\d+)$/)
+        return m ? parseInt(m[1], 10) : 0
+      }))
+      let num = 1
+      while (usedNumbers.has(num)) num++
+      const newTab = { id: newId, label: `Conversation ${num}`, messages: [], running: false }
+      return [...prev, newTab]
+    })
     setActiveTabId(newId)
     setQueryText('')
   }
 
   const handleCloseTab = (tabId, e) => {
     e.stopPropagation()
+    // Cancel any running poll for this tab
+    const tabPoll = pollMapRef.current.get(tabId)
+    if (tabPoll?.interval) clearInterval(tabPoll.interval)
+    pollMapRef.current.delete(tabId)
+
     setTabs(prev => {
       const remaining = prev.filter(t => t.id !== tabId)
       if (remaining.length === 0) {
-        const newTab = { id: Date.now(), label: 'Conversation 1', messages: [] }
+        const num = nextTabNumber.current++
+        const newTab = { id: Date.now(), label: `Conversation ${num}`, messages: [], running: false }
         setActiveTabId(newTab.id)
         return [newTab]
       }
@@ -294,55 +317,63 @@ export default function PlaygroundPage() {
   }, [])
 
   useEffect(() => {
-    return () => { if (pollRef.current) clearInterval(pollRef.current) }
+    return () => {
+      // Cleanup all polling intervals on unmount
+      for (const entry of pollMapRef.current.values()) {
+        if (entry.interval) clearInterval(entry.interval)
+      }
+      pollMapRef.current.clear()
+    }
   }, [])
 
   const selectedGateway = gateways.find(g => g.id === selectedGatewayId)
 
-  const updateActiveMessage = useCallback((updates) => {
-    setMessages(prev => {
-      const idx = prev.findIndex(m => m.id === activeQueryId.current)
+  const updateTabMessage = useCallback((tabId, queryId, updates) => {
+    setTabMessages(tabId, prev => {
+      const idx = prev.findIndex(m => m.id === queryId)
       if (idx === -1) return prev
       const updated = [...prev]
       updated[idx] = { ...updated[idx], ...updates }
       return updated
     })
-  }, [])
+  }, [setTabMessages])
 
-  const startPolling = useCallback((queryId) => {
-    if (pollRef.current) clearInterval(pollRef.current)
+  const startPolling = useCallback((tabId, queryId) => {
+    // Cancel any existing poll for this tab
+    const existing = pollMapRef.current.get(tabId)
+    if (existing?.interval) clearInterval(existing.interval)
 
-    pollRef.current = setInterval(async () => {
+    const stageTimestamps = { received: Date.now() }
+    const interval = setInterval(async () => {
       try {
         const status = await api.getQueryStatus(queryId)
         const now = Date.now()
 
-        if (!stageTimestamps.current[status.stage]) {
-          stageTimestamps.current[status.stage] = now
+        if (!stageTimestamps[status.stage]) {
+          stageTimestamps[status.stage] = now
         }
 
         const stageOrder = ['received', 'checking_cache', 'cache_hit', 'cache_miss', 'queued', 'processing_genie', 'executing_sql', 'completed', 'failed']
         const seenStages = []
-        const stamps = stageTimestamps.current
         for (const s of stageOrder) {
-          if (stamps[s]) {
-            const nextStage = stageOrder.find(ns => stageOrder.indexOf(ns) > stageOrder.indexOf(s) && stamps[ns])
-            const dur = nextStage && stamps[nextStage] ? stamps[nextStage] - stamps[s] : null
-            seenStages.push({ name: s, status: 'completed', timestamp: stamps[s], duration: dur })
+          if (stageTimestamps[s]) {
+            const nextStage = stageOrder.find(ns => stageOrder.indexOf(ns) > stageOrder.indexOf(s) && stageTimestamps[ns])
+            const dur = nextStage && stageTimestamps[nextStage] ? stageTimestamps[nextStage] - stageTimestamps[s] : null
+            seenStages.push({ name: s, status: 'completed', timestamp: stageTimestamps[s], duration: dur })
           }
         }
 
-        updateActiveMessage({
+        updateTabMessage(tabId, queryId, {
           stages: seenStages,
           stage: status.stage,
           from_cache: status.from_cache || false,
         })
 
         if (status.stage === 'completed' || status.stage === 'failed') {
-          clearInterval(pollRef.current)
-          pollRef.current = null
-          setRunning(false)
-          updateActiveMessage({
+          clearInterval(interval)
+          pollMapRef.current.delete(tabId)
+          setTabRunning(tabId, false)
+          updateTabMessage(tabId, queryId, {
             stages: seenStages,
             stage: status.stage,
             sql_query: status.sql_query,
@@ -352,21 +383,26 @@ export default function PlaygroundPage() {
           })
         }
       } catch {
-        clearInterval(pollRef.current)
-        pollRef.current = null
-        setRunning(false)
-        updateActiveMessage({ stage: 'failed', error: 'Failed to poll query status' })
+        clearInterval(interval)
+        pollMapRef.current.delete(tabId)
+        setTabRunning(tabId, false)
+        updateTabMessage(tabId, queryId, { stage: 'failed', error: 'Failed to poll query status' })
       }
     }, POLL_INTERVAL)
-  }, [updateActiveMessage])
+
+    pollMapRef.current.set(tabId, { interval, queryId, stageTimestamps })
+  }, [updateTabMessage, setTabRunning])
 
   const handleSubmit = async () => {
     if (!queryText.trim() || running) return
 
+    // Capture tabId at submit time so polling targets the correct tab
+    const tabId = activeTabIdRef.current
+
     const newMessage = {
       id: null, // will be filled after API call
       query: queryText.trim(),
-      identity: identity, // display only — authoritative value comes from backend (X-Forwarded-Email)
+      identity: identity,
       stage: 'received',
       stages: [],
       from_cache: null,
@@ -377,8 +413,7 @@ export default function PlaygroundPage() {
     }
 
     setMessages(prev => [...prev, newMessage])
-    stageTimestamps.current = { received: Date.now() }
-    setRunning(true)
+    setTabRunning(tabId, true)
     setQueryText('')
 
     try {
@@ -403,19 +438,24 @@ export default function PlaygroundPage() {
 
       const response = await axios.post('/api/query', payload)
       const queryId = response.data.query_id
-      activeQueryId.current = queryId
 
-      setMessages(prev => {
+      setTabMessages(tabId, prev => {
         const updated = [...prev]
         const idx = updated.findLastIndex(m => m.id === null)
         if (idx !== -1) updated[idx] = { ...updated[idx], id: queryId }
         return updated
       })
 
-      startPolling(queryId)
+      startPolling(tabId, queryId)
     } catch (err) {
-      setRunning(false)
-      updateActiveMessage({ stage: 'failed', error: err.response?.data?.detail || err.message })
+      setTabRunning(tabId, false)
+      // Update the last message (the one with id=null) in that tab
+      setTabMessages(tabId, prev => {
+        const updated = [...prev]
+        const idx = updated.findLastIndex(m => m.id === null || m.stage === 'received')
+        if (idx !== -1) updated[idx] = { ...updated[idx], stage: 'failed', error: err.response?.data?.detail || err.message }
+        return updated
+      })
     }
   }
 
@@ -426,6 +466,17 @@ export default function PlaygroundPage() {
     }
   }
 
+  const handleClearChat = () => {
+    const tabId = activeTabIdRef.current
+    // Cancel any running poll for this tab
+    const tabPoll = pollMapRef.current.get(tabId)
+    if (tabPoll?.interval) clearInterval(tabPoll.interval)
+    pollMapRef.current.delete(tabId)
+    // Reset messages and running state
+    setTabMessages(tabId, [])
+    setTabRunning(tabId, false)
+    setQueryText('')
+  }
 
   return (
     <div className="h-full flex flex-col">
@@ -517,7 +568,7 @@ export default function PlaygroundPage() {
 
       {/* Input area */}
       <div className="flex-shrink-0 border-t border-[#EBEBEB] px-6 py-4 bg-white">
-        <div className="flex gap-3 items-start">
+        <div className="flex gap-3 items-end">
           <textarea
             value={queryText}
             onChange={(e) => setQueryText(e.target.value)}
@@ -527,15 +578,24 @@ export default function PlaygroundPage() {
             className="flex-1 border border-[#CBCBCB] rounded p-3 text-[13px] text-[#161616] placeholder-[#CBCBCB] resize-none focus:outline-none focus:border-[#2272B4] focus:ring-1 focus:ring-[#2272B4]/20 disabled:bg-[#F7F7F7] disabled:cursor-not-allowed"
             disabled={running || (!selectedGateway && !loadingGateways)}
           />
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1.5 items-stretch">
             <button
               id="playground-run-btn"
               onClick={handleSubmit}
               disabled={running || !queryText.trim() || (!selectedGateway && gateways.length > 0)}
-              className="flex items-center gap-2 h-8 px-4 bg-[#2272B4] text-white rounded text-[13px] font-medium hover:bg-[#1b5e96] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="flex items-center justify-center gap-2 h-8 px-4 bg-[#2272B4] text-white rounded text-[13px] font-medium hover:bg-[#1b5e96] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {running ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
               {running ? 'Running' : 'Run'}
+            </button>
+            <button
+              onClick={handleClearChat}
+              disabled={messages.length === 0}
+              className="flex items-center justify-center gap-1.5 h-7 px-3 text-[12px] text-[#6F6F6F] hover:text-[#161616] hover:bg-[#F7F7F7] rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[#6F6F6F] disabled:hover:bg-transparent"
+              title="Clear conversation"
+            >
+              <Trash2 className="w-3 h-3" />
+              Clear
             </button>
           </div>
         </div>

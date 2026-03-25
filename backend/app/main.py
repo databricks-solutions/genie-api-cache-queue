@@ -97,14 +97,102 @@ for path in possible_dist_paths:
         logger.info("Found frontend dist at: %s", dist_dir)
         break
 
-if dist_dir and (dist_dir / "index.html").exists():
-    assets_dir = dist_dir / "assets"
+
+def _sync_frontend_from_workspace(dist_dir: Path):
+    """Sync frontend dist from workspace snapshot to runtime filesystem.
+
+    Databricks Apps runtime doesn't replace existing static files on redeploy.
+    This function uses the Databricks SDK to download the latest frontend build
+    from the workspace and overwrite the stale runtime copy.
+    """
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        # Find the active deployment's source code path (the SP has access to its own snapshot)
+        app_name = os.environ.get("DATABRICKS_APP_NAME", "genie-cache-queue")
+        app_info = w.apps.get(app_name)
+        snapshot_path = app_info.active_deployment.deployment_artifacts.source_code_path
+        ws_dist = f"{snapshot_path}/frontend/dist"
+        logger.info("Syncing frontend from deployment snapshot: %s", ws_dist)
+        local_assets = dist_dir / "assets"
+        local_assets.mkdir(parents=True, exist_ok=True)
+
+        # Export index.html
+        content = w.workspace.export(ws_dist + "/index.html").content
+        if content:
+            import base64
+            (dist_dir / "index.html").write_bytes(base64.b64decode(content))
+            logger.info("Synced index.html from workspace")
+
+        # Export assets
+        items = w.workspace.list(ws_dist + "/assets")
+        for item in items:
+            content = w.workspace.export(item.path).content
+            if content:
+                fname = Path(item.path).name
+                (local_assets / fname).write_bytes(base64.b64decode(content))
+                logger.info("Synced asset: %s", fname)
+
+        # Clean up old assets that don't match the new index.html
+        index_html = (dist_dir / "index.html").read_text()
+        for f in local_assets.iterdir():
+            if f.name.startswith("index-") and f.name not in index_html:
+                f.unlink()
+                logger.info("Removed stale asset: %s", f.name)
+
+        return "OK"
+    except Exception as e:
+        logger.warning("Frontend sync from workspace failed (will use local files): %s", e)
+        return f"FAILED: {e}"
+
+
+# Sync frontend on startup if running in Databricks Apps
+if os.environ.get("DATABRICKS_APP_NAME") and dist_dir:
+    _sync_frontend_from_workspace(dist_dir)
+
+
+def _build_index_html(assets_dir: Path) -> str:
+    """Generate index.html dynamically from whatever assets exist on disk.
+
+    Databricks Apps runtime keeps stale files across deploys, so the static
+    index.html may reference JS/CSS bundles that no longer match the deployed
+    code.  This function scans the assets directory at startup and builds a
+    fresh index.html that points to the actual files present on disk.
+    """
+    js_file = css_file = None
     if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+        for f in sorted(assets_dir.iterdir()):
+            if f.suffix == ".js" and f.name.startswith("index-"):
+                js_file = f"/assets/{f.name}"
+            elif f.suffix == ".css" and f.name.startswith("index-"):
+                css_file = f"/assets/{f.name}"
+    return (
+        '<!doctype html>\n<html lang="en">\n<head>\n'
+        '  <meta charset="UTF-8" />\n'
+        '  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n'
+        '  <link rel="preconnect" href="https://fonts.googleapis.com">\n'
+        '  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
+        '  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">\n'
+        '  <title>Genie Cache Gateway</title>\n'
+        + (f'  <script type="module" crossorigin src="{js_file}"></script>\n' if js_file else '')
+        + (f'  <link rel="stylesheet" crossorigin href="{css_file}">\n' if css_file else '')
+        + '</head>\n<body>\n  <div id="root"></div>\n</body>\n</html>\n'
+    )
+
+
+if dist_dir and (dist_dir / "assets").exists():
+    assets_dir = dist_dir / "assets"
+    # Build index.html dynamically so it always matches the actual assets on disk
+    _dynamic_index = _build_index_html(assets_dir)
+    logger.info("Dynamic index.html built, JS/CSS from: %s", [f.name for f in assets_dir.iterdir()])
+
+    app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
     @app.get("/")
     async def serve_root():
-        return FileResponse(str(dist_dir / "index.html"))
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(_dynamic_index)
 
     @app.get("/{full_path:path}")
     async def catch_all(full_path: str):
@@ -113,7 +201,8 @@ if dist_dir and (dist_dir / "index.html").exists():
         file_path = dist_dir / full_path
         if file_path.is_file():
             return FileResponse(str(file_path))
-        return FileResponse(str(dist_dir / "index.html"))
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(_dynamic_index)
 else:
     logger.warning("Frontend dist not found. Serving API only.")
 
