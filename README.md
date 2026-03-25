@@ -1,4 +1,4 @@
-# Genie Cache & Queue
+# Genie Gateway (Cache & Queue)
 
 Drop-in replacement for the Databricks Genie API with semantic caching, rate-limit management, and multi-gateway support. Deploy as a Databricks App — callers only change the base URL, zero code changes required.
 
