@@ -216,6 +216,7 @@ async def get_gateway_cache(gateway_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @gateway_router.delete("/gateways/{gateway_id}/cache")
 async def clear_gateway_cache(gateway_id: str):
     """Clear all cached entries for a specific gateway."""

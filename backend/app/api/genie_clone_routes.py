@@ -216,6 +216,7 @@ async def _process_genie_background(
             else:
                 result = await genie_service.start_conversation(space_id, query_text, rs)
 
+
             if result.get("status") == "COMPLETED":
                 sql_query = result.get("sql_query", "")
 

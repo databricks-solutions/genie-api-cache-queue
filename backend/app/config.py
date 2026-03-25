@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Databricks Unity Catalog configuration (for production)
     catalog_name: str = os.getenv("CATALOG_NAME", "main")
     schema_name: str = os.getenv("SCHEMA_NAME", "genie_cache")
-    cache_table_name: str = os.getenv("CACHE_TABLE_NAME", "query_cache")
+    cache_table_name: str = os.getenv("CACHE_TABLE_NAME", "cached_queries")
     
     # PostgreSQL + PGVector configuration
     postgres_host: str = os.getenv("POSTGRES_HOST", "localhost")

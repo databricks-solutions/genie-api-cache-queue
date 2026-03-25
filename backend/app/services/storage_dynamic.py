@@ -97,12 +97,13 @@ class DynamicStorageService:
             _s = get_settings()
 
             # Lakebase connections MUST use the Service Principal token.
-            # No fallback to user PAT or env token — those users won't have Lakebase access.
-            sp_token = get_effective_setting("lakebase_service_token")
+            from app.auth import get_service_principal_token
+            sp_token = get_effective_setting("lakebase_service_token") or get_service_principal_token()
             if not sp_token:
                 raise ValueError(
                     "Lakebase requires a Service Principal token. "
-                    "Configure 'Lakebase Service Token' (client_id:client_secret) in Settings."
+                    "Configure 'Lakebase Service Token' in Settings or ensure "
+                    "DATABRICKS_CLIENT_ID/SECRET are set."
                 )
             effective_token = sp_token
 
@@ -125,10 +126,18 @@ class DynamicStorageService:
     async def _ensure_default_pool(self):
         """Reinitialize the default backend pool if it is closed."""
         backend = self.default_backend
-        if hasattr(backend, 'pool') and backend.pool is not None and backend.pool._closed:
+        if not hasattr(backend, 'pool'):
+            return
+        if backend.pool is not None and not backend.pool._closed:
+            return
+        async with self._creation_lock:
+            # Re-check after acquiring lock (another coroutine may have fixed it)
+            if backend.pool is not None and not backend.pool._closed:
+                return
             logger.warning("Default Lakebase pool is closed — reinitializing")
             try:
                 await backend.initialize()
+                self._token_expiry[self._DEFAULT_KEY] = time.time() + 3000
                 logger.info("Default Lakebase pool reinitialized")
             except Exception as e:
                 logger.error("Failed to reinitialize pool: %s", e)
@@ -178,19 +187,22 @@ class DynamicStorageService:
         """Resolve which backend to use, initializing lazily if needed.
         When Lakebase is configured, it MUST use the SP token — no fallback to local."""
         if not runtime_settings:
+            await self._ensure_default_pool()
             return self.default_backend
         if hasattr(runtime_settings, 'runtime') and runtime_settings.runtime:
             rt = runtime_settings.runtime
             if rt.storage_backend == 'lakebase':
                 from app.api.config_store import get_effective_setting
-                sp_token = get_effective_setting("lakebase_service_token")
+                from app.auth import get_service_principal_token
+                sp_token = get_effective_setting("lakebase_service_token") or get_service_principal_token()
                 if not rt.lakebase_instance_name:
-                    # No instance specified — fall back to the default backend (initialized at startup)
+                    await self._ensure_default_pool()
                     return self.default_backend
                 if not sp_token:
                     raise ValueError(
                         "Lakebase requires a Service Principal token. "
-                        "Configure 'Lakebase Service Token' (client_id:client_secret) in Settings."
+                        "Configure 'Lakebase Service Token' in Settings or ensure "
+                        "DATABRICKS_CLIENT_ID/SECRET are set."
                     )
                 return await self._get_or_create_pgvector_backend(runtime_settings)
             if rt.storage_backend == 'local':
@@ -198,17 +210,25 @@ class DynamicStorageService:
         return self.default_backend
 
     async def _with_reconnect(self, operation, runtime_settings):
-        """Run operation. On any Lakebase error, invalidate backend and retry once.
-        Safe: only retries once, only for PGVector backends, and creates a fresh pool."""
+        """Run operation. On any Lakebase error, reinitialize pool and retry once."""
         try:
             return await operation()
         except Exception as first_err:
             cache_key = self._get_cache_key(runtime_settings)
             if cache_key not in self._pgvector_backends:
                 raise
-            logger.warning("Lakebase error: %s (%s) — reconnecting",
+            logger.warning("Lakebase error: %s (%s) — reinitializing pool",
                           type(first_err).__name__, first_err)
-            await self._invalidate_backend(runtime_settings)
+            async with self._creation_lock:
+                backend = self._pgvector_backends.get(cache_key)
+                if backend and hasattr(backend, 'initialize'):
+                    try:
+                        await backend.initialize()
+                        self._token_expiry[cache_key] = time.time() + 3000
+                        logger.info("Lakebase pool reinitialized for key=%s", cache_key)
+                    except Exception as reinit_err:
+                        logger.error("Lakebase reinitialize failed: %s", reinit_err)
+                        raise first_err
             return await operation()
 
     async def search_similar_query(
