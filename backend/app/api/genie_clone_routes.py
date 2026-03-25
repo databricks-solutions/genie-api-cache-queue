@@ -404,6 +404,10 @@ async def _handle_query(
                         "query_result_metadata": {"row_count": row_count},
                     },
                 },
+                {
+                    "attachment_id": f"{ATT_PREFIX}txt_{uuid.uuid4().hex[:16]}",
+                    "text": {"content": "This result was served from the semantic cache."},
+                },
             ],
         }
         # Extract inner result (same format as cache miss)

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { RefreshCw, Trash2, Database, TrendingUp } from 'lucide-react'
+import { RefreshCw, Trash2, Database, TrendingUp, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 import DataTable from '../shared/DataTable'
+import Modal from '../shared/Modal'
 
 export default function GatewayCacheTab({ gateway }) {
   const [cachedQueries, setCachedQueries] = useState([])
@@ -9,6 +10,7 @@ export default function GatewayCacheTab({ gateway }) {
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [error, setError] = useState(null)
   const [clearing, setClearing] = useState(false)
+  const [showClearConfirm, setShowClearConfirm] = useState(false)
 
   const fetchCachedQueries = useCallback(async () => {
     try {
@@ -35,13 +37,13 @@ export default function GatewayCacheTab({ gateway }) {
   }, [autoRefresh, fetchCachedQueries])
 
   const handleClearCache = async () => {
-    if (!confirm('Clear all cache entries for this gateway?')) return
+    setShowClearConfirm(false)
     try {
       setClearing(true)
       await api.clearGatewayCache(gateway.id)
       await fetchCachedQueries()
     } catch (err) {
-      alert('Failed to clear cache: ' + err.message)
+      setError('Failed to clear cache: ' + err.message)
     } finally {
       setClearing(false)
     }
@@ -150,7 +152,7 @@ export default function GatewayCacheTab({ gateway }) {
           </button>
         </div>
         <button
-          onClick={handleClearCache}
+          onClick={() => setShowClearConfirm(true)}
           disabled={clearing || cachedQueries.length === 0}
           className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-red-600 border border-[#CBCBCB] rounded hover:bg-red-50 transition-colors disabled:opacity-50"
         >
@@ -201,6 +203,41 @@ export default function GatewayCacheTab({ gateway }) {
           />
         </div>
       )}
+
+      {/* Clear cache confirmation modal */}
+      <Modal
+        isOpen={showClearConfirm}
+        onClose={() => setShowClearConfirm(false)}
+        title="Clear Cache"
+        maxWidth="max-w-md"
+      >
+        <div className="flex flex-col items-center text-center pt-2">
+          <div className="w-12 h-12 rounded-full bg-red-50 flex items-center justify-center mb-4">
+            <AlertTriangle size={24} className="text-red-500" />
+          </div>
+          <p className="text-[14px] text-[#161616] mb-1">
+            Are you sure you want to clear the cache?
+          </p>
+          <p className="text-[13px] text-[#6F6F6F] mb-6">
+            <span className="font-medium text-[#161616]">{cachedQueries.length} {cachedQueries.length === 1 ? 'entry' : 'entries'}</span> will be permanently deleted.
+            Future queries will need to go through the Genie API again.
+          </p>
+          <div className="flex gap-3 w-full">
+            <button
+              onClick={() => setShowClearConfirm(false)}
+              className="flex-1 h-9 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleClearCache}
+              className="flex-1 h-9 text-[13px] font-medium text-white bg-red-600 rounded hover:bg-red-700 transition-colors"
+            >
+              Clear {cachedQueries.length} {cachedQueries.length === 1 ? 'entry' : 'entries'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
