@@ -38,6 +38,8 @@ sentences and clearly switches to a different subject.
 - Preserve the original wording exactly — do not paraphrase, translate, or modify.
 - If you find a clear intent shift, return only the relevant portion of the conversation, with no explanation.
 
+{space_context}
+
 CONVERSATION:
 {context_text}"""
 
@@ -55,7 +57,7 @@ def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
     return client, INTENT_SPLIT_LLM_ENDPOINT
 
 
-async def split_by_intent(context_text: str, runtime_settings=None) -> str:
+async def split_by_intent(context_text: str, runtime_settings=None, space_context: str = "") -> str:
     """
     Given a conversation context string, detect intent shifts and return only the
     portion belonging to the latest intent.
@@ -65,7 +67,7 @@ async def split_by_intent(context_text: str, runtime_settings=None) -> str:
     try:
         client, endpoint = _get_workspace_client(runtime_settings)
 
-        prompt = _INTENT_SPLIT_PROMPT_TEMPLATE.format(context_text=context_text)
+        prompt = _INTENT_SPLIT_PROMPT_TEMPLATE.format(context_text=context_text, space_context=space_context)
 
         response = client.api_client.do(
             "POST",

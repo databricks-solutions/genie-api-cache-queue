@@ -21,11 +21,13 @@ settings = get_settings()
 QUESTION_NORMALIZATION_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
 _NORMALIZATION_PROMPT_TEMPLATE = """\
-Analyze the following business question and rewrite it as a structured business requirement.
-Preserve the original language and terms used in the question (ie. do not translate "produto" to "product"; do not change "quantity" to "count").
-Keep in mind that you will receive a multi-turn conversation delimited by "|", so try to understand the full intent of the latest turn.
-Respond only with valid JSON matching exactly this schema — no explanation, no markdown:
+{space_context}
 
+Analyze the following business question and rewrite it as a structured business requirement.
+Preserve the original language and the exact terms used in the question (ie. do not translate "produto" to "product"; do not change "quantidade de produtos" to "count").
+Keep in mind that you will receive a multi-turn conversation delimited by "|", so try to understand the full intent of the latest turn.
+
+Respond ONLY with valid JSON matching exactly this schema — no explanation, no markdown:
 {{
   "metrics": ["<measurable value, e.g. revenue, count, avg order value>", ...],
   "aggregations": ["<grouping dimension, e.g. month, region, product>", ...],
@@ -33,6 +35,8 @@ Respond only with valid JSON matching exactly this schema — no explanation, no
   "ordering": ["<sort instruction, e.g. descending by revenue>", ...],
   "limit": <integer row limit if specified, otherwise null>
 }}
+
+Do NOT add any additional text or explanation. Do NOT add markdown like ```json or ```. Do NOT add line breaks.
 
 QUESTION:
 {question}"""
@@ -49,7 +53,7 @@ def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
     return WorkspaceClient(), QUESTION_NORMALIZATION_LLM_ENDPOINT
 
 
-async def normalize_question(query_text: str, runtime_settings=None) -> str:
+async def normalize_question(query_text: str, runtime_settings=None, space_context: str = "") -> str:
     """
     Normalize an input question to improve semantic cache hit rates.
 
@@ -71,7 +75,7 @@ async def normalize_question(query_text: str, runtime_settings=None) -> str:
     try:
         client, endpoint = _get_workspace_client(runtime_settings)
 
-        prompt = _NORMALIZATION_PROMPT_TEMPLATE.format(question=string_normalized)
+        prompt = _NORMALIZATION_PROMPT_TEMPLATE.format(question=string_normalized, space_context=space_context)
 
         response = client.api_client.do(
             "POST",
@@ -93,7 +97,9 @@ async def normalize_question(query_text: str, runtime_settings=None) -> str:
                     stripped = stripped[: stripped.rfind("```")]
                 content = stripped.strip()
             result = json.loads(content)
-        except Exception:
+        except Exception as e:
+            import traceback
+            logger.warning("Question normalizer: traceback=%s", traceback.format_exc())
             logger.warning(
                 "Question normalizer: unparseable result in response %r — falling back to lowercased input",
                 content[:120],

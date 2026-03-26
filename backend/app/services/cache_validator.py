@@ -54,6 +54,7 @@ async def validate_cache_entry(
     incoming_query: str,
     cached_query: str,
     runtime_settings=None,
+    space_context: str = "",
 ) -> bool:
     """
     Use an LLM to validate semantic equivalence between the incoming query
@@ -69,13 +70,14 @@ async def validate_cache_entry(
     try:
         client, endpoint = _get_workspace_client(runtime_settings)
 
+        space_context_section = f"\n\n{space_context}" if space_context else ""
         prompt = (
             "Compare the cached entry with the following question. "
             "If the cached entry is semantically equivalent to the question, "
             "set is_cache_valid to true. Otherwise, set it to false. "
             "Do not add any additional text or explanation."
             'Respond only with valid JSON matching this schema: {"is_cache_valid": <boolean>}. '
-            'Example: {"is_cache_valid": true}\n\n'
+            f'Example: {{"is_cache_valid": true}}{space_context_section}\n\n'
             f"CACHED ENTRY:\n{cached_query}\n\n"
             f"QUESTION:\n{incoming_query}"
         )

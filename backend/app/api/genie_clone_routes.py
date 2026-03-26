@@ -28,6 +28,7 @@ from app.services.genie_service import genie_service, GenieRateLimitError
 from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
+from app.services.prompt_enricher import get_space_context
 from app.services.storage_local import get_local_queue as _get_local_queue
 import app.services.database as _db
 
@@ -348,9 +349,10 @@ async def _handle_query(
     rs = _build_runtime_settings(token, space_id, gateway=gateway)
 
     original_query_text = query_text
+    space_context = await get_space_context(space_id, rs)
     if rs.question_normalization_enabled:
-        query_text = await split_by_intent(query_text, rs)
-        query_text = await normalize_question(query_text, rs)
+        query_text = await split_by_intent(query_text, rs, space_context=space_context)
+        query_text = await normalize_question(query_text, rs, space_context=space_context)
 
     # Generate embedding and check cache
     query_embedding = None
@@ -368,7 +370,7 @@ async def _handle_query(
 
     if cached and rs.cache_validation_enabled:
         cache_id, cached_query, sql_query, similarity, cached_original = cached
-        is_valid = await validate_cache_entry(original_query_text, cached_original, rs)
+        is_valid = await validate_cache_entry(original_query_text, cached_original, rs, space_context=space_context)
         if not is_valid:
             logger.info("LLM validation rejected cache hit id=%s — treating as MISS", cache_id)
             cached = None
