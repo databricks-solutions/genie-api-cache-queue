@@ -36,7 +36,7 @@ function NavItem({ to, icon: Icon, label, end }) {
 
 export default function Sidebar() {
   return (
-    <aside className="w-[200px] bg-[#F7F7F7] border-r border-[#EBEBEB] flex flex-col p-2 h-full">
+    <aside className="w-[200px] bg-[#F7F7F7] flex flex-col p-2 h-full">
       <nav className="flex flex-col gap-0.5 flex-1">
         {mainNavItems.map((item) => (
           <NavItem key={item.to} {...item} />
