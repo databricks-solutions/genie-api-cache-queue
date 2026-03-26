@@ -16,7 +16,7 @@ Each **gateway** is a named configuration that maps to one Genie Space and SQL W
 Caller (OAuth)
     |
     v
-App (/api/2.0/genie/* or /api/v1/ or /api/gateways/)
+App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/)
     |
     +-- Gateway Config (DB)         <-- name, space_id, warehouse_id, settings
     +-- Embedding Service           <-- caller's OAuth (semantic similarity)
@@ -210,6 +210,40 @@ For local development (outside Databricks Apps), configure the **Lakebase Servic
 | **Lakebase cache** | **App's built-in SP** | Auto-detected from `DATABRICKS_CLIENT_ID`/`SECRET` |
 
 **Callers don't need Lakebase access.** The app's SP handles all cache operations transparently.
+
+---
+
+## MCP Server (Model Context Protocol)
+
+Drop-in replacement for the [Databricks managed Genie MCP](https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp). Any MCP client that supports Streamable HTTP can connect — just provide the URL and auth header.
+
+```
+Before:  https://<workspace>.cloud.databricks.com/api/2.0/mcp/genie/{space_id}
+After:   https://<app-name>.aws.databricksapps.com/api/2.0/mcp/genie/{gateway_id}
+```
+
+The server exposes two tools per gateway (identical to the managed MCP):
+
+| Tool | Description |
+|------|-------------|
+| `query_space_{gateway_id}` | Ask a natural language question. Instant on cache hit. |
+| `poll_response_{gateway_id}` | Poll for the result of a pending query. |
+
+**Example — OpenAI Agents SDK:**
+
+```python
+from agents import Agent, Runner
+from agents.mcp import MCPServerStreamableHttp
+
+async with MCPServerStreamableHttp(params={
+    "url": f"{APP_HOST}/api/2.0/mcp/genie/{GATEWAY_ID}",
+    "headers": {"Authorization": f"Bearer {TOKEN}"},
+}) as mcp:
+    agent = Agent(name="analyst", model=model, mcp_servers=[mcp])
+    result = await Runner.run(agent, "Top 3 nations by revenue?")
+```
+
+> **Tip:** Enable **Question Normalization** on the gateway when using MCP. LLM agents are non-deterministic — the same user intent can produce different phrasings on each call, reducing cache hit rates. Normalization maps variations to a canonical form before embedding.
 
 ---
 

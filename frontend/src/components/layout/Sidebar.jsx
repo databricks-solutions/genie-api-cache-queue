@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Layers, Play, Code2, Bug } from 'lucide-react'
+import { Layers, Play, Code2, Plug, Bug } from 'lucide-react'
 
 const mainNavItems = [
   { to: '/', icon: Layers, label: 'Gateways', end: true },
@@ -8,6 +8,7 @@ const mainNavItems = [
 
 const bottomNavItems = [
   { to: '/api-reference', icon: Code2, label: 'API Reference' },
+  { to: '/mcp', icon: Plug, label: 'MCP' },
   { to: '/debug', icon: Bug, label: 'Debug' },
 ]
 
@@ -44,7 +45,7 @@ export default function Sidebar() {
 
         <div className="flex-1" />
 
-        <div className="text-[11px] text-[#6F6F6F] uppercase tracking-wider px-3 mb-1">Tools</div>
+        <div className="text-[11px] text-[#6F6F6F] tracking-wider px-3 mb-1">Tools</div>
         {bottomNavItems.map((item) => (
           <NavItem key={item.to} {...item} />
         ))}

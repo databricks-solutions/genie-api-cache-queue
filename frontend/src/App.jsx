@@ -7,6 +7,7 @@ import GatewayDetailPage from './components/gateways/GatewayDetailPage'
 import PlaygroundPage from './components/playground/PlaygroundPage'
 import SettingsPage from './components/settings/SettingsPage'
 import ApiReferencePage from './components/api/ApiReferencePage'
+import McpPage from './components/mcp/McpPage'
 import DebugPage from './components/debug/DebugPage'
 
 function TopBar({ onToggleSidebar }) {
@@ -57,6 +58,7 @@ function App() {
               <Route path="/playground/:id" element={<PlaygroundPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/api-reference" element={<ApiReferencePage />} />
+              <Route path="/mcp" element={<McpPage />} />
               <Route path="/debug" element={<DebugPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
