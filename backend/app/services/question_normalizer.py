@@ -29,13 +29,14 @@ Keep in mind that you will receive a multi-turn conversation delimited by "|", s
 
 Respond ONLY with valid JSON matching exactly this schema — no explanation, no markdown:
 {{
-  "metrics": ["<measurable value, e.g. revenue, count, avg order value>", ...],
+  "metrics": ["<measurable value, e.g. revenue, quantity, avg order value>", ...],
   "aggregations": ["<grouping dimension, e.g. month, region, product>", ...],
   "filters": ["<condition limiting the data, e.g. year=2024, category=electronics>", ...],
   "ordering": ["<sort instruction, e.g. descending by revenue>", ...],
   "limit": <integer row limit if specified, otherwise null>
 }}
 
+Do NOT translate the terms to any other language. Do NOT change the terms used in the question.
 Do NOT add any additional text or explanation. Do NOT add markdown like ```json or ```. Do NOT add line breaks.
 
 QUESTION:
