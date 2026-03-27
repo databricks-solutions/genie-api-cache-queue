@@ -217,6 +217,7 @@ class DynamicStorageService:
             return backend.save_query_cache(
                 query_text, query_embedding, sql_query, identity, gateway_id,
                 original_query_text=original_query_text,
+                genie_space_id=genie_space_id,
             )
         return await self._with_reconnect(_op, runtime_settings)
 

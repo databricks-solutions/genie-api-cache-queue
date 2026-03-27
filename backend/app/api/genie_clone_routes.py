@@ -228,6 +228,7 @@ async def _process_genie_background(
                             query_text, query_embedding, sql_query,
                             identity, gateway_id or space_id, rs,
                             original_query_text=original_query_text,
+                            genie_space_id=space_id,
                         )
                         logger.info("Background cache SAVED id=%s query=%s", cache_id, query_text[:50])
                     except Exception as e:

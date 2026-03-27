@@ -137,8 +137,9 @@ class LocalStorageService:
         query_embedding: List[float],
         sql_query: str,
         identity: str,
-        genie_space_id: str,
+        gateway_id: str,
         original_query_text: str = None,
+        genie_space_id: str = None,
     ) -> int:
         """Save a new query to the cache"""
         new_id = max([item.get('id', 0) for item in self.cache], default=0) + 1
@@ -149,6 +150,7 @@ class LocalStorageService:
             'original_query_text': original_query_text,
             'sql_query': sql_query,
             'identity': identity,
+            'gateway_id': gateway_id,
             'genie_space_id': genie_space_id,
             'created_at': datetime.now().isoformat(),
             'last_used': datetime.now().isoformat(),

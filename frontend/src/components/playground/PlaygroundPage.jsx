@@ -583,7 +583,7 @@ export default function PlaygroundPage() {
               id="playground-run-btn"
               onClick={handleSubmit}
               disabled={running || !queryText.trim() || (!selectedGateway && gateways.length > 0)}
-              className="flex items-center justify-center gap-2 h-8 px-4 bg-[#2272B4] text-white rounded text-[13px] font-medium hover:bg-[#1b5e96] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="flex items-center justify-center gap-2 h-8 w-[100px] bg-[#2272B4] text-white rounded text-[13px] font-medium hover:bg-[#1b5e96] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {running ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
               {running ? 'Running' : 'Run'}
