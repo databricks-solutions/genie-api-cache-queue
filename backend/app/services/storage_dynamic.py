@@ -217,6 +217,7 @@ class DynamicStorageService:
             return backend.save_query_cache(
                 query_text, query_embedding, sql_query, identity, gateway_id,
                 original_query_text=original_query_text,
+                genie_space_id=genie_space_id,
             )
         return await self._with_reconnect(_op, runtime_settings)
 
@@ -231,7 +232,7 @@ class DynamicStorageService:
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
                 return await backend.get_all_cached_queries(identity, gateway_id=gateway_id)
-            return backend.get_all_cached_queries(identity)
+            return backend.get_all_cached_queries(identity, genie_space_id=gateway_id)
         return await self._with_reconnect(_op, runtime_settings)
 
     async def save_query_log(

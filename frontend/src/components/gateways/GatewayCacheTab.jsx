@@ -74,7 +74,7 @@ export default function GatewayCacheTab({ gateway }) {
       key: 'query_text',
       label: 'Query',
       render: (val) => (
-        <span className="block truncate max-w-[260px]" title={val}>
+        <span className="block truncate" title={val}>
           {val}
         </span>
       ),
@@ -84,10 +84,10 @@ export default function GatewayCacheTab({ gateway }) {
       label: 'SQL',
       render: (val) => (
         <code
-          className="text-[12px] px-1.5 py-0.5 rounded block truncate max-w-[200px] bg-[#F7F7F7] text-[#161616]"
+          className="text-[12px] px-1.5 py-0.5 rounded block truncate bg-[#F7F7F7] text-[#161616]"
           title={val}
         >
-          {val ? val.substring(0, 60) + (val.length > 60 ? '...' : '') : '-'}
+          {val || '-'}
         </code>
       ),
     },
