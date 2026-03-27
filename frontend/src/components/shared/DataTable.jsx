@@ -1,8 +1,7 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 
 export default function DataTable({ columns, data, onRowClick, emptyMessage = 'No data' }) {
   const [colWidths, setColWidths] = useState({})
-  const resizing = useRef(null)
 
   const handleMouseDown = useCallback((e, colKey) => {
     e.preventDefault()

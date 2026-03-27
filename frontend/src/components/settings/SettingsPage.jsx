@@ -20,7 +20,7 @@ const ttlToSeconds = (value, unit) => {
 const systemFont = '-apple-system, "system-ui", "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif'
 const systemStyle = { fontFamily: systemFont, WebkitFontSmoothing: 'auto', MozOsxFontSmoothing: 'auto' }
 
-/* ── Toggle (Pattern D) ── */
+/* ── Toggle ── */
 function ToggleSwitch({ checked, onChange }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -35,7 +35,7 @@ function ToggleSwitch({ checked, onChange }) {
   )
 }
 
-/* ── Pencil-edit field (Pattern A) ── */
+/* ── Pencil-edit field ── */
 function EditableText({ value, onChange, placeholder, masked }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value)
@@ -103,7 +103,7 @@ function FieldRowStacked({ label, description, children, noBorder }) {
   )
 }
 
-/* ── Endpoint select (Pattern C) ── */
+/* ── Endpoint select ── */
 function EndpointSelect({ value, onChange, endpoints, loading, placeholder, filterTask }) {
   const filtered = filterTask ? endpoints.filter(ep => ep.task === filterTask) : endpoints
   if (loading) {
@@ -132,8 +132,6 @@ const SIDEBAR = [
     { id: 'ai-pipeline', label: 'AI Pipeline' },
   ]},
 ]
-
-const SECTION_TITLES = { general: 'General', cache: 'Cache', 'rate-limiting': 'Rate Limiting', 'ai-pipeline': 'AI Pipeline' }
 
 /* ── Main component ── */
 export default function SettingsPage() {
@@ -194,6 +192,7 @@ export default function SettingsPage() {
       .then((data) => setEndpoints(data.endpoints || []))
       .catch(() => setEndpoints([]))
       .finally(() => setEndpointsLoading(false))
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
   const persistSettings = useCallback(async () => {
@@ -222,15 +221,17 @@ export default function SettingsPage() {
         payload.lakebase_service_token = c.lakebase_service_token
       }
       try { await api.updateSettings(payload) } catch { await api.updateServerConfig(payload) }
-      const local = JSON.parse(localStorage.getItem('databricks_config') || '{}')
-      localStorage.setItem('databricks_config', JSON.stringify({ ...local,
-        storage_backend: c.storage_backend, similarity_threshold: c.similarity_threshold,
-        max_queries_per_minute: c.max_queries_per_minute, shared_cache: c.shared_cache,
-        embedding_provider: c.embedding_provider, databricks_embedding_endpoint: c.databricks_embedding_endpoint,
-        question_normalization_enabled: c.question_normalization_enabled, cache_validation_enabled: c.cache_validation_enabled,
-        lakebase_instance_name: c.lakebase_instance_name, lakebase_catalog: c.lakebase_catalog,
-        lakebase_schema: c.lakebase_schema, cache_table_name: c.cache_table_name, query_log_table_name: c.query_log_table_name,
-      }))
+      try {
+        const local = JSON.parse(localStorage.getItem('databricks_config') || '{}')
+        localStorage.setItem('databricks_config', JSON.stringify({ ...local,
+          storage_backend: c.storage_backend, similarity_threshold: c.similarity_threshold,
+          max_queries_per_minute: c.max_queries_per_minute, shared_cache: c.shared_cache,
+          embedding_provider: c.embedding_provider, databricks_embedding_endpoint: c.databricks_embedding_endpoint,
+          question_normalization_enabled: c.question_normalization_enabled, cache_validation_enabled: c.cache_validation_enabled,
+          lakebase_instance_name: c.lakebase_instance_name, lakebase_catalog: c.lakebase_catalog,
+          lakebase_schema: c.lakebase_schema, cache_table_name: c.cache_table_name, query_log_table_name: c.query_log_table_name,
+        }))
+      } catch { /* localStorage sync is best-effort */ }
       setSaveStatus('saved')
       setTimeout(() => setSaveStatus(null), 2000)
     } catch {
@@ -246,7 +247,12 @@ export default function SettingsPage() {
   }, [persistSettings])
 
   const handleImmediateSave = useCallback((field, value) => {
-    setConfig(prev => ({ ...prev, [field]: value }))
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    setConfig(prev => {
+      const next = { ...prev, [field]: value }
+      configRef.current = next
+      return next
+    })
     setTimeout(() => persistSettings(), 50)
   }, [persistSettings])
 
