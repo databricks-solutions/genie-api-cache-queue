@@ -24,7 +24,8 @@ from app.config import get_settings
 from app.api.config_store import get_effective_setting
 from app.api.auth_helpers import extract_bearer_token
 from app.services.embedding_service import embedding_service
-from app.services.genie_service import genie_service, GenieRateLimitError
+from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
+from app.utils import exponential_backoff
 from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
@@ -192,7 +193,7 @@ async def _process_genie_background(
 
     last_error = None
     attempt = 0
-    max_rate_limit_waits = 12  # Max 12 × 5s = 60s waiting for rate limit
+    max_rate_limit_waits = 12  # Max 12 waits with exponential backoff (~60-70s total)
 
     while attempt <= max_retries:
         # Wait for rate limit slot (does NOT consume an attempt)
@@ -202,8 +203,9 @@ async def _process_genie_background(
             if rate_limit_waits > max_rate_limit_waits:
                 logger.warning("Background rate limit wait exhausted for msg_id=%s", msg_id)
                 break
-            logger.info("Background rate limited, waiting 5s (wait %d/%d)", rate_limit_waits, max_rate_limit_waits)
-            await asyncio.sleep(5)
+            wait = exponential_backoff(rate_limit_waits - 1, base=1.0, cap=10.0)
+            logger.info("Background rate limited, waiting %.1fs (wait %d/%d)", wait, rate_limit_waits, max_rate_limit_waits)
+            await asyncio.sleep(wait)
 
         if msg_id in _synthetic_messages:
             _synthetic_messages[msg_id].setdefault("_proxy", {})["stage"] = "processing_genie"
@@ -307,12 +309,23 @@ async def _process_genie_background(
             await asyncio.sleep(e.retry_after)
             last_error = str(e)
             continue
+        except GenieConfigError as e:
+            logger.error("Non-retryable Genie error %d for msg_id=%s: %s", e.status_code, msg_id, e.detail)
+            _synthetic_messages[msg_id] = {
+                "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+                "message_id": msg_id,
+                "status": "FAILED",
+                "attachments": [],
+                "error": {"error": e.detail, "type": "CONFIG_ERROR"},
+                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+            }
+            return
         except Exception as e:
             last_error = str(e)
             attempt += 1
             if attempt <= max_retries:
-                wait = [5, 15, 30][min(attempt - 1, 2)]
-                logger.warning("Background Genie attempt %d failed: %s, retrying in %ds", attempt, e, wait)
+                wait = exponential_backoff(attempt - 1, base=2.0, cap=30.0)
+                logger.warning("Background Genie attempt %d failed: %s, retrying in %.1fs", attempt, e, wait)
                 await asyncio.sleep(wait)
                 continue
             break
