@@ -465,6 +465,7 @@ async def _handle_query(
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+        _release_message_lock(msg_id)
 
         # Save query log
         try:
@@ -503,7 +504,7 @@ async def _handle_query(
         gateway_id=gateway.get("id") if gateway else None,
     ))
 
-    def _on_task_done(t):
+    def _on_task_done(t):  # sync callback — runs atomically, no lock needed
         exc = t.exception() if not t.cancelled() else None
         if exc:
             logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
