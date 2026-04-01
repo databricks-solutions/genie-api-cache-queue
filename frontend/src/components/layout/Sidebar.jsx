@@ -20,14 +20,14 @@ function NavItem({ to, icon: Icon, label, end }) {
       className={({ isActive }) =>
         `flex items-center gap-2 px-3 py-1.5 rounded text-[13px] transition-colors ${
           isActive
-            ? 'bg-[rgba(34,114,180,0.08)] text-[#0E538B]'
-            : 'text-[#11171C] hover:bg-[rgba(0,0,0,0.04)]'
+            ? 'bg-dbx-blue-hover text-dbx-text-link'
+            : 'text-dbx-text hover:bg-dbx-neutral-hover'
         }`
       }
     >
       {({ isActive }) => (
         <>
-          <Icon size={16} className={isActive ? 'text-[#0E538B]' : 'text-[#6F6F6F]'} />
+          <Icon size={16} className={isActive ? 'text-dbx-text-link' : 'text-dbx-text-secondary'} />
           <span>{label}</span>
         </>
       )}
@@ -37,7 +37,7 @@ function NavItem({ to, icon: Icon, label, end }) {
 
 export default function Sidebar() {
   return (
-    <aside className="w-[200px] bg-[#F7F7F7] flex flex-col p-2 h-full">
+    <aside className="w-[200px] bg-dbx-sidebar flex flex-col p-2 h-full">
       <nav className="flex flex-col gap-0.5 flex-1">
         {mainNavItems.map((item) => (
           <NavItem key={item.to} {...item} />
@@ -45,7 +45,7 @@ export default function Sidebar() {
 
         <div className="flex-1" />
 
-        <div className="text-[11px] text-[#6F6F6F] tracking-wider px-3 mb-1">Tools</div>
+        <div className="text-[11px] text-dbx-text-secondary tracking-wider px-3 mb-1">Tools</div>
         {bottomNavItems.map((item) => (
           <NavItem key={item.to} {...item} />
         ))}

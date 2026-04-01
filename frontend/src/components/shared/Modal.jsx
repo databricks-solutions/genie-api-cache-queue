@@ -18,19 +18,19 @@ export default function Modal({ isOpen, onClose, title, children, maxWidth = 'ma
   return (
     <div
       className="fixed inset-0 z-[1000] flex items-start justify-center pt-[10vh] transition-opacity"
-      style={{ backgroundColor: 'rgba(0,0,0,0.26)' }}
+      style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
       onClick={onClose}
     >
       <div
-        className={`bg-white rounded shadow-xl ${maxWidth} w-full mx-4 max-h-[85vh] overflow-auto relative`}
+        className={`bg-dbx-bg rounded shadow-xl ${maxWidth} w-full mx-4 max-h-[85vh] overflow-auto relative border border-dbx-border`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-5 pb-4">
-          <h2 className="text-[18px] font-medium text-[#161616]">{title}</h2>
+          <h2 className="text-[18px] font-medium text-dbx-text">{title}</h2>
           <button
             onClick={onClose}
-            className="text-[#6F6F6F] hover:text-[#161616] p-1 -mr-1"
+            className="text-dbx-text-secondary hover:text-dbx-text p-1 -mr-1"
           >
             <X size={18} />
           </button>

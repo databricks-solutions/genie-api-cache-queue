@@ -4,7 +4,7 @@ export default function StatusBadge({ status }) {
   return (
     <span
       className={`inline-flex items-center gap-1.5 px-3 py-0.5 rounded text-[13px] ${
-        isActive ? 'bg-[#F3FCF6] text-[#161616]' : 'bg-gray-100 text-[#6F6F6F]'
+        isActive ? 'bg-dbx-status-green-bg text-dbx-text' : 'bg-dbx-sidebar text-dbx-text-secondary'
       }`}
     >
       <span

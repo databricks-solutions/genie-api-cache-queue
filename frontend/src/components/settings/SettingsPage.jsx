@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal } from 'lucide-react'
+import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette } from 'lucide-react'
 import { api } from '../../services/api'
+import { useTheme } from '../../context/ThemeContext'
 
 const secondsToTtl = (seconds) => {
   if (!seconds || seconds === 0) return { value: '0', unit: 'hours' }
@@ -24,9 +25,9 @@ const systemStyle = { fontFamily: systemFont, WebkitFontSmoothing: 'auto', MozOs
 function ToggleSwitch({ checked, onChange }) {
   return (
     <div className="flex items-center gap-1.5">
-      <span className="text-[13px] font-semibold text-[#161616]">{checked ? 'On' : 'Off'}</span>
+      <span className="text-[13px] font-semibold text-dbx-text">{checked ? 'On' : 'Off'}</span>
       <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
-        className={`relative inline-flex items-center rounded-full transition-colors duration-200 ${checked ? 'bg-[#2272B4]' : 'bg-[#D8D8D8]'}`}
+        className={`relative inline-flex items-center rounded-full transition-colors duration-200 ${checked ? 'bg-dbx-blue' : 'bg-dbx-disabled'}`}
         style={{ width: '28px', height: '16px' }}>
         <span className={`inline-block rounded-full bg-white shadow transform transition-transform duration-200 ${checked ? 'translate-x-[13px]' : 'translate-x-[1px]'}`}
           style={{ width: '12px', height: '12px' }} />
@@ -55,22 +56,22 @@ function EditableText({ value, onChange, placeholder, masked }) {
         <input ref={inputRef} type={masked ? 'password' : 'text'} value={draft}
           onChange={(e) => setDraft(e.target.value)} onKeyDown={handleKey}
           placeholder={placeholder}
-          className="h-8 border border-[#2272B4] rounded px-3 text-[13px] text-[#161616] outline-none"
+          className="h-8 border border-dbx-blue rounded px-3 text-[13px] text-dbx-text outline-none"
           style={{ width: '220px' }} />
         <button onClick={save}
-          className="h-8 px-3 text-[13px] text-white bg-[#2272B4] rounded hover:bg-[#1b5e96] transition-colors">Save</button>
+          className="h-8 px-3 text-[13px] text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors">Save</button>
         <button onClick={cancel}
-          className="h-8 px-3 text-[13px] text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors">Cancel</button>
+          className="h-8 px-3 text-[13px] text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors">Cancel</button>
       </div>
     )
   }
 
   return (
     <div className="flex items-center gap-2">
-      <span className={`text-[13px] ${isEmpty ? 'text-[#6F6F6F] italic' : 'text-[#161616]'}`}>
+      <span className={`text-[13px] ${isEmpty ? 'text-dbx-text-secondary italic' : 'text-dbx-text'}`}>
         {displayValue}
       </span>
-      <button onClick={startEdit} className="text-[#6F6F6F] hover:text-[#161616] transition-colors p-1">
+      <button onClick={startEdit} className="text-dbx-text-secondary hover:text-dbx-text transition-colors p-1">
         <Pencil size={14} />
       </button>
     </div>
@@ -80,11 +81,11 @@ function EditableText({ value, onChange, placeholder, masked }) {
 /* ── Field row container ── */
 function FieldRow({ label, description, children, noBorder }) {
   return (
-    <div className={`py-6 ${noBorder ? '' : 'border-b border-[#EBEBEB]'}`}>
+    <div className={`py-6 ${noBorder ? '' : 'border-b border-dbx-border'}`}>
       <div className="flex items-center justify-between gap-6">
         <div className="flex-1">
-          <span className="text-[13px] font-semibold text-[#161616] leading-[20px]">{label}</span>
-          {description && <div className="text-[12px] text-[#6F6F6F] leading-[16px]">{description}</div>}
+          <span className="text-[13px] font-semibold text-dbx-text leading-[20px]">{label}</span>
+          {description && <div className="text-[12px] text-dbx-text-secondary leading-[16px]">{description}</div>}
         </div>
         <div className="shrink-0">{children}</div>
       </div>
@@ -95,9 +96,9 @@ function FieldRow({ label, description, children, noBorder }) {
 /* ── Field row for stacked content (token, test connection) ── */
 function FieldRowStacked({ label, description, children, noBorder }) {
   return (
-    <div className={`py-6 ${noBorder ? '' : 'border-b border-[#EBEBEB]'}`}>
-      <span className="text-[13px] font-semibold text-[#161616] leading-[20px]">{label}</span>
-      {description && <div className="text-[12px] text-[#6F6F6F] leading-[16px]">{description}</div>}
+    <div className={`py-6 ${noBorder ? '' : 'border-b border-dbx-border'}`}>
+      <span className="text-[13px] font-semibold text-dbx-text leading-[20px]">{label}</span>
+      {description && <div className="text-[12px] text-dbx-text-secondary leading-[16px]">{description}</div>}
       <div className="mt-2">{children}</div>
     </div>
   )
@@ -108,14 +109,14 @@ function EndpointSelect({ value, onChange, endpoints, loading, placeholder, filt
   const filtered = filterTask ? endpoints.filter(ep => ep.task === filterTask) : endpoints
   if (loading) {
     return (
-      <div className="h-8 flex items-center gap-2 text-[13px] text-[#6F6F6F]">
+      <div className="h-8 flex items-center gap-2 text-[13px] text-dbx-text-secondary">
         <Loader2 size={14} className="animate-spin" /> Loading...
       </div>
     )
   }
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}
-      className="h-8 border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors bg-white"
+      className="h-8 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors bg-dbx-bg"
       style={{ width: '220px' }}>
       <option value="">{placeholder || 'Select endpoint...'}</option>
       {filtered.map(ep => <option key={ep.name} value={ep.name}>{ep.name}</option>)}
@@ -125,6 +126,7 @@ function EndpointSelect({ value, onChange, endpoints, loading, placeholder, filt
 
 /* ── Sidebar structure ── */
 const SIDEBAR = [
+  { category: 'Preferences', icon: Palette, items: [{ id: 'appearance', label: 'Appearance' }] },
   { category: 'Connection', icon: Database, items: [{ id: 'general', label: 'General' }] },
   { category: 'Gateway Defaults', icon: SlidersHorizontal, items: [
     { id: 'cache', label: 'Cache' },
@@ -135,6 +137,7 @@ const SIDEBAR = [
 
 /* ── Main component ── */
 export default function SettingsPage() {
+  const { themeMode, setThemeMode } = useTheme()
   const [activeSection, setActiveSection] = useState('general')
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
@@ -261,13 +264,13 @@ export default function SettingsPage() {
     sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  const inputClass = 'h-8 border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors'
+  const inputClass = 'h-8 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors'
 
   if (loading) {
     return (
       <div className="flex h-full" style={systemStyle}>
-        <div style={{ width: '240px' }} className="shrink-0 border-r border-[#EBEBEB]" />
-        <div className="flex-1 p-6"><div className="text-[13px] text-[#6F6F6F]">Loading...</div></div>
+        <div style={{ width: '240px' }} className="shrink-0 border-r border-dbx-border" />
+        <div className="flex-1 p-6"><div className="text-[13px] text-dbx-text-secondary">Loading...</div></div>
       </div>
     )
   }
@@ -275,15 +278,15 @@ export default function SettingsPage() {
   return (
     <div className="flex h-full" style={systemStyle}>
       {/* ── Sidebar ── */}
-      <div style={{ width: '240px' }} className="shrink-0 border-r border-[#EBEBEB]">
+      <div style={{ width: '240px' }} className="shrink-0 border-r border-dbx-border">
         <div className="px-6 pt-6 pb-6">
-          <h2 className="text-[22px] font-semibold text-[#161616] leading-[28px]">Settings</h2>
+          <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px]">Settings</h2>
         </div>
         <nav className="px-4">
           {SIDEBAR.map(({ category, icon: Icon, items }, idx) => (
             <div key={category} className={idx > 0 ? 'mt-6' : ''}>
               {category && (
-                <div className="flex items-center gap-2 px-2 mb-1 text-[13px] text-[#6F6F6F]">
+                <div className="flex items-center gap-2 px-2 mb-1 text-[13px] text-dbx-text-secondary">
                   <Icon size={20} strokeWidth={1.5} />
                   <span>{category}</span>
                 </div>
@@ -293,8 +296,8 @@ export default function SettingsPage() {
                   <button key={id} onClick={() => scrollToSection(id)}
                     className={`w-full text-left rounded text-[13px] leading-[20px] transition-colors py-2 px-3 ${
                       activeSection === id
-                        ? 'bg-[#F7F7F7] text-[#11171C]'
-                        : 'text-[#11171C] hover:bg-[#F7F7F7]'
+                        ? 'bg-dbx-sidebar text-dbx-text'
+                        : 'text-dbx-text hover:bg-dbx-sidebar'
                     }`}>
                     {label}
                   </button>
@@ -313,8 +316,8 @@ export default function SettingsPage() {
           {saveStatus && (
             <div className="fixed top-3 right-4 z-50">
               <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] shadow-sm ${
-                saveStatus === 'saving' ? 'bg-white text-[#6F6F6F] border border-[#EBEBEB]' :
-                saveStatus === 'saved' ? 'bg-[#F3FCF6] text-green-700 border border-green-200' :
+                saveStatus === 'saving' ? 'bg-dbx-bg text-dbx-text-secondary border border-dbx-border' :
+                saveStatus === 'saved' ? 'bg-dbx-status-green-bg text-green-700 border border-green-200' :
                 'bg-red-50 text-red-700 border border-red-200'
               }`}>
                 {saveStatus === 'saving' && <Loader2 size={12} className="animate-spin" />}
@@ -323,12 +326,34 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {/* ── Appearance ── */}
+          <div ref={el => sectionRefs.current['appearance'] = el} className="mb-10">
+            <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Appearance</h2>
+
+            <FieldRow
+              label="Theme"
+              description="'Follow Databricks workspace' reads your setting from User Settings → Preferences → Appearance; falls back to OS preference if unavailable."
+              noBorder
+            >
+              <select
+                value={themeMode}
+                onChange={(e) => setThemeMode(e.target.value)}
+                className={`${inputClass} bg-dbx-bg`}
+                style={{ width: '220px' }}
+              >
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+                <option value="system">Follow Databricks workspace</option>
+              </select>
+            </FieldRow>
+          </div>
+
           {/* ── General ── */}
           <div ref={el => sectionRefs.current['general'] = el} className="mb-10">
-            <h2 className="text-[22px] font-semibold text-[#161616] leading-[28px] pb-3 border-b border-[#EBEBEB]">General</h2>
+            <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">General</h2>
 
             <FieldRow label="Storage Backend" description="Cached queries are persisted in Lakebase (PostgreSQL with pgvector)">
-              <span className="inline-flex items-center px-3 py-1 text-[12px] font-medium bg-[rgba(34,114,180,0.08)] text-[#0E538B] rounded">Lakebase</span>
+              <span className="inline-flex items-center px-3 py-1 text-[12px] font-medium bg-dbx-blue-hover text-dbx-text-link rounded">Lakebase</span>
             </FieldRow>
 
             <FieldRow label="Lakebase Instance Name" description="Autoscaling project name, provisioned instance, or direct hostname">
@@ -368,12 +393,12 @@ export default function SettingsPage() {
                     catch (err) { setConnResult({ connected: false, error: err.response?.data?.detail || err.message }) }
                     finally { setTestingConn(false) }
                   }} disabled={testingConn}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors disabled:opacity-50">
+                  className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50">
                   {testingConn ? <Loader2 size={14} className="animate-spin" /> : <FlaskConical size={14} />}
                   {testingConn ? 'Testing...' : 'Test Connection'}
                 </button>
                 {connResult && (
-                  <div className={`rounded p-3 text-[13px] border ${connResult.connected ? 'bg-[#F3FCF6] border-green-200' : 'bg-red-50 border-red-200'}`}>
+                  <div className={`rounded p-3 text-[13px] border ${connResult.connected ? 'bg-dbx-status-green-bg border-green-200' : 'bg-red-50 border-red-200'}`}>
                     {connResult.connected ? (
                       <div className="space-y-1.5">
                         <div className="flex items-center gap-1.5 font-medium text-green-700"><CheckCircle size={14} /> Connected to Lakebase</div>
@@ -397,7 +422,7 @@ export default function SettingsPage() {
 
           {/* ── Cache ── */}
           <div ref={el => sectionRefs.current['cache'] = el} className="mb-10">
-            <h3 className="text-[18px] font-semibold text-[#161616] leading-[24px] mb-2">Cache</h3>
+            <h3 className="text-[18px] font-semibold text-dbx-text leading-[24px] mb-2">Cache</h3>
 
             <FieldRow label="Similarity Threshold" description="Minimum cosine similarity for cache hit (0-1)">
               <input type="number" min="0" max="1" step="0.01" value={config.similarity_threshold}
@@ -411,7 +436,7 @@ export default function SettingsPage() {
                   onChange={(e) => handleChange('cache_ttl_value', e.target.value)}
                   className={inputClass} style={{ width: '80px' }} />
                 <select value={config.cache_ttl_unit} onChange={(e) => handleChange('cache_ttl_unit', e.target.value)}
-                  className={`${inputClass} bg-white`}>
+                  className={`${inputClass} bg-dbx-bg`}>
                   <option value="minutes">Minutes</option>
                   <option value="hours">Hours</option>
                   <option value="days">Days</option>
@@ -426,7 +451,7 @@ export default function SettingsPage() {
 
           {/* ── Rate Limiting ── */}
           <div ref={el => sectionRefs.current['rate-limiting'] = el} className="mb-10">
-            <h3 className="text-[18px] font-semibold text-[#161616] leading-[24px] mb-2">Rate Limiting</h3>
+            <h3 className="text-[18px] font-semibold text-dbx-text leading-[24px] mb-2">Rate Limiting</h3>
 
             <FieldRow label="Max Queries per Minute" description="Rate limit for Genie API calls per user" noBorder>
               <input type="number" min="1" max="100" value={config.max_queries_per_minute}
@@ -437,7 +462,7 @@ export default function SettingsPage() {
 
           {/* ── AI Pipeline ── */}
           <div ref={el => sectionRefs.current['ai-pipeline'] = el} className="mb-10">
-            <h3 className="text-[18px] font-semibold text-[#161616] leading-[24px] mb-2">AI Pipeline</h3>
+            <h3 className="text-[18px] font-semibold text-dbx-text leading-[24px] mb-2">AI Pipeline</h3>
 
             <FieldRow label="Question Normalization" description="LLM rewrites questions to improve cache hit rates">
               <ToggleSwitch checked={config.question_normalization_enabled}
@@ -465,7 +490,7 @@ export default function SettingsPage() {
 
             <FieldRow label="Embedding Provider" description="Provider for query embeddings">
               <select value={config.embedding_provider} onChange={(e) => handleChange('embedding_provider', e.target.value)}
-                className={`${inputClass} bg-white`} style={{ width: '140px' }}>
+                className={`${inputClass} bg-dbx-bg`} style={{ width: '140px' }}>
                 <option value="databricks">Databricks</option>
                 <option value="local">Local</option>
               </select>

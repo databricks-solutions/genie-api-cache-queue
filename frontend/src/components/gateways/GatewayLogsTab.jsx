@@ -44,7 +44,7 @@ export default function GatewayLogsTab({ gateway }) {
   const getStatusIcon = (stage) => {
     if (stage === 'completed') return <CheckCircle size={14} className="text-green-600" />
     if (stage === 'failed') return <XCircle size={14} className="text-red-600" />
-    return <Loader size={14} className="animate-spin text-[#6F6F6F]" />
+    return <Loader size={14} className="animate-spin text-dbx-text-secondary" />
   }
 
   const completed = queryLogs.filter((q) => q.stage === 'completed').length
@@ -57,7 +57,7 @@ export default function GatewayLogsTab({ gateway }) {
       key: 'created_at',
       label: 'Time',
       width: '150px',
-      render: (val) => <span className="text-[#6F6F6F]">{formatDate(val)}</span>,
+      render: (val) => <span className="text-dbx-text-secondary">{formatDate(val)}</span>,
     },
     {
       key: 'query_text',
@@ -73,7 +73,7 @@ export default function GatewayLogsTab({ gateway }) {
       label: 'Identity',
       width: '100px',
       render: (val) => (
-        <span className="inline-flex px-2 py-0.5 rounded text-[11px] bg-[#F7F7F7] text-[#161616]">
+        <span className="inline-flex px-2 py-0.5 rounded text-[11px] bg-dbx-sidebar text-dbx-text">
           {val || '-'}
         </span>
       ),
@@ -86,10 +86,10 @@ export default function GatewayLogsTab({ gateway }) {
         <span
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
             val === 'completed'
-              ? 'bg-[#F3FCF6] text-green-700'
+              ? 'bg-dbx-status-green-bg text-green-700'
               : val === 'failed'
-              ? 'bg-red-50 text-red-600'
-              : 'bg-gray-100 text-[#6F6F6F]'
+              ? 'bg-dbx-status-red-bg text-dbx-text-danger'
+              : 'bg-dbx-sidebar text-dbx-text-secondary'
           }`}
         >
           {getStatusIcon(val)}
@@ -103,11 +103,11 @@ export default function GatewayLogsTab({ gateway }) {
       width: '100px',
       render: (val) =>
         val ? (
-          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-[#F3FCF6] text-green-700">
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-dbx-status-green-bg text-green-700">
             Cache Hit
           </span>
         ) : (
-          <span className="text-[#6F6F6F]">-</span>
+          <span className="text-dbx-text-secondary">-</span>
         ),
     },
     {
@@ -115,7 +115,7 @@ export default function GatewayLogsTab({ gateway }) {
       label: 'Query ID',
       width: '100px',
       render: (val) => (
-        <span className="font-mono text-[#6F6F6F]">
+        <span className="font-mono text-dbx-text-secondary">
           {val ? val.substring(0, 8) + '...' : '-'}
         </span>
       ),
@@ -126,19 +126,19 @@ export default function GatewayLogsTab({ gateway }) {
     <div className="space-y-4">
       {/* Controls */}
       <div className="flex items-center gap-4">
-        <label className="flex items-center gap-2 text-[13px] text-[#6F6F6F] cursor-pointer">
+        <label className="flex items-center gap-2 text-[13px] text-dbx-text-secondary cursor-pointer">
           <input
             type="checkbox"
             checked={autoRefresh}
             onChange={(e) => setAutoRefresh(e.target.checked)}
-            className="rounded accent-[#2272B4]"
+            className="rounded accent-dbx-blue"
           />
           Auto-refresh
         </label>
         <button
           onClick={fetchQueryLogs}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
         >
           <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           Refresh
@@ -147,41 +147,41 @@ export default function GatewayLogsTab({ gateway }) {
 
       {/* Stats row */}
       <div className="grid grid-cols-5 gap-4">
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{queryLogs.length}</div>
-          <div className="text-[13px] text-[#6F6F6F]">Total</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{queryLogs.length}</div>
+          <div className="text-[13px] text-dbx-text-secondary">Total</div>
         </div>
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{completed}</div>
-          <div className="text-[13px] text-[#6F6F6F]">Completed</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{completed}</div>
+          <div className="text-[13px] text-dbx-text-secondary">Completed</div>
         </div>
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{failed}</div>
-          <div className="text-[13px] text-[#6F6F6F]">Failed</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{failed}</div>
+          <div className="text-[13px] text-dbx-text-secondary">Failed</div>
         </div>
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{inProgress}</div>
-          <div className="text-[13px] text-[#6F6F6F]">In Progress</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{inProgress}</div>
+          <div className="text-[13px] text-dbx-text-secondary">In Progress</div>
         </div>
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{cacheHits}</div>
-          <div className="text-[13px] text-[#6F6F6F]">Cache Hits</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{cacheHits}</div>
+          <div className="text-[13px] text-dbx-text-secondary">Cache Hits</div>
         </div>
       </div>
 
       {/* Table */}
       {loading && queryLogs.length === 0 ? (
         <div className="flex items-center justify-center py-12">
-          <RefreshCw className="w-5 h-5 animate-spin text-[#6F6F6F]" />
+          <RefreshCw className="w-5 h-5 animate-spin text-dbx-text-secondary" />
         </div>
       ) : (
-        <div className="border border-[#EBEBEB] rounded overflow-hidden">
+        <div className="border border-dbx-border rounded overflow-hidden">
           <DataTable
             columns={columns}
             data={queryLogs}
             emptyMessage={
               <div className="flex flex-col items-center">
-                <FileText size={32} className="text-[#D8D8D8] mb-2" />
+                <FileText size={32} className="text-dbx-disabled mb-2" />
                 <span>No query logs for this gateway</span>
               </div>
             }

@@ -15,16 +15,16 @@ function ResultTable({ data }) {
     const columns = data.columns
     const rows = data.data_array
     if (columns.length === 0 && rows.length === 0) {
-      return <p className="text-[13px] text-[#6F6F6F] mt-2">No data returned.</p>
+      return <p className="text-[13px] text-dbx-text-secondary mt-2">No data returned.</p>
     }
     return (
-      <div className="mt-2 overflow-auto max-h-[400px] border border-[#EBEBEB] rounded">
+      <div className="mt-2 overflow-auto max-h-[400px] border border-dbx-border rounded">
         <table className="w-full">
           <thead>
             <tr>
               {columns.map((col, i) => (
-                <th key={i} className="text-left text-[12px] font-medium text-[#161616] bg-[#F7F7F7] sticky top-0"
-                  style={{ padding: '6px 10px', borderBottom: '1px solid #EBEBEB' }}>
+                <th key={i} className="text-left text-[12px] font-medium text-dbx-text bg-dbx-sidebar sticky top-0"
+                  style={{ padding: '6px 10px', borderBottom: '1px solid var(--dbx-border)' }}>
                   {typeof col === 'string' ? col : col.name || col}
                 </th>
               ))}
@@ -32,11 +32,11 @@ function ResultTable({ data }) {
           </thead>
           <tbody>
             {rows.slice(0, 200).map((row, ri) => (
-              <tr key={ri} className="hover:bg-[#F7F7F7]">
+              <tr key={ri} className="hover:bg-dbx-neutral-hover">
                 {(Array.isArray(row) ? row : Object.values(row)).map((cell, ci) => (
-                  <td key={ci} className="text-[12px] text-[#161616]"
-                    style={{ padding: '5px 10px', borderBottom: '1px solid #EBEBEB' }}>
-                    {cell == null ? <span className="text-[#CBCBCB] italic">null</span> : String(cell)}
+                  <td key={ci} className="text-[12px] text-dbx-text"
+                    style={{ padding: '5px 10px', borderBottom: '1px solid var(--dbx-border)' }}>
+                    {cell == null ? <span className="text-dbx-border-input italic">null</span> : String(cell)}
                   </td>
                 ))}
               </tr>
@@ -44,7 +44,7 @@ function ResultTable({ data }) {
           </tbody>
         </table>
         {rows.length > 200 && (
-          <div className="text-[12px] text-[#6F6F6F] p-2 bg-[#F7F7F7] text-center">
+          <div className="text-[12px] text-dbx-text-secondary p-2 bg-dbx-sidebar text-center">
             Showing 200 of {data.row_count || rows.length} rows
           </div>
         )}
@@ -56,27 +56,27 @@ function ResultTable({ data }) {
   if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'object') {
     // Skip Genie attachment format (has 'query' as object)
     if (typeof data[0].query === 'object') {
-      return <p className="text-[12px] text-[#6F6F6F] mt-1 italic">Result format not displayable. See SQL above.</p>
+      return <p className="text-[12px] text-dbx-text-secondary mt-1 italic">Result format not displayable. See SQL above.</p>
     }
     const cols = Object.keys(data[0])
     return (
-      <div className="mt-2 overflow-auto max-h-[400px] border border-[#EBEBEB] rounded">
+      <div className="mt-2 overflow-auto max-h-[400px] border border-dbx-border rounded">
         <table className="w-full">
           <thead>
             <tr>
               {cols.map((col, i) => (
-                <th key={i} className="text-left text-[12px] font-medium text-[#161616] bg-[#F7F7F7] sticky top-0"
-                  style={{ padding: '6px 10px', borderBottom: '1px solid #EBEBEB' }}>{col}</th>
+                <th key={i} className="text-left text-[12px] font-medium text-dbx-text bg-dbx-sidebar sticky top-0"
+                  style={{ padding: '6px 10px', borderBottom: '1px solid var(--dbx-border)' }}>{col}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {data.slice(0, 200).map((row, ri) => (
-              <tr key={ri} className="hover:bg-[#F7F7F7]">
+              <tr key={ri} className="hover:bg-dbx-neutral-hover">
                 {cols.map((col, ci) => (
-                  <td key={ci} className="text-[12px] text-[#161616]"
-                    style={{ padding: '5px 10px', borderBottom: '1px solid #EBEBEB' }}>
-                    {row[col] == null ? <span className="text-[#CBCBCB] italic">null</span> : String(row[col])}
+                  <td key={ci} className="text-[12px] text-dbx-text"
+                    style={{ padding: '5px 10px', borderBottom: '1px solid var(--dbx-border)' }}>
+                    {row[col] == null ? <span className="text-dbx-border-input italic">null</span> : String(row[col])}
                   </td>
                 ))}
               </tr>
@@ -89,8 +89,8 @@ function ResultTable({ data }) {
 
   // Last resort: JSON
   return (
-    <div className="bg-[#F7F7F7] rounded p-3 mt-2 overflow-auto max-h-[200px]">
-      <pre className="text-[12px] text-[#161616] font-mono whitespace-pre-wrap">
+    <div className="bg-dbx-sidebar rounded p-3 mt-2 overflow-auto max-h-[200px]">
+      <pre className="text-[12px] text-dbx-text font-mono whitespace-pre-wrap">
         {JSON.stringify(data, null, 2)}
       </pre>
     </div>
@@ -112,13 +112,13 @@ function ChatMessage({ item }) {
   }
 
   return (
-    <div className="space-y-3 pb-6 border-b border-[#EBEBEB] last:border-0">
+    <div className="space-y-3 pb-6 border-b border-dbx-border last:border-0">
       {/* User question */}
       <div className="flex items-start gap-2">
         <div className="w-6 h-6 rounded-full bg-[#FF3621] flex items-center justify-center flex-shrink-0 mt-0.5">
           <span className="text-[10px] text-white font-medium">U</span>
         </div>
-        <p className="text-[14px] font-medium text-[#161616] pt-0.5">{item.query}</p>
+        <p className="text-[14px] font-medium text-dbx-text pt-0.5">{item.query}</p>
       </div>
 
       {/* Pipeline */}
@@ -134,8 +134,8 @@ function ChatMessage({ item }) {
       {/* Result */}
       <div className="ml-8">
         {isRunning && (
-          <div className="flex items-center gap-2 text-[13px] text-[#6F6F6F]">
-            <Loader className="w-3.5 h-3.5 animate-spin text-[#2272B4]" />
+          <div className="flex items-center gap-2 text-[13px] text-dbx-text-secondary">
+            <Loader className="w-3.5 h-3.5 animate-spin text-dbx-blue" />
             {stageLabel(item.stage)}
           </div>
         )}
@@ -149,7 +149,7 @@ function ChatMessage({ item }) {
                   <Zap className="w-3 h-3" /> Cache Hit
                 </span>
               ) : (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-[rgba(34,114,180,0.08)] text-[#2272B4] rounded text-[12px] font-medium">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-dbx-blue-hover text-dbx-blue rounded text-[12px] font-medium">
                   <Database className="w-3 h-3" /> Via Genie
                 </span>
               )}
@@ -159,25 +159,25 @@ function ChatMessage({ item }) {
             {item.sql_query ? (
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-[11px] font-medium text-[#6F6F6F] uppercase tracking-wide">SQL</span>
+                  <span className="text-[11px] font-medium text-dbx-text-secondary uppercase tracking-wide">SQL</span>
                   <button onClick={handleCopySQL}
-                    className="flex items-center gap-1 text-[11px] text-[#6F6F6F] hover:text-[#161616] transition-colors">
+                    className="flex items-center gap-1 text-[11px] text-dbx-text-secondary hover:text-dbx-text transition-colors">
                     {sqlCopied ? <Check className="w-3 h-3 text-[#FF3621]" /> : <Copy className="w-3 h-3" />}
                     {sqlCopied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
-                <div className="bg-[#F7F7F7] rounded p-3 overflow-auto max-h-[180px]">
-                  <pre className="text-[12px] text-[#161616] font-mono whitespace-pre-wrap">{item.sql_query}</pre>
+                <div className="bg-dbx-sidebar rounded p-3 overflow-auto max-h-[180px]">
+                  <pre className="text-[12px] text-dbx-text font-mono whitespace-pre-wrap">{item.sql_query}</pre>
                 </div>
               </div>
             ) : (
-              <p className="text-[13px] text-[#6F6F6F] italic">A pergunta não retornou uma query SQL.</p>
+              <p className="text-[13px] text-dbx-text-secondary italic">The question did not return a SQL query.</p>
             )}
 
             {/* Results table */}
             {item.result && (
               <div>
-                <span className="text-[11px] font-medium text-[#6F6F6F] uppercase tracking-wide">Results</span>
+                <span className="text-[11px] font-medium text-dbx-text-secondary uppercase tracking-wide">Results</span>
                 <ResultTable data={item.result} />
               </div>
             )}
@@ -192,7 +192,7 @@ function ChatMessage({ item }) {
       </div>
 
       {/* Timestamp */}
-      <div className="ml-8 text-[11px] text-[#CBCBCB]">
+      <div className="ml-8 text-[11px] text-dbx-border-input">
         {item.timestamp ? new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
         {item.identity && item.identity !== 'playground-user' && ` · ${item.identity}`}
       </div>
@@ -481,7 +481,7 @@ export default function PlaygroundPage() {
   return (
     <div className="h-full flex flex-col">
       {/* Tabs bar + gateway selector — separate containers so the dropdown isn't clipped by overflow-x-auto */}
-      <div className="flex items-stretch border-b border-[#EBEBEB] flex-shrink-0 bg-white">
+      <div className="flex items-stretch border-b border-dbx-border flex-shrink-0 bg-dbx-bg">
         {/* Tabs (scrollable) */}
         <div className="flex items-center gap-1 overflow-x-auto flex-1 px-4 pt-3">
           {tabs.map(tab => (
@@ -490,15 +490,15 @@ export default function PlaygroundPage() {
               onClick={() => setActiveTabId(tab.id)}
               className={`group flex items-center gap-1.5 px-3 py-1.5 text-[13px] rounded-t border-b-2 whitespace-nowrap transition-colors flex-shrink-0 ${
                 tab.id === activeTabId
-                  ? 'border-[#2272B4] text-[#0E538B] font-medium bg-white'
-                  : 'border-transparent text-[#6F6F6F] hover:text-[#161616] hover:bg-[#F7F7F7]'
+                  ? 'border-dbx-blue text-dbx-text-link font-medium bg-dbx-bg'
+                  : 'border-transparent text-dbx-text-secondary hover:text-dbx-text hover:bg-dbx-neutral-hover'
               }`}
             >
               {tab.label}
               {tabs.length > 1 && (
                 <span
                   onClick={(e) => handleCloseTab(tab.id, e)}
-                  className="w-3.5 h-3.5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-[#EBEBEB] transition-opacity"
+                  className="w-3.5 h-3.5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-dbx-border transition-opacity"
                 >
                   <X size={9} />
                 </span>
@@ -507,10 +507,10 @@ export default function PlaygroundPage() {
           ))}
           <button
             onClick={handleNewTab}
-            className="flex items-center justify-center w-6 h-6 rounded hover:bg-[#F7F7F7] transition-colors flex-shrink-0 ml-1 mb-1.5"
+            className="flex items-center justify-center w-6 h-6 rounded hover:bg-dbx-neutral-hover transition-colors flex-shrink-0 ml-1 mb-1.5"
             title="New conversation"
           >
-            <Plus size={13} className="text-[#6F6F6F]" />
+            <Plus size={13} className="text-dbx-text-secondary" />
           </button>
         </div>
 
@@ -518,28 +518,28 @@ export default function PlaygroundPage() {
         <div className="relative flex-shrink-0 px-4 py-2 flex items-center" ref={dropdownRef}>
           <button
             onClick={() => setGatewayDropdownOpen(!gatewayDropdownOpen)}
-            className="flex items-center gap-2 h-8 px-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] bg-white hover:border-[#2272B4] transition-colors min-w-[250px]"
+            className="flex items-center gap-2 h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text bg-dbx-bg hover:border-dbx-blue transition-colors min-w-[250px]"
             disabled={loadingGateways}
           >
             {loadingGateways ? (
-              <span className="text-[#6F6F6F]">Loading gateways...</span>
+              <span className="text-dbx-text-secondary">Loading gateways...</span>
             ) : selectedGateway ? (
               <span className="truncate">{selectedGateway.name}</span>
             ) : gateways.length === 0 ? (
-              <span className="text-[#6F6F6F]">No gateways available</span>
+              <span className="text-dbx-text-secondary">No gateways available</span>
             ) : (
-              <span className="text-[#6F6F6F]">Select a gateway</span>
+              <span className="text-dbx-text-secondary">Select a gateway</span>
             )}
-            <ChevronDown className={`w-4 h-4 text-[#6F6F6F] ml-auto flex-shrink-0 transition-transform ${gatewayDropdownOpen ? 'rotate-180' : ''}`} />
+            <ChevronDown className={`w-4 h-4 text-dbx-text-secondary ml-auto flex-shrink-0 transition-transform ${gatewayDropdownOpen ? 'rotate-180' : ''}`} />
           </button>
 
           {gatewayDropdownOpen && gateways.length > 0 && (
-            <div className="absolute right-4 top-full mt-1 bg-white border border-[#EBEBEB] rounded shadow-lg z-50 min-w-[300px] max-h-[300px] overflow-auto">
+            <div className="absolute right-4 top-full mt-1 bg-dbx-bg border border-dbx-border rounded shadow-lg z-50 min-w-[300px] max-h-[300px] overflow-auto">
               {gateways.map((gw) => (
                 <button key={gw.id} onClick={() => { setSelectedGatewayId(gw.id); setGatewayDropdownOpen(false) }}
-                  className={`w-full text-left px-3 py-2.5 hover:bg-[#F7F7F7] transition-colors first:rounded-t-lg last:rounded-b-lg ${gw.id === selectedGatewayId ? 'bg-[#F7F7F7]' : ''}`}>
-                  <div className="text-[13px] font-medium text-[#161616]">{gw.name}</div>
-                  <div className="text-[11px] text-[#6F6F6F] mt-0.5 font-mono">{gw.id?.substring(0, 12)}…</div>
+                  className={`w-full text-left px-3 py-2.5 hover:bg-dbx-neutral-hover transition-colors first:rounded-t-lg last:rounded-b-lg ${gw.id === selectedGatewayId ? 'bg-dbx-neutral-hover' : ''}`}>
+                  <div className="text-[13px] font-medium text-dbx-text">{gw.name}</div>
+                  <div className="text-[11px] text-dbx-text-secondary mt-0.5 font-mono">{gw.id?.substring(0, 12)}…</div>
                 </button>
               ))}
             </div>
@@ -551,11 +551,11 @@ export default function PlaygroundPage() {
       <div className="flex-1 overflow-auto px-6 py-4 space-y-6">
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center">
-            <div className="w-12 h-12 rounded-full bg-[#F7F7F7] flex items-center justify-center mb-3">
-              <Play className="w-5 h-5 text-[#6F6F6F]" />
+            <div className="w-12 h-12 rounded-full bg-dbx-sidebar flex items-center justify-center mb-3">
+              <Play className="w-5 h-5 text-dbx-text-secondary" />
             </div>
-            <p className="text-[14px] font-medium text-[#161616] mb-1">Ask a question about your data</p>
-            <p className="text-[13px] text-[#6F6F6F]">
+            <p className="text-[14px] font-medium text-dbx-text mb-1">Ask a question about your data</p>
+            <p className="text-[13px] text-dbx-text-secondary">
               {selectedGateway ? `Using gateway: ${selectedGateway.name}` : 'Select a gateway to get started'}
             </p>
           </div>
@@ -567,7 +567,7 @@ export default function PlaygroundPage() {
       </div>
 
       {/* Input area */}
-      <div className="flex-shrink-0 border-t border-[#EBEBEB] px-6 py-4 bg-white">
+      <div className="flex-shrink-0 border-t border-dbx-border px-6 py-4 bg-dbx-bg">
         <div className="flex gap-3 items-end">
           <textarea
             value={queryText}
@@ -575,7 +575,7 @@ export default function PlaygroundPage() {
             onKeyDown={handleKeyDown}
             placeholder={!selectedGateway && !loadingGateways ? 'Select a gateway above to start querying...' : 'Ask a question about your data...'}
             rows={2}
-            className="flex-1 border border-[#CBCBCB] rounded p-3 text-[13px] text-[#161616] placeholder-[#CBCBCB] resize-none focus:outline-none focus:border-[#2272B4] focus:ring-1 focus:ring-[#2272B4]/20 disabled:bg-[#F7F7F7] disabled:cursor-not-allowed"
+            className="flex-1 border border-dbx-border-input rounded p-3 text-[13px] text-dbx-text placeholder-dbx-border-input resize-none focus:outline-none focus:border-dbx-blue focus:ring-1 focus:ring-[rgba(34,114,180,0.2)] disabled:bg-dbx-sidebar disabled:cursor-not-allowed"
             disabled={running || (!selectedGateway && !loadingGateways)}
           />
           <div className="flex flex-col gap-1.5 items-stretch">
@@ -583,7 +583,7 @@ export default function PlaygroundPage() {
               id="playground-run-btn"
               onClick={handleSubmit}
               disabled={running || !queryText.trim() || (!selectedGateway && gateways.length > 0)}
-              className="flex items-center justify-center gap-2 h-8 w-[100px] bg-[#2272B4] text-white rounded text-[13px] font-medium hover:bg-[#1b5e96] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="flex items-center justify-center gap-2 h-8 w-[100px] bg-dbx-blue text-white rounded text-[13px] font-medium hover:bg-dbx-blue-dark disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               {running ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
               {running ? 'Running' : 'Run'}
@@ -591,7 +591,7 @@ export default function PlaygroundPage() {
             <button
               onClick={handleClearChat}
               disabled={messages.length === 0}
-              className="flex items-center justify-center gap-1.5 h-7 px-3 text-[12px] text-[#6F6F6F] hover:text-[#161616] hover:bg-[#F7F7F7] rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-[#6F6F6F] disabled:hover:bg-transparent"
+              className="flex items-center justify-center gap-1.5 h-7 px-3 text-[12px] text-dbx-text-secondary hover:text-dbx-text hover:bg-dbx-neutral-hover rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-dbx-text-secondary disabled:hover:bg-transparent"
               title="Clear conversation"
             >
               <Trash2 className="w-3 h-3" />
@@ -600,7 +600,7 @@ export default function PlaygroundPage() {
           </div>
         </div>
         <div className="flex justify-end mt-1">
-          <span className="text-[11px] text-[#CBCBCB]">Enter to run · Shift+Enter for new line</span>
+          <span className="text-[11px] text-dbx-border-input">Enter to run · Shift+Enter for new line</span>
         </div>
       </div>
     </div>

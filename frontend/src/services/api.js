@@ -259,6 +259,15 @@ export const api = {
     return response.data;
   },
 
+  getWorkspaceAppearance: async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/workspace-appearance`);
+      return response.data; // { theme: 'light' | 'dark' | null, source: string }
+    } catch {
+      return { theme: null, source: 'error' };
+    }
+  },
+
   getConfig: getConfig,
   getActiveSpaceId: getActiveSpaceId,
   setActiveSpaceId: setActiveSpaceId,

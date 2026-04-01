@@ -7,8 +7,8 @@ function SelectionTable({ columns, data, selectedId, onSelect, loading, error, o
   if (loading) {
     return (
       <div className="flex items-center justify-center py-8">
-        <Loader2 size={18} className="animate-spin text-[#6F6F6F]" />
-        <span className="ml-2 text-[13px] text-[#6F6F6F]">Loading...</span>
+        <Loader2 size={18} className="animate-spin text-dbx-text-secondary" />
+        <span className="ml-2 text-[13px] text-dbx-text-secondary">Loading...</span>
       </div>
     )
   }
@@ -16,11 +16,11 @@ function SelectionTable({ columns, data, selectedId, onSelect, loading, error, o
   if (error) {
     return (
       <div className="text-center py-6">
-        <p className="text-[13px] text-[#6F6F6F] mb-2">{error}</p>
+        <p className="text-[13px] text-dbx-text-secondary mb-2">{error}</p>
         {onManualFallback && (
           <button
             onClick={onManualFallback}
-            className="text-[13px] text-[#0E538B] hover:underline"
+            className="text-[13px] text-dbx-text-link hover:underline"
           >
             Enter ID manually
           </button>
@@ -32,11 +32,11 @@ function SelectionTable({ columns, data, selectedId, onSelect, loading, error, o
   if (!data || data.length === 0) {
     return (
       <div className="text-center py-6">
-        <p className="text-[13px] text-[#6F6F6F]">No results found</p>
+        <p className="text-[13px] text-dbx-text-secondary">No results found</p>
         {onManualFallback && (
           <button
             onClick={onManualFallback}
-            className="text-[13px] text-[#0E538B] hover:underline mt-1"
+            className="text-[13px] text-dbx-text-link hover:underline mt-1"
           >
             Enter ID manually
           </button>
@@ -46,15 +46,15 @@ function SelectionTable({ columns, data, selectedId, onSelect, loading, error, o
   }
 
   return (
-    <div className="border border-[#EBEBEB] rounded max-h-[200px] overflow-auto">
+    <div className="border border-dbx-border rounded max-h-[200px] overflow-auto">
       <table className="w-full">
-        <thead className="sticky top-0 bg-white">
+        <thead className="sticky top-0 bg-dbx-bg">
           <tr>
             {columns.map((col) => (
               <th
                 key={col.key}
-                className="text-left text-[13px] font-medium text-[#161616]"
-                style={{ padding: '4px 8px', borderBottom: '1px solid #EBEBEB' }}
+                className="text-left text-[13px] font-medium text-dbx-text"
+                style={{ padding: '4px 8px', borderBottom: '1px solid var(--dbx-border)' }}
               >
                 {col.label}
               </th>
@@ -69,16 +69,16 @@ function SelectionTable({ columns, data, selectedId, onSelect, loading, error, o
                 key={row.id}
                 className={`cursor-pointer transition-colors ${
                   isSelected
-                    ? 'bg-[rgba(34,114,180,0.08)]'
-                    : 'hover:bg-[#F7F7F7]'
+                    ? 'bg-dbx-blue-hover'
+                    : 'hover:bg-dbx-neutral-hover'
                 }`}
                 onClick={() => onSelect(isSelected ? null : row.id)}
               >
                 {columns.map((col) => (
                   <td
                     key={col.key}
-                    className="text-[13px] text-[#161616]"
-                    style={{ padding: '6px 8px', borderBottom: '1px solid #EBEBEB' }}
+                    className="text-[13px] text-dbx-text"
+                    style={{ padding: '6px 8px', borderBottom: '1px solid var(--dbx-border)' }}
                   >
                     {col.render ? col.render(row[col.key], row) : row[col.key] || '-'}
                   </td>
@@ -179,7 +179,7 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
       key: 'id',
       label: 'Space ID',
       render: (val) => (
-        <span className="text-[12px] font-mono text-[#6F6F6F]">{val}</span>
+        <span className="text-[12px] font-mono text-dbx-text-secondary">{val}</span>
       ),
     },
   ]
@@ -188,10 +188,10 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
     <Modal isOpen={open} onClose={onClose} title="Create Gateway" maxWidth="max-w-2xl">
       {/* Section 1: Gateway name */}
       <div className="mb-6">
-        <label className="block text-[13px] font-medium text-[#161616] mb-1">
+        <label className="block text-[13px] font-medium text-dbx-text mb-1">
           Configure gateway name
         </label>
-        <p className="text-[13px] text-[#6F6F6F] mb-2">
+        <p className="text-[13px] text-dbx-text-secondary mb-2">
           Gateway name cannot be changed after creation.
         </p>
         <input
@@ -199,13 +199,13 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
           placeholder="Enter gateway name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="w-full h-8 px-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] placeholder:text-[#6F6F6F] focus:outline-none focus:border-[#2272B4]"
+          className="w-full h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue"
         />
       </div>
 
       {/* Section 2: Select Genie Space */}
       <div className="mb-6">
-        <label className="block text-[13px] font-medium text-[#161616] mb-2">
+        <label className="block text-[13px] font-medium text-dbx-text mb-2">
           Select Genie Space
         </label>
 
@@ -216,11 +216,11 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
               placeholder="Enter Genie Space ID"
               value={manualSpaceId}
               onChange={(e) => setManualSpaceId(e.target.value)}
-              className="w-full h-8 px-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] placeholder:text-[#6F6F6F] focus:outline-none focus:border-[#2272B4] font-mono"
+              className="w-full h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue font-mono"
             />
             <button
               onClick={() => { setShowManualSpace(false); setManualSpaceId('') }}
-              className="text-[13px] text-[#0E538B] hover:underline mt-1"
+              className="text-[13px] text-dbx-text-link hover:underline mt-1"
             >
               Back to list
             </button>
@@ -229,13 +229,13 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
           <>
             {!spacesLoading && !spacesError && spaces.length > 0 && (
               <div className="relative mb-2">
-                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6F6F6F]" />
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-dbx-text-secondary" />
                 <input
                   type="text"
                   placeholder="Search by name"
                   value={spaceSearch}
                   onChange={(e) => setSpaceSearch(e.target.value)}
-                  className="w-full h-8 pl-8 pr-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] placeholder:text-[#6F6F6F] focus:outline-none focus:border-[#2272B4]"
+                  className="w-full h-8 pl-8 pr-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue"
                 />
               </div>
             )}
@@ -253,7 +253,7 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
 
         {/* Show selected space info */}
         {selectedSpaceObj && (
-          <div className="mt-2 text-[12px] text-[#6F6F6F]">
+          <div className="mt-2 text-[12px] text-dbx-text-secondary">
             {selectedSpaceObj.description && <span>{selectedSpaceObj.description} · </span>}
             Warehouse: <span className="font-mono">{selectedSpaceObj.warehouse_id || 'not set'}</span>
           </div>
@@ -266,10 +266,10 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
       )}
 
       {/* Footer */}
-      <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#EBEBEB]">
+      <div className="flex items-center justify-end gap-2 pt-2 border-t border-dbx-border">
         <button
           onClick={onClose}
-          className="h-8 px-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] bg-transparent hover:bg-[#F7F7F7] transition-colors"
+          className="h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text bg-transparent hover:bg-dbx-neutral-hover transition-colors"
         >
           Cancel
         </button>
@@ -278,8 +278,8 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
           disabled={!canCreate}
           className={`h-8 px-3 rounded text-[13px] text-white transition-colors flex items-center gap-1.5 ${
             canCreate
-              ? 'bg-[#2272B4] hover:bg-[#1b5e96]'
-              : 'bg-[#D8D8D8] cursor-not-allowed'
+              ? 'bg-dbx-blue hover:bg-dbx-blue-dark'
+              : 'bg-dbx-disabled cursor-not-allowed'
           }`}
         >
           {creating && <Loader2 size={14} className="animate-spin" />}

@@ -2,12 +2,15 @@
 API routes for the Genie Cache application.
 """
 
+import asyncio
 import logging
+import os
 import uuid
 from fastapi import APIRouter, HTTPException, Request
 from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel
+import httpx
 from app.models import (
     QueryRequest,
     QueryResponse,
@@ -246,8 +249,6 @@ async def health_check(req: Request):
 @router.get("/space-info/{space_id}")
 async def get_space_info(space_id: str, req: Request):
     """Fetch Genie Space metadata (name, description) using the caller's token."""
-    import httpx
-
     token = req.headers.get('X-Forwarded-Access-Token') or settings.databricks_token
     if not token:
         raise HTTPException(status_code=401, detail="No token available to query Genie API")
@@ -396,4 +397,108 @@ async def clear_cache(req: Request, space_id: Optional[str] = None):
         logger.exception("Error clearing cache")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+def _extract_theme(data: dict, _depth: int = 0) -> str | None:
+    """Try to extract a light/dark theme value from a Databricks API response dict."""
+    if not isinstance(data, dict) or _depth > 2:
+        return None
+    for key in ["theme", "colorScheme", "color_scheme", "appearance", "mode", "uiTheme", "ui_theme"]:
+        val = str(data.get(key, "")).lower().strip()
+        if val in ("dark", "dark_theme", "dark_mode", "databricks_dark"):
+            return "dark"
+        if val in ("light", "light_theme", "light_mode", "databricks_light"):
+            return "light"
+    for v in data.values():
+        if isinstance(v, dict):
+            result = _extract_theme(v, _depth + 1)
+            if result:
+                return result
+    return None
+
+
+@router.get("/workspace-appearance")
+async def get_workspace_appearance(request: Request):
+    """
+    Detect the user's Databricks workspace theme preference via the Settings API.
+
+    Uses the user's OAuth token (X-Forwarded-Access-Token injected by Databricks Apps)
+    to query user-level preferences. Returns {"theme": "light" | "dark" | null}.
+    When no user token is present, returns null without attempting any fallback.
+    """
+    user_token = request.headers.get("X-Forwarded-Access-Token", "").strip()
+    host = os.environ.get("DATABRICKS_HOST", "")
+    if not host or not user_token:
+        return {"theme": None, "source": "not_configured"}
+
+    if not host.startswith("http"):
+        host = f"https://{host}"
+
+    headers = {"Authorization": f"Bearer {user_token}"}
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 10.0
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+        # 1. Discover available setting types and look for appearance-related ones
+        try:
+            resp = await client.get(f"{host}/api/2.0/settings", headers=headers)
+            if resp.status_code == 200:
+                body = resp.json()
+                setting_types = body.get("setting_types", [])
+                for type_info in setting_types:
+                    if loop.time() > deadline:
+                        return {"theme": None, "source": "timeout"}
+                    type_name = (
+                        type_info.get("name")
+                        or type_info.get("setting_type_name")
+                        or ""
+                    )
+                    if any(k in type_name.lower() for k in ("appearance", "theme", "color", "dark")):
+                        try:
+                            r2 = await client.get(
+                                f"{host}/api/2.0/settings/types/{type_name}/names/default",
+                                headers=headers,
+                            )
+                            if r2.status_code == 200:
+                                theme = _extract_theme(r2.json())
+                                if theme:
+                                    return {"theme": theme, "source": f"settings/{type_name}"}
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # 2. Try known direct endpoints (workspace version dependent)
+        known = [
+            f"{host}/api/2.0/settings/types/workspace_appearance/names/default",
+            f"{host}/api/2.0/settings/types/user_appearance/names/default",
+            f"{host}/api/2.0/settings/types/notebook_appearance/names/default",
+        ]
+        for url in known:
+            if loop.time() > deadline:
+                return {"theme": None, "source": "timeout"}
+            try:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    theme = _extract_theme(resp.json())
+                    if theme:
+                        return {"theme": theme, "source": url}
+            except Exception:
+                continue
+
+        # 3. Try SCIM /Me endpoint — some workspaces store preferences in extension attrs
+        if loop.time() <= deadline:
+            try:
+                resp = await client.get(f"{host}/api/2.0/preview/scim/v2/Me", headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for key, val in data.items():
+                        if isinstance(val, dict):
+                            theme = _extract_theme(val)
+                            if theme:
+                                return {"theme": theme, "source": "scim_me"}
+            except Exception:
+                pass
+
+    return {"theme": None, "source": "not_found"}
 

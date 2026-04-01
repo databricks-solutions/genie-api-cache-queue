@@ -21,14 +21,14 @@ function EndpointSelect({ value, onChange, endpoints, loading, placeholder, filt
   const filtered = filterTask ? endpoints.filter(ep => ep.task === filterTask) : endpoints
   if (loading) {
     return (
-      <div className="h-8 flex items-center gap-2 text-[13px] text-[#6F6F6F]">
+      <div className="h-8 flex items-center gap-2 text-[13px] text-dbx-text-secondary">
         <Loader2 size={14} className="animate-spin" /> Loading...
       </div>
     )
   }
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}
-      className="h-8 w-full border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors bg-white">
+      className="h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors bg-dbx-bg">
       <option value="">{placeholder || 'Select endpoint...'}</option>
       {filtered.map(ep => (
         <option key={ep.name} value={ep.name}>{ep.name}</option>
@@ -151,7 +151,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
     }
   }
 
-  const inputClass = 'h-8 w-full border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors'
+  const inputClass = 'h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors'
 
   return (
     <div className="max-w-xl space-y-6">
@@ -162,7 +162,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
       {/* Cache-dependent settings — only shown when caching is enabled */}
       {form.caching_enabled && (
-        <div className="space-y-6 pl-4 border-l-2 border-[#EBEBEB]">
+        <div className="space-y-6 pl-4 border-l-2 border-dbx-border">
           <SettingsField label="Similarity Threshold" description="Minimum cosine similarity to consider a cache hit (0-1)">
             <input type="number" min="0" max="1" step="0.01" value={form.similarity_threshold}
               onChange={(e) => handleChange('similarity_threshold', e.target.value)} className={inputClass} />
@@ -172,9 +172,9 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
             <div className="flex gap-2">
               <input type="number" min="0" value={form.cache_ttl_value}
                 onChange={(e) => handleChange('cache_ttl_value', e.target.value)}
-                className="h-8 flex-1 border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors" />
+                className="h-8 flex-1 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors" />
               <select value={form.cache_ttl_unit} onChange={(e) => handleChange('cache_ttl_unit', e.target.value)}
-                className="h-8 border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors bg-white">
+                className="h-8 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors bg-dbx-bg">
                 <option value="minutes">Minutes</option>
                 <option value="hours">Hours</option>
                 <option value="days">Days</option>
@@ -212,7 +212,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
           <SettingsField label="Embedding Provider" description="Provider for query embeddings">
             <select value={form.embedding_provider} onChange={(e) => handleChange('embedding_provider', e.target.value)}
-              className="h-8 w-full border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors bg-white">
+              className="h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors bg-dbx-bg">
               <option value="databricks">Databricks</option>
               <option value="local">Local</option>
             </select>
@@ -229,12 +229,12 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
           <SettingsField label="SQL Warehouse" description="Warehouse used for executing cached SQL queries">
             {warehousesLoading ? (
-              <div className="h-8 flex items-center gap-2 text-[13px] text-[#6F6F6F]">
+              <div className="h-8 flex items-center gap-2 text-[13px] text-dbx-text-secondary">
                 <Loader2 size={14} className="animate-spin" /> Loading warehouses...
               </div>
             ) : (
               <select value={form.sql_warehouse_id} onChange={(e) => handleChange('sql_warehouse_id', e.target.value)}
-                className="h-8 w-full border border-[#CBCBCB] rounded px-3 text-[13px] text-[#161616] outline-none focus:border-[#2272B4] transition-colors bg-white">
+                className="h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors bg-dbx-bg">
                 <option value="">From Genie Space (default)</option>
                 {warehouses.map(w => (
                   <option key={w.id} value={w.id}>{w.name} ({w.id})</option>
@@ -258,12 +258,12 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2">
         <button onClick={handleSave} disabled={saving}
-          className="inline-flex items-center gap-1.5 h-8 px-4 text-[13px] font-medium text-white bg-[#2272B4] rounded hover:bg-[#1b5e96] transition-colors disabled:opacity-50">
+          className="inline-flex items-center gap-1.5 h-8 px-4 text-[13px] font-medium text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors disabled:opacity-50">
           <Save size={14} />
           {saving ? 'Saving...' : 'Save'}
         </button>
         <button onClick={handleResetDefaults}
-          className="inline-flex items-center gap-1.5 h-8 px-4 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors">
+          className="inline-flex items-center gap-1.5 h-8 px-4 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors">
           <RotateCcw size={14} />
           Reset to Defaults
         </button>
@@ -276,8 +276,8 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 function SettingsField({ label, description, children }) {
   return (
     <div>
-      <label className="block text-[13px] font-medium text-[#161616] mb-1">{label}</label>
-      {description && <p className="text-[13px] text-[#6F6F6F] mb-2">{description}</p>}
+      <label className="block text-[13px] font-medium text-dbx-text mb-1">{label}</label>
+      {description && <p className="text-[13px] text-dbx-text-secondary mb-2">{description}</p>}
       {children}
     </div>
   )
@@ -286,7 +286,7 @@ function SettingsField({ label, description, children }) {
 function ToggleSwitch({ checked, onChange }) {
   return (
     <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}
-      className={`relative inline-flex items-center h-5 rounded-full transition-colors duration-200 ${checked ? 'bg-[#2272B4]' : 'bg-[#D8D8D8]'}`}
+      className={`relative inline-flex items-center h-5 rounded-full transition-colors duration-200 ${checked ? 'bg-dbx-blue' : 'bg-dbx-disabled'}`}
       style={{ width: '40px' }}>
       <span className={`inline-block w-4 h-4 rounded-full bg-white shadow transform transition-transform duration-200 ${checked ? 'translate-x-[21px]' : 'translate-x-[1px]'}`} />
     </button>

@@ -66,7 +66,7 @@ export default function GatewayDetailPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader2 className="w-6 h-6 animate-spin text-[#6F6F6F]" />
+        <Loader2 className="w-6 h-6 animate-spin text-dbx-text-secondary" />
       </div>
     )
   }
@@ -74,7 +74,7 @@ export default function GatewayDetailPage() {
   if (error) {
     return (
       <div className="p-6">
-        <Link to="/" className="text-[#0E538B] font-medium text-[13px] hover:underline">
+        <Link to="/" className="text-dbx-text-link font-medium text-[13px] hover:underline">
           Genie Cache Gateway &gt;
         </Link>
         <div className="mt-4 text-[13px] text-red-600">Error: {error}</div>
@@ -110,17 +110,17 @@ export default function GatewayDetailPage() {
       {/* Header */}
       <div className="px-6 pt-5 pb-0">
         {/* Breadcrumb */}
-        <Link to="/" className="text-[#0E538B] font-medium text-[13px] hover:underline">
+        <Link to="/" className="text-dbx-text-link font-medium text-[13px] hover:underline">
           Genie Cache Gateway &gt;
         </Link>
 
         {/* Title row */}
         <div className="flex items-center justify-between mt-2 mb-4">
-          <h1 className="text-[22px] font-medium text-[#161616]">{gateway.name}</h1>
+          <h1 className="text-[22px] font-medium text-dbx-text">{gateway.name}</h1>
           <div className="flex items-center gap-3">
             <button
               onClick={() => navigate(`/playground/${id}`)}
-              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors"
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors"
             >
               <Play size={14} />
               Test in Playground
@@ -128,7 +128,7 @@ export default function GatewayDetailPage() {
             <button
               onClick={handleDelete}
               disabled={deleting}
-              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
             >
               <Trash2 size={14} />
               {deleting ? 'Deleting...' : 'Delete gateway'}
@@ -137,15 +137,15 @@ export default function GatewayDetailPage() {
         </div>
 
         {/* Tabs */}
-        <div className="flex" style={{ borderBottom: '1px solid #EBEBEB' }}>
+        <div className="flex border-b border-dbx-border">
           {TABS.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
               className={`px-0 py-1 mr-6 text-[13px] font-medium transition-colors ${
                 activeTab === tab.id
-                  ? 'text-[#161616] border-b-2 border-[#161616]'
-                  : 'text-[#6F6F6F] border-b-2 border-transparent hover:text-[#161616]'
+                  ? 'text-dbx-text border-b-2 border-dbx-text'
+                  : 'text-dbx-text-secondary border-b-2 border-transparent hover:text-dbx-text'
               }`}
             >
               {tab.label}
@@ -163,10 +163,9 @@ export default function GatewayDetailPage() {
 
         {/* Right sidebar */}
         <div
-          className="w-[350px] bg-white overflow-auto px-6 py-5 flex-shrink-0"
-          style={{ borderLeft: '1px solid #EBEBEB' }}
+          className="w-[350px] bg-dbx-bg overflow-auto px-6 py-5 flex-shrink-0 border-l border-dbx-border"
         >
-          <h3 className="text-[13px] font-medium text-[#161616] mb-4">
+          <h3 className="text-[13px] font-medium text-dbx-text mb-4">
             Gateway Endpoint Details
           </h3>
 
@@ -218,13 +217,13 @@ function SidebarField({ label, value, copyable, onCopy }) {
 
   return (
     <div className="mb-4">
-      <div className="text-[13px] text-[#6F6F6F] mb-0.5">{label}</div>
+      <div className="text-[13px] text-dbx-text-secondary mb-0.5">{label}</div>
       <div className="flex items-center gap-1.5">
-        <span className="text-[13px] text-[#161616] break-all">{value}</span>
+        <span className="text-[13px] text-dbx-text break-all">{value}</span>
         {copyable && (
           <button
             onClick={handleCopy}
-            className="text-[#6F6F6F] hover:text-[#161616] flex-shrink-0"
+            className="text-dbx-text-secondary hover:text-dbx-text flex-shrink-0"
             title={copied ? 'Copied!' : 'Copy'}
           >
             <Copy size={13} />

@@ -56,7 +56,7 @@ export default function GatewayListPage() {
       width: '22%',
       render: (val, row) => (
         <span
-          className="text-[#0E538B] hover:underline cursor-pointer font-medium"
+          className="text-dbx-text-link hover:underline cursor-pointer font-medium"
           onClick={(e) => {
             e.stopPropagation()
             navigate(`/gateways/${row.id}`)
@@ -85,7 +85,7 @@ export default function GatewayListPage() {
       width: '7%',
       align: 'center',
       render: (val) => (
-        <span className={val !== false ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val !== false ? 'Enabled' : 'Disabled'}>
+        <span className={val !== false ? 'text-dbx-blue' : 'text-dbx-border-input'} title={val !== false ? 'Enabled' : 'Disabled'}>
           {val !== false ? '●' : '○'}
         </span>
       ),
@@ -110,7 +110,7 @@ export default function GatewayListPage() {
       width: '10%',
       align: 'center',
       render: (val) => (
-        <span className={val ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val ? 'Enabled' : 'Disabled'}>
+        <span className={val ? 'text-dbx-blue' : 'text-dbx-border-input'} title={val ? 'Enabled' : 'Disabled'}>
           {val ? '●' : '○'}
         </span>
       ),
@@ -121,7 +121,7 @@ export default function GatewayListPage() {
       width: '9%',
       align: 'center',
       render: (val) => (
-        <span className={val ? 'text-[#2272B4]' : 'text-[#CBCBCB]'} title={val ? 'Enabled' : 'Disabled'}>
+        <span className={val ? 'text-dbx-blue' : 'text-dbx-border-input'} title={val ? 'Enabled' : 'Disabled'}>
           {val ? '●' : '○'}
         </span>
       ),
@@ -148,14 +148,14 @@ export default function GatewayListPage() {
       {/* Header */}
       <div className="flex items-start justify-between mb-5">
         <div>
-          <h1 className="text-[22px] font-medium text-[#161616]">Genie Cache Gateway</h1>
-          <p className="text-[13px] text-[#6F6F6F] mt-0.5">
+          <h1 className="text-[22px] font-medium text-dbx-text">Genie Cache Gateway</h1>
+          <p className="text-[13px] text-dbx-text-secondary mt-0.5">
             Intelligent caching gateway for Databricks Genie API
           </p>
         </div>
         <button
           onClick={() => setShowCreate(true)}
-          className="flex items-center gap-2 bg-[#2272B4] text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-[#1b5e96] transition-colors"
+          className="flex items-center gap-2 bg-dbx-blue text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-dbx-blue-dark transition-colors"
         >
           <Plus size={16} />
           Gateway
@@ -166,13 +166,13 @@ export default function GatewayListPage() {
       {!loading && gateways.length > 0 && (
         <div className="mb-4">
           <div className="relative w-72">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6F6F6F]" />
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-dbx-text-secondary" />
             <input
               type="text"
               placeholder="Search by name or destination"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full h-8 pl-9 pr-3 border border-[#CBCBCB] rounded text-[13px] text-[#161616] placeholder:text-[#6F6F6F] focus:outline-none focus:border-[#2272B4]"
+              className="w-full h-8 pl-9 pr-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue bg-dbx-bg"
             />
           </div>
         </div>
@@ -181,14 +181,14 @@ export default function GatewayListPage() {
       {/* Content */}
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 size={24} className="animate-spin text-[#6F6F6F]" />
+          <Loader2 size={24} className="animate-spin text-dbx-text-secondary" />
         </div>
       ) : error ? (
         <div className="text-center py-12">
           <p className="text-[13px] text-red-600 mb-2">{error}</p>
           <button
             onClick={fetchGateways}
-            className="text-[13px] text-[#0E538B] hover:underline"
+            className="text-[13px] text-dbx-text-link hover:underline"
           >
             Retry
           </button>
@@ -201,7 +201,7 @@ export default function GatewayListPage() {
           action={
             <button
               onClick={() => setShowCreate(true)}
-              className="flex items-center gap-2 bg-[#2272B4] text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-[#1b5e96] transition-colors"
+              className="flex items-center gap-2 bg-dbx-blue text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-dbx-blue-dark transition-colors"
             >
               <Plus size={16} />
               Create your first gateway

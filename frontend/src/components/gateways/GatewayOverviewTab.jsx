@@ -63,16 +63,16 @@ print(response.json())`
       {/* Endpoint URL bar */}
       <div className="flex items-center gap-3">
         <StatusBadge status="active" />
-        <div className="flex-1 flex items-center h-8 border border-[#CBCBCB] rounded overflow-hidden bg-white">
+        <div className="flex-1 flex items-center h-8 border border-dbx-border-input rounded overflow-hidden bg-dbx-bg">
           <input
             type="text"
             readOnly
             value={endpointUrl}
-            className="flex-1 h-full px-3 text-[13px] text-[#161616] bg-transparent border-none outline-none"
+            className="flex-1 h-full px-3 text-[13px] text-dbx-text bg-transparent border-none outline-none"
           />
           <button
             onClick={copyUrl}
-            className="h-full px-3 text-[#6F6F6F] hover:text-[#161616] hover:bg-[#F7F7F7] transition-colors border-l border-[#CBCBCB]"
+            className="h-full px-3 text-dbx-text-secondary hover:text-dbx-text hover:bg-dbx-neutral-hover transition-colors border-l border-dbx-border-input"
             title={copied ? 'Copied!' : 'Copy URL'}
           >
             <Copy size={14} />
@@ -80,7 +80,7 @@ print(response.json())`
         </div>
         <button
           onClick={() => navigate(`/playground/${gateway.id}`)}
-          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors whitespace-nowrap"
+          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors whitespace-nowrap"
         >
           <Play size={14} />
           Chat in playground
@@ -88,29 +88,29 @@ print(response.json())`
       </div>
 
       {/* View starter code */}
-      <div className="rounded border border-[#EBEBEB] overflow-hidden">
+      <div className="rounded border border-dbx-border overflow-hidden">
         <button
           onClick={() => setCodeOpen(!codeOpen)}
-          className="w-full flex items-center gap-2 px-4 py-3 bg-[#F7F7F7] hover:bg-[#EBEBEB] transition-colors text-left"
+          className="w-full flex items-center gap-2 px-4 py-3 bg-dbx-sidebar hover:bg-dbx-neutral-hover transition-colors text-left"
         >
           {codeOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          <Terminal size={16} className="text-[#6F6F6F]" />
-          <span className="text-[13px] font-medium text-[#161616]">View starter code</span>
-          <span className="ml-auto text-[13px] text-[#6F6F6F] border border-[#CBCBCB] rounded px-2 py-0.5 bg-white">
+          <Terminal size={16} className="text-dbx-text-secondary" />
+          <span className="text-[13px] font-medium text-dbx-text">View starter code</span>
+          <span className="ml-auto text-[13px] text-dbx-text-secondary border border-dbx-border-input rounded px-2 py-0.5 bg-dbx-bg">
             Genie Cache API
           </span>
         </button>
 
         {codeOpen && (
-          <div className="border-t border-[#EBEBEB]">
+          <div className="border-t border-dbx-border">
             {/* Code tabs */}
-            <div className="flex border-b border-[#EBEBEB] bg-[#F7F7F7]">
+            <div className="flex border-b border-dbx-border bg-dbx-sidebar">
               <button
                 onClick={() => setCodeTab('curl')}
                 className={`px-4 py-2 text-[13px] font-medium transition-colors ${
                   codeTab === 'curl'
-                    ? 'text-[#161616] border-b-2 border-[#161616]'
-                    : 'text-[#6F6F6F] border-b-2 border-transparent'
+                    ? 'text-dbx-text border-b-2 border-dbx-text'
+                    : 'text-dbx-text-secondary border-b-2 border-transparent'
                 }`}
               >
                 cURL
@@ -119,8 +119,8 @@ print(response.json())`
                 onClick={() => setCodeTab('python')}
                 className={`px-4 py-2 text-[13px] font-medium transition-colors ${
                   codeTab === 'python'
-                    ? 'text-[#161616] border-b-2 border-[#161616]'
-                    : 'text-[#6F6F6F] border-b-2 border-transparent'
+                    ? 'text-dbx-text border-b-2 border-dbx-text'
+                    : 'text-dbx-text-secondary border-b-2 border-transparent'
                 }`}
               >
                 Python
@@ -129,14 +129,14 @@ print(response.json())`
 
             {/* Code block */}
             <div className="relative">
-              <pre className="p-4 text-[13px] font-mono text-[#161616] bg-[#F7F7F7] overflow-x-auto whitespace-pre-wrap">
+              <pre className="p-4 text-[13px] font-mono text-dbx-text bg-dbx-sidebar overflow-x-auto whitespace-pre-wrap">
                 {codeTab === 'curl' ? curlCode : pythonCode}
               </pre>
               <button
                 onClick={() => {
                   navigator.clipboard.writeText(codeTab === 'curl' ? curlCode : pythonCode)
                 }}
-                className="absolute top-3 right-3 p-1.5 text-[#6F6F6F] hover:text-[#161616] hover:bg-white rounded transition-colors"
+                className="absolute top-3 right-3 p-1.5 text-dbx-text-secondary hover:text-dbx-text hover:bg-dbx-bg rounded transition-colors"
                 title="Copy code"
               >
                 <Copy size={14} />
@@ -148,17 +148,17 @@ print(response.json())`
 
       {/* Quick stats row */}
       <div className="grid grid-cols-3 gap-4">
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{cacheEntries}</div>
-          <div className="text-[13px] text-[#6F6F6F]">Cache entries</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{cacheEntries}</div>
+          <div className="text-[13px] text-dbx-text-secondary">Cache entries</div>
         </div>
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{totalQueries}</div>
-          <div className="text-[13px] text-[#6F6F6F]">Total queries (7d)</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{totalQueries}</div>
+          <div className="text-[13px] text-dbx-text-secondary">Total queries (7d)</div>
         </div>
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <div className="text-[22px] font-medium text-[#161616]">{hitRate}%</div>
-          <div className="text-[13px] text-[#6F6F6F]">Cache hit rate</div>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <div className="text-[22px] font-medium text-dbx-text">{hitRate}%</div>
+          <div className="text-[13px] text-dbx-text-secondary">Cache hit rate</div>
         </div>
       </div>
     </div>

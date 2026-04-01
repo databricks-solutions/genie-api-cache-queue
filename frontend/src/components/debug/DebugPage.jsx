@@ -18,7 +18,7 @@ function StatusIcon({ value }) {
 
 function formatValue(key, value) {
   if (isSensitive(key)) return '••••••••'
-  if (value === null || value === undefined) return <span className="text-[#CBCBCB] italic">null</span>
+  if (value === null || value === undefined) return <span className="text-dbx-text-secondary italic">null</span>
   if (typeof value === 'boolean') return String(value)
   if (Array.isArray(value)) return `[${value.length} items]`
   if (typeof value === 'object') return JSON.stringify(value)
@@ -28,12 +28,12 @@ function formatValue(key, value) {
 
 function ConfigRow({ label, value }) {
   return (
-    <div className="flex items-center justify-between py-1.5 border-b border-[#EBEBEB] last:border-0 gap-4">
+    <div className="flex items-center justify-between py-1.5 border-b border-dbx-border last:border-0 gap-4">
       <div className="flex items-center gap-2 min-w-0">
         <StatusIcon value={value} />
-        <code className="text-[12px] text-[#161616] font-mono truncate">{label}</code>
+        <code className="text-[12px] text-dbx-text font-mono truncate">{label}</code>
       </div>
-      <span className="text-[12px] text-[#6F6F6F] font-mono text-right flex-shrink-0 max-w-[55%] truncate">
+      <span className="text-[12px] text-dbx-text-secondary font-mono text-right flex-shrink-0 max-w-[55%] truncate">
         {formatValue(label, value)}
       </span>
     </div>
@@ -42,18 +42,18 @@ function ConfigRow({ label, value }) {
 
 function StatusCard({ title, ok, details, loading }) {
   return (
-    <div className={`rounded p-4 border ${ok ? 'border-green-200 bg-[#F3FCF6]' : 'border-[#EBEBEB] bg-white'}`}>
+    <div className={`rounded p-4 border ${ok ? 'border-green-200 bg-dbx-status-green-bg' : 'border-dbx-border bg-dbx-bg'}`}>
       <div className="flex items-center gap-2 mb-1">
         {loading ? (
-          <Loader2 className="w-4 h-4 animate-spin text-[#6F6F6F]" />
+          <Loader2 className="w-4 h-4 animate-spin text-dbx-text-secondary" />
         ) : ok ? (
           <CheckCircle className="w-4 h-4 text-green-600" />
         ) : (
           <XCircle className="w-4 h-4 text-red-500" />
         )}
-        <span className="text-[13px] font-medium text-[#161616]">{title}</span>
+        <span className="text-[13px] font-medium text-dbx-text">{title}</span>
       </div>
-      {details && <p className="text-[12px] text-[#6F6F6F] ml-6">{details}</p>}
+      {details && <p className="text-[12px] text-dbx-text-secondary ml-6">{details}</p>}
     </div>
   )
 }
@@ -113,13 +113,13 @@ export default function DebugPage() {
     <div className="p-6 max-w-3xl">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-[22px] font-medium text-[#161616]">Debug</h1>
-          <p className="text-[13px] text-[#6F6F6F]">System health and configuration diagnostics</p>
+          <h1 className="text-[22px] font-medium text-dbx-text">Debug</h1>
+          <p className="text-[13px] text-dbx-text-secondary">System health and configuration diagnostics</p>
         </div>
         <button
           onClick={fetchAll}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           Refresh
@@ -131,8 +131,8 @@ export default function DebugPage() {
       )}
 
       {/* System Status */}
-      <div className="bg-white border border-[#EBEBEB] rounded p-4 mb-4">
-        <h2 className="text-[14px] font-medium text-[#161616] mb-3">System Status</h2>
+      <div className="bg-dbx-bg border border-dbx-border rounded p-4 mb-4">
+        <h2 className="text-[14px] font-medium text-dbx-text mb-3">System Status</h2>
         <div className="grid grid-cols-3 gap-3">
           <StatusCard
             title="Backend API"
@@ -156,13 +156,13 @@ export default function DebugPage() {
       </div>
 
       {/* Lakebase Connection Test */}
-      <div className="bg-white border border-[#EBEBEB] rounded p-4 mb-4">
+      <div className="bg-dbx-bg border border-dbx-border rounded p-4 mb-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-[14px] font-medium text-[#161616]">Lakebase Connection</h2>
+          <h2 className="text-[14px] font-medium text-dbx-text">Lakebase Connection</h2>
           <button
             onClick={testConnection}
             disabled={testingConn}
-            className="inline-flex items-center gap-1.5 h-7 px-3 text-[12px] font-medium text-[#161616] border border-[#CBCBCB] rounded hover:bg-[#F7F7F7] transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 h-7 px-3 text-[12px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
           >
             {testingConn ? <Loader2 size={12} className="animate-spin" /> : null}
             {testingConn ? 'Testing…' : 'Test Connection'}
@@ -170,17 +170,17 @@ export default function DebugPage() {
         </div>
 
         {!connResult && !testingConn && (
-          <p className="text-[13px] text-[#6F6F6F]">Click "Test Connection" to verify Lakebase connectivity and table status.</p>
+          <p className="text-[13px] text-dbx-text-secondary">Click "Test Connection" to verify Lakebase connectivity and table status.</p>
         )}
 
         {testingConn && (
-          <div className="flex items-center gap-2 text-[13px] text-[#6F6F6F]">
+          <div className="flex items-center gap-2 text-[13px] text-dbx-text-secondary">
             <Loader2 size={14} className="animate-spin" /> Connecting to Lakebase…
           </div>
         )}
 
         {connResult && (
-          <div className={`rounded p-3 text-[13px] border ${connResult.connected ? 'bg-[#F3FCF6] border-green-200' : 'bg-red-50 border-red-200'}`}>
+          <div className={`rounded p-3 text-[13px] border ${connResult.connected ? 'bg-dbx-status-green-bg border-green-200' : 'bg-red-50 border-red-200'}`}>
             {connResult.connected ? (
               <>
                 <div className="flex items-center gap-1.5 font-medium text-green-700 mb-2">
@@ -214,18 +214,18 @@ export default function DebugPage() {
 
       {/* Gateways */}
       {gatewayCount > 0 && (
-        <div className="bg-white border border-[#EBEBEB] rounded p-4 mb-4">
-          <h2 className="text-[14px] font-medium text-[#161616] mb-3">Active Gateways ({gatewayCount})</h2>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4 mb-4">
+          <h2 className="text-[14px] font-medium text-dbx-text mb-3">Active Gateways ({gatewayCount})</h2>
           <div className="space-y-2">
             {gateways.map(gw => (
-              <div key={gw.id} className="flex items-center justify-between py-2 border-b border-[#EBEBEB] last:border-0">
+              <div key={gw.id} className="flex items-center justify-between py-2 border-b border-dbx-border last:border-0">
                 <div>
-                  <span className="text-[13px] font-medium text-[#161616]">{gw.name}</span>
-                  <span className="ml-2 text-[11px] text-[#6F6F6F] font-mono">{gw.id}</span>
+                  <span className="text-[13px] font-medium text-dbx-text">{gw.name}</span>
+                  <span className="ml-2 text-[11px] text-dbx-text-secondary font-mono">{gw.id}</span>
                 </div>
-                <div className="flex items-center gap-3 text-[12px] text-[#6F6F6F]">
+                <div className="flex items-center gap-3 text-[12px] text-dbx-text-secondary">
                   <span>ID: <code className="font-mono">{gw.id?.substring(0, 12)}…</code></span>
-                  <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${gw.status === 'active' ? 'bg-[#F3FCF6] text-green-700' : 'bg-[#F7F7F7] text-[#6F6F6F]'}`}>
+                  <span className={`px-1.5 py-0.5 rounded text-[11px] font-medium ${gw.status === 'active' ? 'bg-dbx-status-green-bg text-green-700' : 'bg-dbx-sidebar text-dbx-text-secondary'}`}>
                     {gw.status}
                   </span>
                 </div>
@@ -237,9 +237,9 @@ export default function DebugPage() {
 
       {/* Server Config (safe fields only) */}
       {safeConfig && (
-        <div className="bg-white border border-[#EBEBEB] rounded p-4">
-          <h2 className="text-[14px] font-medium text-[#161616] mb-3">Backend Configuration</h2>
-          <p className="text-[12px] text-[#6F6F6F] mb-3">Active server settings. Sensitive values are hidden.</p>
+        <div className="bg-dbx-bg border border-dbx-border rounded p-4">
+          <h2 className="text-[14px] font-medium text-dbx-text mb-3">Backend Configuration</h2>
+          <p className="text-[12px] text-dbx-text-secondary mb-3">Active server settings. Sensitive values are hidden.</p>
           <div>
             {Object.entries(safeConfig).map(([key, value]) => (
               <ConfigRow key={key} label={key} value={value} />

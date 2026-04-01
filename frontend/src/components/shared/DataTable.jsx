@@ -29,7 +29,7 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
 
   if (!data || data.length === 0) {
     return (
-      <div className="text-center py-12 text-[13px] text-[#6F6F6F]">
+      <div className="text-center py-12 text-[13px] text-dbx-text-secondary">
         {emptyMessage}
       </div>
     )
@@ -43,10 +43,10 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
             {columns.map((col) => (
               <th
                 key={col.key}
-                className={`text-[13px] font-medium text-[#161616] bg-white ${col.align === 'center' ? 'text-center' : 'text-left'} relative`}
+                className={`text-[13px] font-medium text-dbx-text bg-dbx-bg ${col.align === 'center' ? 'text-center' : 'text-left'} relative`}
                 style={{
                   padding: '4px 8px',
-                  borderBottom: '1px solid #EBEBEB',
+                  borderBottom: '1px solid var(--dbx-border)',
                   width: colWidths[col.key] ? `${colWidths[col.key]}px` : (col.width || 'auto'),
                   overflow: 'hidden',
                 }}
@@ -54,7 +54,7 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
                 {col.label}
                 <div
                   onMouseDown={(e) => handleMouseDown(e, col.key)}
-                  className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-[#2272B4]/30"
+                  className="absolute top-0 right-0 bottom-0 w-1 cursor-col-resize hover:bg-dbx-blue/30"
                 />
               </th>
             ))}
@@ -64,16 +64,16 @@ export default function DataTable({ columns, data, onRowClick, emptyMessage = 'N
           {data.map((row, rowIdx) => (
             <tr
               key={row.id || rowIdx}
-              className={`hover:bg-[#F7F7F7] ${onRowClick ? 'cursor-pointer' : ''}`}
+              className={`hover:bg-dbx-neutral-hover ${onRowClick ? 'cursor-pointer' : ''}`}
               onClick={() => onRowClick?.(row)}
             >
               {columns.map((col) => (
                 <td
                   key={col.key}
-                  className={`text-[13px] text-[#161616] ${col.align === 'center' ? 'text-center' : ''}`}
+                  className={`text-[13px] text-dbx-text ${col.align === 'center' ? 'text-center' : ''}`}
                   style={{
                     padding: '8px',
-                    borderBottom: '1px solid #EBEBEB',
+                    borderBottom: '1px solid var(--dbx-border)',
                     verticalAlign: 'middle',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',

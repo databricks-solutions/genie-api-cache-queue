@@ -13,24 +13,24 @@ import DebugPage from './components/debug/DebugPage'
 function TopBar({ onToggleSidebar }) {
   const navigate = useNavigate()
   return (
-    <header className="h-[48px] min-h-[48px] w-full bg-[#F7F7F7] flex items-center justify-between px-3">
+    <header className="h-[48px] min-h-[48px] w-full bg-dbx-sidebar flex items-center justify-between px-3 border-b border-dbx-border">
       <div className="flex items-center gap-1.5">
         <button
           onClick={onToggleSidebar}
-          className="p-1.5 rounded hover:bg-[rgba(0,0,0,0.06)] transition-colors"
+          className="p-1.5 rounded hover:bg-dbx-neutral-hover transition-colors"
           title="Toggle sidebar"
         >
-          <PanelLeft size={18} className="text-[#6F6F6F]" />
+          <PanelLeft size={18} className="text-dbx-text-secondary" />
         </button>
         <img src="/genie-icon-alt.svg" alt="Genie" width="24" height="24" />
-        <span className="text-[16px] font-medium text-[#0B2026]" style={{ fontFamily: '"DM Sans", sans-serif' }}>Genie Cache Gateway</span>
+        <span className="text-[16px] font-medium text-dbx-text" style={{ fontFamily: '"DM Sans", sans-serif' }}>Genie Cache Gateway</span>
       </div>
       <button
         onClick={() => navigate('/settings')}
-        className="p-1.5 rounded hover:bg-[rgba(0,0,0,0.06)] transition-colors"
+        className="p-1.5 rounded hover:bg-dbx-neutral-hover transition-colors"
         title="Settings"
       >
-        <Settings size={18} className="text-[#6F6F6F]" />
+        <Settings size={18} className="text-dbx-text-secondary" />
       </button>
     </header>
   )
@@ -40,7 +40,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
 
   return (
-    <div className="flex flex-col h-screen bg-[#F7F7F7]">
+    <div className="flex flex-col h-screen bg-dbx-sidebar">
       <TopBar onToggleSidebar={() => setSidebarOpen(v => !v)} />
       <div className="flex flex-1 min-h-0">
         <div
@@ -49,7 +49,7 @@ function App() {
         >
           <Sidebar />
         </div>
-        <main className="flex-1 overflow-hidden rounded-lg bg-white border border-[#EBEBEB] mb-1 mr-1" style={{ boxShadow: 'rgba(0,0,0,0.05) 0px 2px 3px -1px, rgba(0,0,0,0.02) 0px 1px 0px 0px' }}>
+        <main className="flex-1 overflow-hidden rounded-lg bg-dbx-bg border border-dbx-border mb-1 mr-1" style={{ boxShadow: 'rgba(0,0,0,0.05) 0px 2px 3px -1px, rgba(0,0,0,0.02) 0px 1px 0px 0px' }}>
           <div className="h-full overflow-auto">
             <Routes>
               <Route path="/" element={<GatewayListPage />} />
