@@ -204,7 +204,7 @@ async def _process_genie_background(
 
     last_error = None
     attempt = 0
-    max_rate_limit_waits = 12  # 5s base, 10s cap per wait
+    max_rate_limit_waits = 12  # worst case 12 × 10s = 120s
 
     while attempt <= max_retries:
         # Wait for rate limit slot (does NOT consume an attempt)
@@ -323,7 +323,8 @@ async def _process_genie_background(
             return
 
         except GenieRateLimitError as e:
-            logger.info("Genie 429 in background, waiting %ss (attempt %d/%d)", e.retry_after, attempt + 1, max_retries + 1)
+            attempt += 1
+            logger.info("Genie 429 in background, waiting %ss (attempt %d/%d)", e.retry_after, attempt, max_retries + 1)
             await asyncio.sleep(e.retry_after)
             last_error = str(e)
             continue
@@ -503,7 +504,7 @@ async def _handle_query(
         gateway_id=gateway.get("id") if gateway else None,
     ))
 
-    def _on_task_done(t):  # sync callback — runs atomically, no lock needed
+    def _on_task_done(t):
         exc = t.exception() if not t.cancelled() else None
         if exc:
             logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
@@ -515,6 +516,8 @@ async def _handle_query(
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
                 "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
             }
+            _release_message_lock(msg_id)
+        elif t.cancelled():
             _release_message_lock(msg_id)
 
     task.add_done_callback(_on_task_done)
