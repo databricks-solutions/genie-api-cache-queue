@@ -193,7 +193,7 @@ async def _process_genie_background(
 
     last_error = None
     attempt = 0
-    max_rate_limit_waits = 12  # Max 12 waits with exponential backoff (~60-70s total)
+    max_rate_limit_waits = 12  # Max 12 waits with exponential backoff (cap 10s per wait)
 
     while attempt <= max_retries:
         # Wait for rate limit slot (does NOT consume an attempt)
