@@ -292,6 +292,7 @@ async def _process_genie_background(
                         "sql_query": sql_query,
                         "result": actual_result,
                     }
+                _release_message_lock(msg_id)
 
                 # Save query log
                 try:
@@ -306,8 +307,6 @@ async def _process_genie_background(
                     )
                 except Exception as e:
                     logger.warning("Failed to save cache miss query log: %s", e)
-
-                _release_message_lock(msg_id)
                 return
 
             # Non-COMPLETED terminal status
