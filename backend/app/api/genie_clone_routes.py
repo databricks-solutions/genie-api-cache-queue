@@ -61,6 +61,10 @@ def _get_message_lock(msg_id: str) -> asyncio.Lock:
     return _message_locks[msg_id]
 
 
+def _release_message_lock(msg_id: str) -> None:
+    _message_locks.pop(msg_id, None)
+
+
 def _extract_token(request: Request) -> str:
     """Extract auth token from request headers."""
     return extract_bearer_token(request)
@@ -200,7 +204,7 @@ async def _process_genie_background(
 
     last_error = None
     attempt = 0
-    max_rate_limit_waits = 12  # Max 12 waits with exponential backoff (cap 10s per wait)
+    max_rate_limit_waits = 12  # 5s base, 10s cap per wait
 
     while attempt <= max_retries:
         # Wait for rate limit slot (does NOT consume an attempt)
@@ -210,7 +214,7 @@ async def _process_genie_background(
             if rate_limit_waits > max_rate_limit_waits:
                 logger.warning("Background rate limit wait exhausted for msg_id=%s", msg_id)
                 break
-            wait = exponential_backoff(rate_limit_waits - 1, base=1.0, cap=10.0)
+            wait = exponential_backoff(rate_limit_waits - 1, base=5.0, cap=10.0)
             logger.info("Background rate limited, waiting %.1fs (wait %d/%d)", wait, rate_limit_waits, max_rate_limit_waits)
             await asyncio.sleep(wait)
 
@@ -303,6 +307,7 @@ async def _process_genie_background(
                 except Exception as e:
                     logger.warning("Failed to save cache miss query log: %s", e)
 
+                _release_message_lock(msg_id)
                 return
 
             # Non-COMPLETED terminal status
@@ -315,6 +320,7 @@ async def _process_genie_background(
                     "error": result.get("error"),
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
+            _release_message_lock(msg_id)
             return
 
         except GenieRateLimitError as e:
@@ -333,6 +339,7 @@ async def _process_genie_background(
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
+            _release_message_lock(msg_id)
             return
         except Exception as e:
             last_error = str(e)
@@ -355,6 +362,7 @@ async def _process_genie_background(
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
             "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
         }
+    _release_message_lock(msg_id)
 
 
 # ---------------------------------------------------------------------------
@@ -495,9 +503,10 @@ async def _handle_query(
         gateway_id=gateway.get("id") if gateway else None,
     ))
 
-    async def _on_task_crashed(exc):
-        logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
-        async with _get_message_lock(msg_id):
+    def _on_task_done(t):
+        exc = t.exception() if not t.cancelled() else None
+        if exc:
+            logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
             _synthetic_messages[msg_id] = {
                 "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                 "message_id": msg_id,
@@ -506,11 +515,7 @@ async def _handle_query(
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
                 "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
             }
-
-    def _on_task_done(t):
-        exc = t.exception() if not t.cancelled() else None
-        if exc:
-            asyncio.ensure_future(_on_task_crashed(exc))
+            _release_message_lock(msg_id)
 
     task.add_done_callback(_on_task_done)
 
