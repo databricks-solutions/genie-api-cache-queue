@@ -44,6 +44,7 @@ genie_clone_router = APIRouter()
 # In-memory store for synthetic (cache / queued) messages & attachments
 # ---------------------------------------------------------------------------
 _synthetic_messages: dict[str, dict] = {}
+_message_locks: dict[str, asyncio.Lock] = {}
 
 CONV_PREFIX = "ccache_"
 MSG_PREFIX = "mcache_"
@@ -53,6 +54,12 @@ ATT_PREFIX = "acache_"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _get_message_lock(msg_id: str) -> asyncio.Lock:
+    if msg_id not in _message_locks:
+        _message_locks[msg_id] = asyncio.Lock()
+    return _message_locks[msg_id]
+
 
 def _extract_token(request: Request) -> str:
     """Extract auth token from request headers."""
@@ -207,13 +214,16 @@ async def _process_genie_background(
             logger.info("Background rate limited, waiting %.1fs (wait %d/%d)", wait, rate_limit_waits, max_rate_limit_waits)
             await asyncio.sleep(wait)
 
-        if msg_id in _synthetic_messages:
-            _synthetic_messages[msg_id].setdefault("_proxy", {})["stage"] = "processing_genie"
+        async with _get_message_lock(msg_id):
+            if msg_id in _synthetic_messages:
+                _synthetic_messages[msg_id].setdefault("_proxy", {})["stage"] = "processing_genie"
 
         try:
             if conversation_id and not conversation_id.startswith(CONV_PREFIX):
                 try:
                     result = await genie_service.send_message(space_id, conversation_id, query_text, rs)
+                except GenieConfigError:
+                    raise
                 except Exception:
                     logger.warning("send_message failed, falling back to start_conversation")
                     result = await genie_service.start_conversation(space_id, query_text, rs)
@@ -253,11 +263,12 @@ async def _process_genie_background(
                     "sql_query": sql_query,
                     "result": None,
                 }
-                _synthetic_messages[msg_id] = completed
-                _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-                for _att in completed.get("attachments", []):
-                    if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
-                        _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                async with _get_message_lock(msg_id):
+                    _synthetic_messages[msg_id] = completed
+                    _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                    for _att in completed.get("attachments", []):
+                        if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
+                            _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
 
                 # Now execute SQL (poll arriving here sees stage=processing_genie, not received)
                 actual_result = None
@@ -270,12 +281,13 @@ async def _process_genie_background(
                         logger.warning("execute_sql after cache miss failed: %s", e)
 
                 # Update _proxy to final state
-                _synthetic_messages[msg_id]["_proxy"] = {
-                    "stage": "completed",
-                    "from_cache": False,
-                    "sql_query": sql_query,
-                    "result": actual_result,
-                }
+                async with _get_message_lock(msg_id):
+                    _synthetic_messages[msg_id]["_proxy"] = {
+                        "stage": "completed",
+                        "from_cache": False,
+                        "sql_query": sql_query,
+                        "result": actual_result,
+                    }
 
                 # Save query log
                 try:
@@ -294,14 +306,15 @@ async def _process_genie_background(
                 return
 
             # Non-COMPLETED terminal status
-            _synthetic_messages[msg_id] = {
-                "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
-                "message_id": msg_id,
-                "status": result.get("status", "FAILED"),
-                "attachments": [],
-                "error": result.get("error"),
-                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
-            }
+            async with _get_message_lock(msg_id):
+                _synthetic_messages[msg_id] = {
+                    "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+                    "message_id": msg_id,
+                    "status": result.get("status", "FAILED"),
+                    "attachments": [],
+                    "error": result.get("error"),
+                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                }
             return
 
         except GenieRateLimitError as e:
@@ -311,14 +324,15 @@ async def _process_genie_background(
             continue
         except GenieConfigError as e:
             logger.error("Non-retryable Genie error %d for msg_id=%s: %s", e.status_code, msg_id, e.detail)
-            _synthetic_messages[msg_id] = {
-                "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
-                "message_id": msg_id,
-                "status": "FAILED",
-                "attachments": [],
-                "error": {"error": e.detail, "type": "CONFIG_ERROR"},
-                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
-            }
+            async with _get_message_lock(msg_id):
+                _synthetic_messages[msg_id] = {
+                    "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+                    "message_id": msg_id,
+                    "status": "FAILED",
+                    "attachments": [],
+                    "error": {"error": e.detail, "type": "CONFIG_ERROR"},
+                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                }
             return
         except Exception as e:
             last_error = str(e)
@@ -332,14 +346,15 @@ async def _process_genie_background(
 
     # Fallback: all retries exhausted — ALWAYS set FAILED so client stops polling
     logger.error("Background processing failed for msg_id=%s: %s", msg_id, last_error)
-    _synthetic_messages[msg_id] = {
-        "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
-        "message_id": msg_id,
-        "status": "FAILED",
-        "attachments": [],
-        "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
-        "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
-    }
+    async with _get_message_lock(msg_id):
+        _synthetic_messages[msg_id] = {
+            "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
+            "message_id": msg_id,
+            "status": "FAILED",
+            "attachments": [],
+            "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
+            "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +454,9 @@ async def _handle_query(
             "sql_query": sql_query,
             "result": actual_result,
         }
-        _synthetic_messages[msg_id] = response
-        _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+        async with _get_message_lock(msg_id):
+            _synthetic_messages[msg_id] = response
+            _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
 
         # Save query log
         try:
@@ -462,7 +478,8 @@ async def _handle_query(
     conv_id, msg_id, att_id = _make_synthetic_ids()
     response = _format_executing_response(conv_id, msg_id)
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
-    _synthetic_messages[msg_id] = response
+    async with _get_message_lock(msg_id):
+        _synthetic_messages[msg_id] = response
 
     task = asyncio.create_task(_process_genie_background(
         space_id=space_id,
@@ -478,10 +495,9 @@ async def _handle_query(
         gateway_id=gateway.get("id") if gateway else None,
     ))
 
-    def _on_task_done(t):
-        exc = t.exception() if not t.cancelled() else None
-        if exc:
-            logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
+    async def _on_task_crashed(exc):
+        logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
+        async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = {
                 "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                 "message_id": msg_id,
@@ -490,6 +506,11 @@ async def _handle_query(
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
                 "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
             }
+
+    def _on_task_done(t):
+        exc = t.exception() if not t.cancelled() else None
+        if exc:
+            asyncio.ensure_future(_on_task_crashed(exc))
 
     task.add_done_callback(_on_task_done)
 
