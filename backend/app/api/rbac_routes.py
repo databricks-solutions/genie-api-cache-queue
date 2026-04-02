@@ -48,8 +48,8 @@ async def get_my_role(req: Request):
 
 @rbac_router.get("/users")
 async def list_users(req: Request):
-    """List all explicit role assignments. Owner only."""
-    await _require_role(req, "owner")
+    """List all explicit role assignments. Manage or above."""
+    await _require_role(req, "manage")
     import app.services.database as _db
     return await _db.db_service.list_user_roles()
 
@@ -60,8 +60,8 @@ class RoleAssignment(BaseModel):
 
 @rbac_router.post("/users/{email}/role", status_code=200)
 async def assign_role(email: str, body: RoleAssignment, req: Request):
-    """Assign a role to a user. Owner only."""
-    identity, _, _ = await _require_role(req, "owner")
+    """Assign a role to a user. Manage or above."""
+    identity, _, _ = await _require_role(req, "manage")
     if body.role not in ROLES:
         raise HTTPException(
             status_code=400,
@@ -75,8 +75,8 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
 
 @rbac_router.delete("/users/{email}")
 async def remove_user_role(email: str, req: Request):
-    """Remove explicit role assignment (reverts to default 'use'). Owner only."""
-    identity, _, _ = await _require_role(req, "owner")
+    """Remove explicit role assignment (reverts to default 'use'). Manage or above."""
+    identity, _, _ = await _require_role(req, "manage")
     import app.services.database as _db
     await _db.db_service.delete_user_role(email)
     logger.info("Role removed: %s by %s", email, identity)
