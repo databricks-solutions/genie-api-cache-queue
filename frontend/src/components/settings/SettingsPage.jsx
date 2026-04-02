@@ -135,14 +135,14 @@ const SIDEBAR_BASE = [
     { id: 'ai-pipeline', label: 'AI Pipeline' },
   ]},
 ]
-const SIDEBAR_OWNER = [
+const SIDEBAR_MANAGE = [
   { category: 'Access Control', icon: Users, items: [{ id: 'users', label: 'Users' }] },
 ]
 
 /* ── Main component ── */
 export default function SettingsPage() {
   const { themeMode, setThemeMode } = useTheme()
-  const { isOwner } = useRole()
+  const { isOwner, isManage } = useRole()
   const [activeSection, setActiveSection] = useState('appearance')
 
   // Users management state (owner only)
@@ -210,9 +210,9 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Load users when owner navigates to users section
+  // Load users when manage/owner navigates to users section
   useEffect(() => {
-    if (isOwner && activeSection === 'users' && users.length === 0) {
+    if (isManage && activeSection === 'users' && users.length === 0) {
       setUsersLoading(true)
       api.listUsers()
         .then(setUsers)
@@ -241,7 +241,7 @@ export default function SettingsPage() {
     } catch { /* ignore */ }
   }
 
-  const SIDEBAR = isOwner ? [...SIDEBAR_BASE, ...SIDEBAR_OWNER] : SIDEBAR_BASE
+  const SIDEBAR = isManage ? [...SIDEBAR_BASE, ...SIDEBAR_MANAGE] : SIDEBAR_BASE
 
   const persistSettings = useCallback(async () => {
     const c = configRef.current
@@ -505,8 +505,8 @@ export default function SettingsPage() {
             </FieldRow>
           </div>
 
-          {/* ── Users (owner only) ── */}
-          {isOwner && (
+          {/* ── Users (manage+) ── */}
+          {isManage && (
             <div ref={el => sectionRefs.current['users'] = el} className="mb-10">
               <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Users</h2>
 
@@ -529,7 +529,7 @@ export default function SettingsPage() {
                   <tbody>
                     {[
                       { role: 'use',    q: true,  c: false, cd: false, mu: false },
-                      { role: 'manage', q: true,  c: true,  cd: false, mu: false },
+                      { role: 'manage', q: true,  c: true,  cd: false, mu: true  },
                       { role: 'owner',  q: true,  c: true,  cd: true,  mu: true  },
                     ].map(({ role, q, c, cd, mu }) => (
                       <tr key={role} className="border-t border-dbx-border">
