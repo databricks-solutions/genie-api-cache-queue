@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette } from 'lucide-react'
+import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, Trash2 } from 'lucide-react'
 import { api } from '../../services/api'
 import { useTheme } from '../../context/ThemeContext'
+import { useRole } from '../../context/RoleContext'
 
 const secondsToTtl = (seconds) => {
   if (!seconds || seconds === 0) return { value: '0', unit: 'hours' }
@@ -125,7 +126,7 @@ function EndpointSelect({ value, onChange, endpoints, loading, placeholder, filt
 }
 
 /* ── Sidebar structure ── */
-const SIDEBAR = [
+const SIDEBAR_BASE = [
   { category: 'Preferences', icon: Palette, items: [{ id: 'appearance', label: 'Appearance' }] },
   { category: 'Connection', icon: Database, items: [{ id: 'general', label: 'General' }] },
   { category: 'Gateway Defaults', icon: SlidersHorizontal, items: [
@@ -134,11 +135,22 @@ const SIDEBAR = [
     { id: 'ai-pipeline', label: 'AI Pipeline' },
   ]},
 ]
+const SIDEBAR_OWNER = [
+  { category: 'Access Control', icon: Users, items: [{ id: 'users', label: 'Users' }] },
+]
 
 /* ── Main component ── */
 export default function SettingsPage() {
   const { themeMode, setThemeMode } = useTheme()
+  const { isOwner } = useRole()
   const [activeSection, setActiveSection] = useState('general')
+
+  // Users management state (owner only)
+  const [users, setUsers] = useState([])
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [newUserEmail, setNewUserEmail] = useState('')
+  const [newUserRole, setNewUserRole] = useState('use')
+  const [userSaving, setUserSaving] = useState(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -197,6 +209,39 @@ export default function SettingsPage() {
       .finally(() => setEndpointsLoading(false))
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
+
+  // Load users when owner navigates to users section
+  useEffect(() => {
+    if (isOwner && activeSection === 'users' && users.length === 0) {
+      setUsersLoading(true)
+      api.listUsers()
+        .then(setUsers)
+        .catch(() => setUsers([]))
+        .finally(() => setUsersLoading(false))
+    }
+  }, [isOwner, activeSection])
+
+  const handleAddUser = async () => {
+    if (!newUserEmail.trim()) return
+    setUserSaving(true)
+    try {
+      await api.setUserRole(newUserEmail.trim(), newUserRole)
+      const updated = await api.listUsers()
+      setUsers(updated)
+      setNewUserEmail('')
+      setNewUserRole('use')
+    } catch { /* ignore */ }
+    finally { setUserSaving(false) }
+  }
+
+  const handleRemoveUser = async (email) => {
+    try {
+      await api.deleteUserRole(email)
+      setUsers(prev => prev.filter(u => u.identity !== email))
+    } catch { /* ignore */ }
+  }
+
+  const SIDEBAR = isOwner ? [...SIDEBAR_BASE, ...SIDEBAR_OWNER] : SIDEBAR_BASE
 
   const persistSettings = useCallback(async () => {
     const c = configRef.current
@@ -459,6 +504,122 @@ export default function SettingsPage() {
                 className={inputClass} style={{ width: '80px' }} />
             </FieldRow>
           </div>
+
+          {/* ── Users (owner only) ── */}
+          {isOwner && (
+            <div ref={el => sectionRefs.current['users'] = el} className="mb-10">
+              <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Users</h2>
+
+              <div className="py-4 text-[12px] text-dbx-text-secondary">
+                Workspace admins always have <span className="font-semibold text-dbx-text">Owner</span> access regardless of this list.
+              </div>
+
+              {/* Role matrix */}
+              <div className="mb-6 rounded border border-dbx-border overflow-hidden text-[12px]">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-dbx-sidebar text-dbx-text-secondary">
+                      <th className="text-left px-3 py-2 font-medium">Role</th>
+                      <th className="text-left px-3 py-2 font-medium">Query</th>
+                      <th className="text-left px-3 py-2 font-medium">Configure</th>
+                      <th className="text-left px-3 py-2 font-medium">Create/Delete</th>
+                      <th className="text-left px-3 py-2 font-medium">Manage Users</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[
+                      { role: 'use',    q: true,  c: false, cd: false, mu: false },
+                      { role: 'manage', q: true,  c: true,  cd: false, mu: false },
+                      { role: 'owner',  q: true,  c: true,  cd: true,  mu: true  },
+                    ].map(({ role, q, c, cd, mu }) => (
+                      <tr key={role} className="border-t border-dbx-border">
+                        <td className="px-3 py-2 font-medium capitalize text-dbx-text">{role}</td>
+                        {[q, c, cd, mu].map((v, i) => (
+                          <td key={i} className="px-3 py-2">
+                            <span className={v ? 'text-dbx-blue' : 'text-dbx-border-input'}>{v ? '●' : '○'}</span>
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* User list */}
+              {usersLoading ? (
+                <div className="flex items-center gap-2 py-4 text-[13px] text-dbx-text-secondary">
+                  <Loader2 size={14} className="animate-spin" /> Loading users...
+                </div>
+              ) : (
+                <div className="rounded border border-dbx-border overflow-hidden mb-4 text-[13px]">
+                  {users.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-dbx-text-secondary">
+                      No explicit role assignments. Add users below.
+                    </div>
+                  ) : (
+                    <table className="w-full">
+                      <thead>
+                        <tr className="bg-dbx-sidebar text-dbx-text-secondary text-[12px]">
+                          <th className="text-left px-3 py-2 font-medium">User</th>
+                          <th className="text-left px-3 py-2 font-medium">Role</th>
+                          <th className="text-left px-3 py-2 font-medium">Granted by</th>
+                          <th className="px-3 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {users.map((u) => (
+                          <tr key={u.identity} className="border-t border-dbx-border">
+                            <td className="px-3 py-2 text-dbx-text">{u.identity}</td>
+                            <td className="px-3 py-2 capitalize text-dbx-text">{u.role}</td>
+                            <td className="px-3 py-2 text-dbx-text-secondary">{u.granted_by || '—'}</td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                onClick={() => handleRemoveUser(u.identity)}
+                                className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1"
+                                title="Remove role"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+
+              {/* Add user */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="email"
+                  placeholder="user@company.com"
+                  value={newUserEmail}
+                  onChange={(e) => setNewUserEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
+                  className={`${inputClass} flex-1`}
+                  style={{ maxWidth: '260px' }}
+                />
+                <select
+                  value={newUserRole}
+                  onChange={(e) => setNewUserRole(e.target.value)}
+                  className={`${inputClass} bg-dbx-bg`}
+                  style={{ width: '110px' }}
+                >
+                  <option value="use">Use</option>
+                  <option value="manage">Manage</option>
+                  <option value="owner">Owner</option>
+                </select>
+                <button
+                  onClick={handleAddUser}
+                  disabled={userSaving || !newUserEmail.trim()}
+                  className="h-8 px-3 text-[13px] text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors disabled:opacity-50"
+                >
+                  {userSaving ? <Loader2 size={13} className="animate-spin" /> : 'Add'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* ── AI Pipeline ── */}
           <div ref={el => sectionRefs.current['ai-pipeline'] = el} className="mb-10">

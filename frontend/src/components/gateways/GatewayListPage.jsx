@@ -6,9 +6,11 @@ import DataTable from '../shared/DataTable'
 import StatusBadge from '../shared/StatusBadge'
 import EmptyState from '../shared/EmptyState'
 import GatewayCreateModal from './GatewayCreateModal'
+import { useRole } from '../../context/RoleContext'
 
 export default function GatewayListPage() {
   const navigate = useNavigate()
+  const { isOwner } = useRole()
   const [gateways, setGateways] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -153,13 +155,15 @@ export default function GatewayListPage() {
             Intelligent caching gateway for Databricks Genie API
           </p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="flex items-center gap-2 bg-dbx-blue text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-dbx-blue-dark transition-colors"
-        >
-          <Plus size={16} />
-          Gateway
-        </button>
+        {isOwner && (
+          <button
+            onClick={() => setShowCreate(true)}
+            className="flex items-center gap-2 bg-dbx-blue text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-dbx-blue-dark transition-colors"
+          >
+            <Plus size={16} />
+            Gateway
+          </button>
+        )}
       </div>
 
       {/* Search bar */}
@@ -198,7 +202,7 @@ export default function GatewayListPage() {
           icon={Layers}
           title="No gateways yet"
           description="Create a gateway to start caching Genie queries and accelerating your analytics."
-          action={
+          action={isOwner ? (
             <button
               onClick={() => setShowCreate(true)}
               className="flex items-center gap-2 bg-dbx-blue text-white rounded h-9 px-4 text-[13px] font-medium hover:bg-dbx-blue-dark transition-colors"
@@ -206,7 +210,7 @@ export default function GatewayListPage() {
               <Plus size={16} />
               Create your first gateway
             </button>
-          }
+          ) : null}
         />
       ) : (
         <DataTable
@@ -217,12 +221,13 @@ export default function GatewayListPage() {
         />
       )}
 
-      {/* Create modal */}
-      <GatewayCreateModal
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
-        onCreated={handleCreated}
-      />
+      {isOwner && (
+        <GatewayCreateModal
+          open={showCreate}
+          onClose={() => setShowCreate(false)}
+          onCreated={handleCreated}
+        />
+      )}
     </div>
   )
 }

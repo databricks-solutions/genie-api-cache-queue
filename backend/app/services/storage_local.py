@@ -30,6 +30,7 @@ class LocalStorageService:
         self.embeddings_file = embeddings_file
         self.cache_ttl_hours = cache_ttl_hours
         self._gateways: Dict = {}
+        self._user_roles: Dict = {}  # identity -> {role, granted_by, granted_at}
         self._ensure_data_dir()
         self._load_data()
 
@@ -217,6 +218,26 @@ class LocalStorageService:
         del self._gateways[gateway_id]
         logger.info("Gateway deleted: id=%s", gateway_id)
         return True
+
+    # --- User roles CRUD ---
+
+    def get_user_role(self, identity: str):
+        entry = self._user_roles.get(identity)
+        return entry["role"] if entry else None
+
+    def set_user_role(self, identity: str, role: str, granted_by: str = None):
+        self._user_roles[identity] = {
+            "identity": identity,
+            "role": role,
+            "granted_by": granted_by,
+            "granted_at": datetime.now().isoformat() + "Z",
+        }
+
+    def list_user_roles(self) -> list:
+        return sorted(self._user_roles.values(), key=lambda r: r.get("granted_at", ""), reverse=True)
+
+    def delete_user_role(self, identity: str):
+        self._user_roles.pop(identity, None)
 
     def get_gateway_stats(self, gateway_id: str) -> Dict:
         """Get cache and query stats for a gateway."""
