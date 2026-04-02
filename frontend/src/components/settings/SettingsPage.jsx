@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, Trash2 } from 'lucide-react'
 import { api } from '../../services/api'
 import { useTheme } from '../../context/ThemeContext'
@@ -145,12 +145,13 @@ export default function SettingsPage() {
   const { isOwner, isManage } = useRole()
   const [activeSection, setActiveSection] = useState('general')
 
-  // Users management state (owner only)
+  // Users management state (manage role and above)
   const [users, setUsers] = useState([])
   const [usersLoading, setUsersLoading] = useState(false)
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserRole, setNewUserRole] = useState('use')
   const [userSaving, setUserSaving] = useState(false)
+  const usersLoadedRef = useRef(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -210,24 +211,28 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Load users when manage/owner navigates to users section
+  // Load users once when manage/owner navigates to the users section
   useEffect(() => {
-    if (isManage && activeSection === 'users' && users.length === 0) {
+    if (isManage && activeSection === 'users' && !usersLoadedRef.current) {
+      usersLoadedRef.current = true
       setUsersLoading(true)
       api.listUsers()
         .then(setUsers)
         .catch(() => setUsers([]))
         .finally(() => setUsersLoading(false))
     }
-  }, [isOwner, activeSection])
+  }, [isManage, activeSection])
 
   const handleAddUser = async () => {
     if (!newUserEmail.trim()) return
     setUserSaving(true)
     try {
-      await api.setUserRole(newUserEmail.trim(), newUserRole)
-      const updated = await api.listUsers()
-      setUsers(updated)
+      const saved = await api.setUserRole(newUserEmail.trim(), newUserRole)
+      // Optimistic update — upsert locally using the response, no second round-trip
+      setUsers(prev => {
+        const without = prev.filter(u => u.identity !== saved.identity)
+        return [...without, saved]
+      })
       setNewUserEmail('')
       setNewUserRole('use')
     } catch { /* ignore */ }
@@ -241,7 +246,10 @@ export default function SettingsPage() {
     } catch { /* ignore */ }
   }
 
-  const SIDEBAR = isManage ? [...SIDEBAR_BASE, ...SIDEBAR_MANAGE] : SIDEBAR_BASE
+  const SIDEBAR = useMemo(
+    () => (isManage ? [...SIDEBAR_BASE, ...SIDEBAR_MANAGE] : SIDEBAR_BASE),
+    [isManage]
+  )
 
   const persistSettings = useCallback(async () => {
     const c = configRef.current
