@@ -24,19 +24,6 @@ gateway_router = APIRouter()
 settings = get_settings()
 
 
-def _get_token(req: Request) -> str:
-    """Extract bearer token from request headers."""
-    token = req.headers.get("X-Forwarded-Access-Token")
-    if not token:
-        auth = req.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:]
-    if not token:
-        token = get_effective_setting("lakebase_service_token") or settings.databricks_token
-    if not token:
-        raise HTTPException(status_code=401, detail="No authentication token available")
-    return token
-
 
 async def _require_role(req: Request, min_role: str):
     """Resolve caller's effective role and raise 403 if below min_role.
@@ -276,7 +263,7 @@ async def get_gateway_logs(gateway_id: str, limit: int = 50):
 async def list_genie_spaces(req: Request):
     """List available Genie Spaces from the workspace."""
     try:
-        token = _get_token(req)
+        token = extract_bearer_token(req)
         host = _get_host()
 
         url = f"{host}/api/2.0/genie/spaces"
@@ -300,7 +287,7 @@ async def list_genie_spaces(req: Request):
 async def list_warehouses(req: Request):
     """List available SQL warehouses from the workspace."""
     try:
-        token = _get_token(req)
+        token = extract_bearer_token(req)
         host = _get_host()
 
         url = f"{host}/api/2.0/sql/warehouses"
@@ -324,7 +311,7 @@ async def list_warehouses(req: Request):
 async def list_serving_endpoints(req: Request):
     """List available serving endpoints from the workspace."""
     try:
-        token = _get_token(req)
+        token = extract_bearer_token(req)
         host = _get_host()
 
         url = f"{host}/api/2.0/serving-endpoints"
