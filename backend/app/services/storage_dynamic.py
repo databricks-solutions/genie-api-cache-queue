@@ -342,3 +342,29 @@ class DynamicStorageService:
         if hasattr(backend, 'pool'):
             return await backend.get_gateway_stats(gateway_id)
         return backend.get_gateway_stats(gateway_id)
+
+    # --- User roles CRUD (delegates to default backend) ---
+
+    async def get_user_role(self, identity: str):
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.get_user_role(identity)
+        return backend.get_user_role(identity)
+
+    async def set_user_role(self, identity: str, role: str, granted_by: str = None):
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.set_user_role(identity, role, granted_by)
+        return backend.set_user_role(identity, role, granted_by)
+
+    async def list_user_roles(self) -> list:
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.list_user_roles()
+        return backend.list_user_roles()
+
+    async def delete_user_role(self, identity: str):
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.delete_user_role(identity)
+        return backend.delete_user_role(identity)

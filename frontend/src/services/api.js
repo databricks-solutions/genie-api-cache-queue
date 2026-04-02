@@ -259,6 +259,26 @@ export const api = {
     return response.data;
   },
 
+  getMyRole: async () => {
+    const response = await axios.get(`${API_BASE_URL}/users/me`);
+    return response.data; // { identity, role }
+  },
+
+  listUsers: async () => {
+    const response = await axios.get(`${API_BASE_URL}/users`);
+    return response.data; // [{ identity, role, granted_by, granted_at }]
+  },
+
+  setUserRole: async (email, role) => {
+    const response = await axios.post(`${API_BASE_URL}/users/${encodeURIComponent(email)}/role`, { role });
+    return response.data;
+  },
+
+  deleteUserRole: async (email) => {
+    const response = await axios.delete(`${API_BASE_URL}/users/${encodeURIComponent(email)}`);
+    return response.data;
+  },
+
   getWorkspaceAppearance: async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/workspace-appearance`);

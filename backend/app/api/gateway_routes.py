@@ -15,6 +15,7 @@ from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
 import app.services.database as _db
+from app.services.rbac import resolve_role, role_gte
 
 logger = logging.getLogger(__name__)
 gateway_router = APIRouter()
@@ -33,6 +34,19 @@ def _get_token(req: Request) -> str:
     if not token:
         raise HTTPException(status_code=401, detail="No authentication token available")
     return token
+
+
+async def _require_role(req: Request, min_role: str):
+    """Resolve caller's effective role and raise 403 if below min_role."""
+    token = _get_token(req)
+    identity = req.headers.get("X-Forwarded-Email", "")
+    host = _get_host()
+    role = await resolve_role(identity, token, host)
+    if not role_gte(role, min_role):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Role '{min_role}' required. You have '{role}'."
+        )
 
 
 def _get_host() -> str:
@@ -69,7 +83,8 @@ async def list_gateways():
 
 @gateway_router.post("/gateways", status_code=201)
 async def create_gateway(body: GatewayCreateRequest, req: Request):
-    """Create a new gateway configuration."""
+    """Create a new gateway configuration. Owner only."""
+    await _require_role(req, "owner")
     try:
         now = datetime.now(timezone.utc)
         user_email = req.headers.get("X-Forwarded-Email")
@@ -132,8 +147,9 @@ async def get_gateway(gateway_id: str):
 
 
 @gateway_router.put("/gateways/{gateway_id}")
-async def update_gateway(gateway_id: str, body: GatewayUpdateRequest):
-    """Update gateway fields."""
+async def update_gateway(gateway_id: str, body: GatewayUpdateRequest, req: Request):
+    """Update gateway fields. Manage or above."""
+    await _require_role(req, "manage")
     try:
         updates = body.model_dump(exclude_none=True)
         if not updates:
@@ -153,8 +169,9 @@ async def update_gateway(gateway_id: str, body: GatewayUpdateRequest):
 
 
 @gateway_router.delete("/gateways/{gateway_id}")
-async def delete_gateway(gateway_id: str):
-    """Delete a gateway."""
+async def delete_gateway(gateway_id: str, req: Request):
+    """Delete a gateway. Owner only."""
+    await _require_role(req, "owner")
     try:
         deleted = await _db.db_service.delete_gateway(gateway_id)
         if not deleted:
@@ -218,8 +235,9 @@ async def get_gateway_cache(gateway_id: str):
 
 
 @gateway_router.delete("/gateways/{gateway_id}/cache")
-async def clear_gateway_cache(gateway_id: str):
-    """Clear all cached entries for a specific gateway."""
+async def clear_gateway_cache(gateway_id: str, req: Request):
+    """Clear all cached entries for a specific gateway. Manage or above."""
+    await _require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -439,8 +457,9 @@ class SettingsUpdateRequest(GatewayUpdateRequest):
 
 
 @gateway_router.put("/settings")
-async def update_settings_endpoint(body: SettingsUpdateRequest):
-    """Update server configuration."""
+async def update_settings_endpoint(body: SettingsUpdateRequest, req: Request):
+    """Update server configuration. Owner only."""
+    await _require_role(req, "owner")
     batch = {}
     updated = {}
     for field, value in body.model_dump(exclude_none=True).items():

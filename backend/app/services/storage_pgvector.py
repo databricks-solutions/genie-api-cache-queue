@@ -73,6 +73,7 @@ class PGVectorStorageService:
         log_base = self._normalize_table_name(query_log_table_name).rsplit('.', 1)[-1]
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
         self.query_log_table_name = f"{schema_prefix}.{log_base}"
+        self.user_roles_table_name = f"{schema_prefix}.user_roles"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -193,6 +194,7 @@ class PGVectorStorageService:
             await self._ensure_table(conn)
             await self._ensure_query_log_table(conn)
             await self._ensure_gateway_table(conn)
+            await self._ensure_user_roles_table(conn)
             await self._migrate_genie_space_id_columns(conn)
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
@@ -479,6 +481,18 @@ class PGVectorStorageService:
                 logger.warning("Index creation skipped: %s", e)
 
         logger.info("Query log table '%s' initialized", self.query_log_table_name)
+
+    async def _ensure_user_roles_table(self, conn):
+        """Create the user_roles table if it does not exist."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.user_roles_table_name} (
+                identity TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                granted_by TEXT,
+                granted_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("User roles table '%s' initialized", self.user_roles_table_name)
 
     async def _ensure_gateway_table(self, conn):
         """Create the gateway_configs table if it does not exist."""
@@ -982,6 +996,61 @@ class PGVectorStorageService:
             """, gateway_id) or 0
 
             return {"cache_count": cache_count, "query_count_7d": query_count, "cache_hits_7d": cache_hits}
+
+    # --- User roles CRUD ---
+
+    async def get_user_role(self, identity: str) -> Optional[str]:
+        """Return the explicit role for a user, or None if not assigned."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT role FROM {self.user_roles_table_name} WHERE identity = $1",
+                identity
+            )
+            return row["role"] if row else None
+
+    async def set_user_role(self, identity: str, role: str, granted_by: str = None):
+        """Insert or update a user's role assignment."""
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"""
+                INSERT INTO {self.user_roles_table_name} (identity, role, granted_by, granted_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (identity) DO UPDATE
+                  SET role = EXCLUDED.role,
+                      granted_by = EXCLUDED.granted_by,
+                      granted_at = NOW()
+            """, identity, role, granted_by)
+
+    async def list_user_roles(self) -> list:
+        """Return all explicit role assignments."""
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT identity, role, granted_by, granted_at FROM {self.user_roles_table_name} ORDER BY granted_at DESC"
+            )
+            return [
+                {
+                    "identity": r["identity"],
+                    "role": r["role"],
+                    "granted_by": r["granted_by"],
+                    "granted_at": _to_utc_iso(r["granted_at"]),
+                }
+                for r in rows
+            ]
+
+    async def delete_user_role(self, identity: str):
+        """Remove an explicit role assignment."""
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM {self.user_roles_table_name} WHERE identity = $1",
+                identity
+            )
 
     def _row_to_gateway_dict(self, row) -> dict:
         """Convert a database row to a gateway dict."""

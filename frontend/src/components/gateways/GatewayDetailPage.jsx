@@ -3,23 +3,25 @@ import { useParams, useNavigate, Link } from 'react-router-dom'
 import { Trash2, Play, Copy, Loader2, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 import Modal from '../shared/Modal'
+import { useRole } from '../../context/RoleContext'
 import GatewayOverviewTab from './GatewayOverviewTab'
 import GatewayMetricsTab from './GatewayMetricsTab'
 import GatewayCacheTab from './GatewayCacheTab'
 import GatewayLogsTab from './GatewayLogsTab'
 import GatewaySettingsTab from './GatewaySettingsTab'
 
-const TABS = [
+const ALL_TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'metrics', label: 'Metrics' },
   { id: 'cache', label: 'Cache' },
   { id: 'logs', label: 'Logs' },
-  { id: 'settings', label: 'Settings' },
+  { id: 'settings', label: 'Settings', minRole: 'manage' },
 ]
 
 export default function GatewayDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const { isOwner, isManage } = useRole()
   const [gateway, setGateway] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -64,6 +66,8 @@ export default function GatewayDetailPage() {
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text)
   }
+
+  const TABS = ALL_TABS.filter((t) => !t.minRole || isManage)
 
   if (loading) {
     return (
@@ -127,14 +131,16 @@ export default function GatewayDetailPage() {
               <Play size={14} />
               Test in Playground
             </button>
-            <button
-              onClick={() => setShowDeleteConfirm(true)}
-              disabled={deleting}
-              className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
-            >
-              <Trash2 size={14} />
-              {deleting ? 'Deleting...' : 'Delete gateway'}
-            </button>
+            {isOwner && (
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
+              >
+                <Trash2 size={14} />
+                {deleting ? 'Deleting...' : 'Delete gateway'}
+              </button>
+            )}
           </div>
         </div>
 
