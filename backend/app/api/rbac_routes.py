@@ -4,10 +4,11 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.auth import ensure_https
 from app.api.auth_helpers import extract_bearer_token
 from app.api.config_store import get_effective_setting
 from app.config import get_settings
-from app.services.rbac import resolve_role, role_gte, ROLES
+from app.services.rbac import resolve_role, role_gte, ROLES, invalidate_role_cache
 
 logger = logging.getLogger(__name__)
 rbac_router = APIRouter()
@@ -16,9 +17,7 @@ _settings = get_settings()
 
 def _get_host() -> str:
     host = get_effective_setting("databricks_host") or _settings.databricks_host or ""
-    if host and not host.startswith("http"):
-        host = f"https://{host}"
-    return host
+    return ensure_https(host) if host else host
 
 
 async def _resolve_caller(req: Request):
@@ -69,6 +68,7 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
         )
     import app.services.database as _db
     await _db.db_service.set_user_role(email, body.role, granted_by=identity)
+    invalidate_role_cache(email)
     logger.info("Role assigned: %s → %s by %s", email, body.role, identity)
     return {"identity": email, "role": body.role}
 
@@ -79,5 +79,6 @@ async def remove_user_role(email: str, req: Request):
     identity, _, _ = await _require_role(req, "manage")
     import app.services.database as _db
     await _db.db_service.delete_user_role(email)
+    invalidate_role_cache(email)
     logger.info("Role removed: %s by %s", email, identity)
     return {"success": True}

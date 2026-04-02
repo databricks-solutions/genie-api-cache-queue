@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { api } from '../services/api'
 
 // role: 'owner' | 'manage' | 'use'
@@ -18,13 +18,15 @@ export function RoleProvider({ children }) {
       .finally(() => setLoading(false))
   }, [])
 
+  const value = useMemo(() => ({
+    role,
+    loading,
+    isOwner: role === 'owner',
+    isManage: role === 'manage' || role === 'owner',
+  }), [role, loading])
+
   return (
-    <RoleContext.Provider value={{
-      role,
-      loading,
-      isOwner: role === 'owner',
-      isManage: role === 'manage' || role === 'owner',
-    }}>
+    <RoleContext.Provider value={value}>
       {children}
     </RoleContext.Provider>
   )

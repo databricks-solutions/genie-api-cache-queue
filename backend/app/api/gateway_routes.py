@@ -11,7 +11,9 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
+from app.auth import ensure_https
 from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
+from app.api.auth_helpers import extract_bearer_token
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
 import app.services.database as _db
@@ -37,8 +39,10 @@ def _get_token(req: Request) -> str:
 
 
 async def _require_role(req: Request, min_role: str):
-    """Resolve caller's effective role and raise 403 if below min_role."""
-    token = _get_token(req)
+    """Resolve caller's effective role and raise 403 if below min_role.
+    Uses extract_bearer_token (user OBO token only — no service-token fallback).
+    """
+    token = extract_bearer_token(req)
     identity = req.headers.get("X-Forwarded-Email", "")
     host = _get_host()
     role = await resolve_role(identity, token, host)
@@ -54,9 +58,7 @@ def _get_host() -> str:
     host = get_effective_setting("databricks_host") or settings.databricks_host
     if not host:
         raise HTTPException(status_code=500, detail="DATABRICKS_HOST not configured")
-    if not host.startswith("http"):
-        host = f"https://{host}"
-    return host
+    return ensure_https(host)
 
 
 # --- Gateway CRUD ---
