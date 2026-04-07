@@ -56,10 +56,10 @@ async def list_gateways():
         for gw in gateways:
             try:
                 stats = await _db.db_service.get_gateway_stats(gw["id"])
-                gw["cache_count"] = stats.get("cache_count", 0)
+                gw["cache_entries"] = stats.get("cache_count", 0)
                 gw["query_count_7d"] = stats.get("query_count_7d", 0)
             except Exception:
-                gw["cache_count"] = 0
+                gw["cache_entries"] = 0
                 gw["query_count_7d"] = 0
         return gateways
     except Exception as e:
@@ -117,10 +117,10 @@ async def get_gateway(gateway_id: str):
 
         try:
             stats = await _db.db_service.get_gateway_stats(gateway_id)
-            gw["cache_count"] = stats.get("cache_count", 0)
+            gw["cache_entries"] = stats.get("cache_count", 0)
             gw["query_count_7d"] = stats.get("query_count_7d", 0)
         except Exception:
-            gw["cache_count"] = 0
+            gw["cache_entries"] = 0
             gw["query_count_7d"] = 0
 
         return gw
@@ -171,7 +171,7 @@ async def delete_gateway(gateway_id: str):
 
 @gateway_router.get("/gateways/{gateway_id}/metrics")
 async def get_gateway_metrics(gateway_id: str):
-    """Get cache_count and query stats for a gateway."""
+    """Get cache entries and query stats for a gateway."""
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -185,7 +185,7 @@ async def get_gateway_metrics(gateway_id: str):
         return {
             "gateway_id": gateway_id,
             "cache_entries": cache_entries,
-            "cache_count": cache_entries,
+            "cache_count": cache_entries,  # legacy alias
             "total_queries": total_queries,
             "query_count_7d": total_queries,
             "cache_hits": cache_hits,

@@ -169,7 +169,7 @@ class GatewayConfig(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     # Stats (populated on list/get, not stored)
-    cache_count: Optional[int] = None
+    cache_entries: Optional[int] = None
     query_count_7d: Optional[int] = None
 
 
