@@ -56,7 +56,7 @@ function EditableText({ value, onChange, placeholder, masked }) {
         <input ref={inputRef} type={masked ? 'password' : 'text'} value={draft}
           onChange={(e) => setDraft(e.target.value)} onKeyDown={handleKey}
           placeholder={placeholder}
-          className="h-8 border border-dbx-blue rounded px-3 text-[13px] text-dbx-text outline-none"
+          className="h-8 border border-dbx-blue rounded px-3 text-[13px] text-dbx-text bg-dbx-bg outline-none"
           style={{ width: '220px' }} />
         <button onClick={save}
           className="h-8 px-3 text-[13px] text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors">Save</button>
@@ -264,7 +264,7 @@ export default function SettingsPage() {
     sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  const inputClass = 'h-8 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors'
+  const inputClass = 'h-8 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text bg-dbx-bg outline-none focus:border-dbx-blue transition-colors'
 
   if (loading) {
     return (

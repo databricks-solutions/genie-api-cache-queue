@@ -122,6 +122,10 @@ async def normalize_question(query_text: str, runtime_settings=None, space_conte
 
         canonical = " | ".join(parts)
 
+        if not canonical:
+            logger.warning("Question normalizer: canonical is empty — falling back to lowercased input")
+            return string_normalized
+
         logger.info(
             "Question normalizer: original=%r... canonical=%r...",
             query_text[:60],

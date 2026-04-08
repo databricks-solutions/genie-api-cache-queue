@@ -199,7 +199,7 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
           placeholder="Enter gateway name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          className="w-full h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue"
+          className="w-full h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text bg-dbx-bg placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue"
         />
       </div>
 
@@ -216,7 +216,7 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
               placeholder="Enter Genie Space ID"
               value={manualSpaceId}
               onChange={(e) => setManualSpaceId(e.target.value)}
-              className="w-full h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue font-mono"
+              className="w-full h-8 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text bg-dbx-bg placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue font-mono"
             />
             <button
               onClick={() => { setShowManualSpace(false); setManualSpaceId('') }}
@@ -235,7 +235,7 @@ export default function GatewayCreateModal({ open, onClose, onCreated }) {
                   placeholder="Search by name"
                   value={spaceSearch}
                   onChange={(e) => setSpaceSearch(e.target.value)}
-                  className="w-full h-8 pl-8 pr-3 border border-dbx-border-input rounded text-[13px] text-dbx-text placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue"
+                  className="w-full h-8 pl-8 pr-3 border border-dbx-border-input rounded text-[13px] text-dbx-text bg-dbx-bg placeholder:text-dbx-text-secondary focus:outline-none focus:border-dbx-blue"
                 />
               </div>
             )}

@@ -151,7 +151,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
     }
   }
 
-  const inputClass = 'h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors'
+  const inputClass = 'h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text bg-dbx-bg outline-none focus:border-dbx-blue transition-colors'
 
   return (
     <div className="max-w-xl space-y-6">
@@ -172,7 +172,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
             <div className="flex gap-2">
               <input type="number" min="0" value={form.cache_ttl_value}
                 onChange={(e) => handleChange('cache_ttl_value', e.target.value)}
-                className="h-8 flex-1 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors" />
+                className="h-8 flex-1 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text bg-dbx-bg outline-none focus:border-dbx-blue transition-colors" />
               <select value={form.cache_ttl_unit} onChange={(e) => handleChange('cache_ttl_unit', e.target.value)}
                 className="h-8 border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text outline-none focus:border-dbx-blue transition-colors bg-dbx-bg">
                 <option value="minutes">Minutes</option>

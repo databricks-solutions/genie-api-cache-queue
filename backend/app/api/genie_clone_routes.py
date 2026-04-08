@@ -222,17 +222,20 @@ async def _process_genie_background(
             if msg_id in _synthetic_messages:
                 _synthetic_messages[msg_id].setdefault("_proxy", {})["stage"] = "processing_genie"
 
+        # Genie API always receives the original user question;
+        # normalized form is only used for cache key / embedding.
+        genie_query = original_query_text or query_text
         try:
             if conversation_id and not conversation_id.startswith(CONV_PREFIX):
                 try:
-                    result = await genie_service.send_message(space_id, conversation_id, query_text, rs)
+                    result = await genie_service.send_message(space_id, conversation_id, genie_query, rs)
                 except GenieConfigError:
                     raise
                 except Exception:
                     logger.warning("send_message failed, falling back to start_conversation")
-                    result = await genie_service.start_conversation(space_id, query_text, rs)
+                    result = await genie_service.start_conversation(space_id, genie_query, rs)
             else:
-                result = await genie_service.start_conversation(space_id, query_text, rs)
+                result = await genie_service.start_conversation(space_id, genie_query, rs)
 
 
             if result.get("status") == "COMPLETED":

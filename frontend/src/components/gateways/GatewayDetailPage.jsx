@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
-import { Trash2, Play, Copy, Loader2 } from 'lucide-react'
+import { Trash2, Play, Copy, Loader2, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
+import Modal from '../shared/Modal'
 import GatewayOverviewTab from './GatewayOverviewTab'
 import GatewayMetricsTab from './GatewayMetricsTab'
 import GatewayCacheTab from './GatewayCacheTab'
@@ -24,6 +25,7 @@ export default function GatewayDetailPage() {
   const [error, setError] = useState(null)
   const [activeTab, setActiveTab] = useState('overview')
   const [deleting, setDeleting] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
 
   const fetchGateway = async () => {
     try {
@@ -43,10 +45,10 @@ export default function GatewayDetailPage() {
   }, [id])
 
   const handleDelete = async () => {
-    if (!confirm(`Delete gateway "${gateway?.name || id}"? This action cannot be undone.`)) return
     try {
       setDeleting(true)
       await api.deleteGateway(id)
+      setShowDeleteConfirm(false)
       navigate('/')
     } catch (err) {
       alert('Failed to delete gateway: ' + (err.response?.data?.detail || err.message))
@@ -126,7 +128,7 @@ export default function GatewayDetailPage() {
               Test in Playground
             </button>
             <button
-              onClick={handleDelete}
+              onClick={() => setShowDeleteConfirm(true)}
               disabled={deleting}
               className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
             >
@@ -202,6 +204,35 @@ export default function GatewayDetailPage() {
           />
         </div>
       </div>
+      {/* Delete confirmation modal */}
+      <Modal isOpen={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title="Delete Gateway" maxWidth="max-w-md">
+        <div className="flex flex-col items-center text-center pt-2">
+          <div className="w-12 h-12 rounded-full bg-dbx-status-red-bg flex items-center justify-center mb-4">
+            <AlertTriangle size={24} className="text-dbx-text-danger" />
+          </div>
+          <p className="text-[14px] text-dbx-text mb-1">
+            Are you sure you want to delete this gateway?
+          </p>
+          <p className="text-[13px] text-dbx-text-secondary mb-6">
+            <span className="font-medium text-dbx-text">{gateway?.name}</span> will be permanently deleted. This action cannot be undone.
+          </p>
+          <div className="flex gap-3 w-full">
+            <button
+              onClick={() => setShowDeleteConfirm(false)}
+              className="flex-1 h-8 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={deleting}
+              className="flex-1 h-8 text-[13px] font-medium text-white bg-[#D32F2F] rounded hover:bg-[#B71C1C] transition-colors disabled:opacity-50"
+            >
+              {deleting ? 'Deleting...' : 'Delete'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
