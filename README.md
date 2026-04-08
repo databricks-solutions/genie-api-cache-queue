@@ -43,7 +43,14 @@ databricks sync . /Workspace/Users/<your-email>/genie-cache-queue
 # Deploy
 databricks apps deploy genie-cache-queue \
   --source-code-path /Workspace/Users/<your-email>/genie-cache-queue
+
+# Configure OAuth scopes (required once after first deploy)
+databricks apps update genie-cache-queue --json '{
+  "user_api_scopes": ["sql", "serving.serving-endpoints", "dashboards.genie"]
+}'
 ```
+
+> **Note:** The `dashboards.genie` scope allows the app to call the Genie API on behalf of the logged-in user. Without it, gateway creation cannot list Genie Spaces and queries will fail with `403 Invalid scope`. This only needs to be set once per app installation — it is not configurable via `app.yaml`.
 
 ### 2. Create a Gateway
 

@@ -185,8 +185,8 @@ function ChatMessage({ item }) {
         )}
 
         {isFailed && (
-          <div className="bg-red-50 border border-red-200 rounded p-3">
-            <p className="text-[13px] text-red-700">{item.error || 'An unknown error occurred'}</p>
+          <div className="bg-dbx-status-red-bg border border-dbx-danger-border rounded p-3">
+            <p className="text-[13px] text-dbx-text-danger">{item.error || 'An unknown error occurred'}</p>
           </div>
         )}
       </div>
@@ -575,7 +575,7 @@ export default function PlaygroundPage() {
             onKeyDown={handleKeyDown}
             placeholder={!selectedGateway && !loadingGateways ? 'Select a gateway above to start querying...' : 'Ask a question about your data...'}
             rows={2}
-            className="flex-1 border border-dbx-border-input rounded p-3 text-[13px] text-dbx-text placeholder-dbx-border-input resize-none focus:outline-none focus:border-dbx-blue focus:ring-1 focus:ring-[rgba(34,114,180,0.2)] disabled:bg-dbx-sidebar disabled:cursor-not-allowed"
+            className="flex-1 border border-dbx-border-input rounded p-3 text-[13px] text-dbx-text bg-dbx-bg placeholder-dbx-border-input resize-none focus:outline-none focus:border-dbx-blue focus:ring-1 focus:ring-[rgba(34,114,180,0.2)] disabled:bg-dbx-sidebar disabled:cursor-not-allowed"
             disabled={running || (!selectedGateway && !loadingGateways)}
           />
           <div className="flex flex-col gap-1.5 items-stretch">
