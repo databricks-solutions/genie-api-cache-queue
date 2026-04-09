@@ -1,14 +1,12 @@
-# Genie Gateway (Cache & Queue)
+# Genie Gateway
 
-Drop-in replacement for the Databricks Genie API with semantic caching, rate-limit management, and multi-gateway support. Deploy as a Databricks App — callers only change the base URL, zero code changes required.
+Performance and governance layer for the Databricks Genie API. Deploy as a Databricks App — callers swap the base URL, zero code changes required.
 
-The Genie API has a hard limit of **5 queries per minute per workspace**. This app sits in front of it:
+- **Semantic caching** — Similar questions resolve instantly by re-executing the cached SQL against the warehouse (fresh data, sub-second latency)
+- **Traffic management** — Built-in queue with automatic retry and exponential backoff for burst workloads
+- **Multi-gateway** — Each gateway maps to one Genie Space + SQL Warehouse with independent caches, settings, and access controls
 
-- **Cache hit** — Re-executes the cached SQL against the warehouse (fresh data, no Genie call)
-- **Cache miss** — Calls Genie in the background, queues if rate-limited, retries with exponential backoff
-- **Rate limit** — Manages the 5 QPM limit transparently with a queue and backoff
-
-Each **gateway** is a named configuration that maps to one Genie Space and SQL Warehouse. Gateways have independent caches, queues, and settings.
+Genie translates natural language to SQL. The Gateway caches that translation so repeated and similar questions skip the NL-to-SQL step entirely and go straight to execution — faster responses, lower compute cost, and higher throughput for production workloads.
 
 ## Architecture
 
@@ -74,10 +72,10 @@ From the gateway's **Overview** tab, copy the ready-to-use endpoint URL:
 Change the base URL in your application — everything else stays the same:
 
 ```python
-# Before (direct Genie — hits 5 QPM limit)
+# Before (direct Genie API)
 BASE = "https://<workspace>.cloud.databricks.com"
 
-# After (with cache + retry — same endpoints, same auth)
+# After (via Gateway — cached, queued, same auth)
 BASE = "https://<app-name>.aws.databricksapps.com"
 
 # Use gateway ID instead of space ID
@@ -92,11 +90,11 @@ r = requests.post(f"{BASE}/api/2.0/genie/spaces/{GATEWAY_ID}/start-conversation"
 
 Use the built-in **Playground** to test queries interactively. The pipeline visualizer shows each step in real time.
 
-**Cache Miss** — first time a question is asked, it goes through Genie:
+**Cache Miss** — first time a question is asked, the Gateway calls Genie and caches the SQL translation:
 
 ![Cache Miss](docs/screenshots/07-playground-cache-miss.png)
 
-**Cache Hit** — same question again, Genie is bypassed entirely:
+**Cache Hit** — same or similar question resolves instantly from cache:
 
 ![Cache Hit](docs/screenshots/08-playground-cache-hit.png)
 
@@ -131,7 +129,7 @@ Each gateway has a detail page with five tabs.
 | `sql_warehouse_id` | SQL Warehouse for query execution | Required |
 | `similarity_threshold` | Cache match threshold (0–1) | 0.92 |
 | `cache_ttl_hours` | Cache freshness in hours (0 = unlimited) | 24 |
-| `max_queries_per_minute` | Rate limit per workspace | 5 |
+| `max_queries_per_minute` | Traffic management threshold | 5 |
 | `question_normalization_enabled` | Normalize questions before embedding | true |
 | `cache_validation_enabled` | Validate cache hits with LLM | true |
 | `embedding_provider` | `databricks` or custom endpoint | `databricks` |
@@ -222,7 +220,7 @@ For local development (outside Databricks Apps), configure the **Lakebase Servic
 
 ## MCP Server (Model Context Protocol)
 
-Drop-in replacement for the [Databricks managed Genie MCP](https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp). Any MCP client that supports Streamable HTTP can connect — just provide the URL and auth header.
+Compatible with the [Databricks managed Genie MCP](https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp) — same protocol, with caching and traffic management built in. Any MCP client that supports Streamable HTTP can connect.
 
 ```
 Before:  https://<workspace>.cloud.databricks.com/api/2.0/mcp/genie/{space_id}
@@ -233,7 +231,7 @@ The server exposes two tools per gateway (identical to the managed MCP):
 
 | Tool | Description |
 |------|-------------|
-| `query_space_{gateway_id}` | Ask a natural language question. Instant on cache hit. |
+| `query_space_{gateway_id}` | Ask a natural language question. Cached queries resolve instantly. |
 | `poll_response_{gateway_id}` | Poll for the result of a pending query. |
 
 **Example — OpenAI Agents SDK:**
@@ -250,7 +248,7 @@ async with MCPServerStreamableHttp(params={
     result = await Runner.run(agent, "Top 3 nations by revenue?")
 ```
 
-> **Tip:** Enable **Question Normalization** on the gateway when using MCP. LLM agents are non-deterministic — the same user intent can produce different phrasings on each call, reducing cache hit rates. Normalization maps variations to a canonical form before embedding.
+> **Tip:** Enable **Question Normalization** on the gateway when using MCP. Agents may rephrase the same intent differently across calls — normalization maps variations to a canonical form before embedding, improving cache hit rates.
 
 ---
 
@@ -326,10 +324,9 @@ npm run dev                        # http://localhost:5173
 
 ## Demo Notebook
 
-The included `demo_notebook.ipynb` fires 7 queries in parallel to demonstrate:
-1. **Direct to Genie** — queries get blocked with 429 errors
-2. **Via the App (first run)** — all queries complete, queue manages rate limits
-3. **Via the App (second run)** — all queries served from cache instantly
+The included `demo_notebook.ipynb` runs 7 concurrent queries to demonstrate the Gateway's performance:
+1. **First run** — all queries complete with automatic queuing and traffic management
+2. **Second run** — all queries served from cache with sub-second latency
 
 Before running, upload `.env.example` to your Workspace home and fill in your values:
 
