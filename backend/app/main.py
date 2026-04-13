@@ -31,6 +31,10 @@ async def lifespan(app: FastAPI):
     from app.services.database import initialize_storage
     storage = await initialize_storage()
 
+    # Bootstrap first admin if BOOTSTRAP_ADMIN_EMAIL is set and no users exist
+    from app.services.rbac import bootstrap_admin_if_needed
+    await bootstrap_admin_if_needed()
+
     # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
     if settings.storage_backend == "pgvector" and settings.lakebase_instance:

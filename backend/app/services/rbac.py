@@ -78,6 +78,32 @@ async def is_workspace_admin(token: str, host: str) -> bool:
     return result
 
 
+async def bootstrap_admin_if_needed() -> None:
+    """Auto-assign 'owner' to BOOTSTRAP_ADMIN_EMAIL if no users exist in the DB.
+
+    This is the recommended way to seed the first admin when user token
+    passthrough is disabled — SCIM auto-detection cannot work without the
+    user's own OAuth token.
+    """
+    import app.services.database as _db
+    from app.config import get_settings
+
+    email = get_settings().bootstrap_admin_email
+    if not email or not _db.db_service:
+        return
+
+    try:
+        existing = await _db.db_service.list_user_roles()
+        if existing:
+            logger.debug("Bootstrap skipped — %d user(s) already in DB", len(existing))
+            return
+
+        await _db.db_service.set_user_role(email, "owner", granted_by="bootstrap")
+        logger.info("Bootstrap: assigned 'owner' role to %s", email)
+    except Exception as e:
+        logger.error("Bootstrap admin failed: %s", e)
+
+
 async def resolve_role(identity: str, token: str, host: str) -> str:
     """
     Resolve the effective role for a user:

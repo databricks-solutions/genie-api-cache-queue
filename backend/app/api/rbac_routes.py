@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.auth import ensure_https
-from app.api.auth_helpers import extract_bearer_token
+from app.api.auth_helpers import extract_bearer_token_optional
 from app.api.config_store import get_effective_setting
 from app.config import get_settings
 from app.services.rbac import resolve_role, role_gte, ROLES, invalidate_role_cache
@@ -21,9 +21,23 @@ def _get_host() -> str:
 
 
 async def _resolve_caller(req: Request):
-    """Extract and resolve the calling user's identity and effective role."""
-    token = extract_bearer_token(req)
+    """Extract and resolve the calling user's identity and effective role.
+
+    When user token passthrough is disabled in Databricks Apps, the user's
+    OAuth token is unavailable.  We still identify the user via the
+    X-Forwarded-Email header (always present for SSO-authenticated users)
+    and resolve their role from the database.  The SCIM workspace-admin
+    check is skipped (requires the user's own token).
+    """
     identity = req.headers.get("X-Forwarded-Email", "")
+    token = extract_bearer_token_optional(req)
+
+    if not token and not identity:
+        raise HTTPException(
+            status_code=401,
+            detail="No authentication token or user identity available.",
+        )
+
     role = await resolve_role(identity, token, _get_host())
     return identity, token, role
 

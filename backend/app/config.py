@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     
     # Application environment
     app_env: str = os.getenv("APP_ENV", "development")  # development, production
+
+    # RBAC bootstrap: auto-assign 'owner' role to this email on first startup
+    # when no users exist in the DB.  Required when user token passthrough is
+    # disabled (workspace admin auto-detection via SCIM is unavailable).
+    bootstrap_admin_email: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "")
     
     # Application settings
     max_queries_per_minute: int = int(os.getenv("MAX_QUERIES_PER_MINUTE", "5"))
