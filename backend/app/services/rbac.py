@@ -78,24 +78,64 @@ async def is_workspace_admin(token: str, host: str) -> bool:
     return result
 
 
-async def bootstrap_admin_if_needed() -> None:
-    """Auto-assign 'owner' to BOOTSTRAP_ADMIN_EMAIL if no users exist in the DB.
+async def _detect_app_creator() -> str:
+    """Get the email of the user who created this Databricks App.
+    Uses the app's SP credentials to call the Apps API.
+    """
+    import os
+    import httpx
+    from app.auth import get_service_principal_token, ensure_https
+    from app.config import get_settings
 
-    This is the recommended way to seed the first admin when user token
-    passthrough is disabled — SCIM auto-detection cannot work without the
-    user's own OAuth token.
+    app_name = os.environ.get("DATABRICKS_APP_NAME", "")
+    if not app_name:
+        return ""
+
+    token = get_service_principal_token()
+    host = ensure_https(get_settings().databricks_host)
+    if not token or not host:
+        return ""
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{host}/api/2.0/apps/{app_name}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 200:
+                creator = resp.json().get("creator", "")
+                if creator:
+                    logger.info("Detected app creator: %s", creator)
+                return creator
+    except Exception as e:
+        logger.debug("Could not detect app creator: %s", e)
+    return ""
+
+
+async def bootstrap_admin_if_needed() -> None:
+    """Auto-assign 'owner' to the first admin if no users exist in the DB.
+
+    Resolution order for the bootstrap email:
+      1. BOOTSTRAP_ADMIN_EMAIL env var (explicit override)
+      2. App creator (auto-detected from Databricks Apps API)
     """
     import app.services.database as _db
     from app.config import get_settings
 
-    email = get_settings().bootstrap_admin_email
-    if not email or not _db.db_service:
+    if not _db.db_service:
         return
 
     try:
         existing = await _db.db_service.list_user_roles()
         if existing:
             logger.debug("Bootstrap skipped — %d user(s) already in DB", len(existing))
+            return
+
+        email = get_settings().bootstrap_admin_email
+        if not email:
+            email = await _detect_app_creator()
+        if not email:
+            logger.warning("Bootstrap skipped — no BOOTSTRAP_ADMIN_EMAIL and could not detect app creator")
             return
 
         await _db.db_service.set_user_role(email, "owner", granted_by="bootstrap")

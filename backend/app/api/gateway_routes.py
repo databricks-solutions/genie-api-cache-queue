@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.auth import ensure_https
 from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
-from app.api.auth_helpers import extract_bearer_token_optional
+from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token_optional
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
 import app.services.database as _db
@@ -271,12 +271,12 @@ async def get_gateway_logs(gateway_id: str, limit: int = 50):
 @gateway_router.get("/workspace/genie-spaces")
 async def list_genie_spaces(req: Request):
     """List available Genie Spaces from the workspace.
-    Returns empty list when user token passthrough is disabled.
+    Returns empty list when no user token is available.
     """
     try:
-        token = extract_bearer_token_optional(req)
+        token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No user token available for Genie Spaces discovery (token passthrough disabled?)")
+            logger.info("No user token available for Genie Spaces discovery")
             return {"spaces": [], "_token_passthrough": False}
         host = _get_host()
 
@@ -300,12 +300,12 @@ async def list_genie_spaces(req: Request):
 @gateway_router.get("/workspace/warehouses")
 async def list_warehouses(req: Request):
     """List available SQL warehouses from the workspace.
-    Returns empty list when user token passthrough is disabled.
+    Returns empty list when no user token is available.
     """
     try:
-        token = extract_bearer_token_optional(req)
+        token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No user token available for warehouse discovery (token passthrough disabled?)")
+            logger.info("No user token available for warehouse discovery")
             return {"warehouses": [], "_token_passthrough": False}
         host = _get_host()
 
@@ -329,12 +329,12 @@ async def list_warehouses(req: Request):
 @gateway_router.get("/workspace/serving-endpoints")
 async def list_serving_endpoints(req: Request):
     """List available serving endpoints from the workspace.
-    Returns empty list when user token passthrough is disabled.
+    Returns empty list when no user token is available.
     """
     try:
-        token = extract_bearer_token_optional(req)
+        token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No user token available for serving endpoints discovery (token passthrough disabled?)")
+            logger.info("No user token available for serving endpoints discovery")
             return {"endpoints": [], "_token_passthrough": False}
         host = _get_host()
 
@@ -366,6 +366,47 @@ async def list_serving_endpoints(req: Request):
     except Exception as e:
         logger.exception("Error listing serving endpoints")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@gateway_router.get("/workspace/users")
+async def list_workspace_users(req: Request):
+    """List workspace users via SCIM API.
+    Uses SP token as fallback when passthrough is disabled.
+    """
+    try:
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.info("No token available for workspace user discovery")
+            return {"users": []}
+        host = _get_host()
+
+        url = f"{host}/api/2.0/preview/scim/v2/Users"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params={"count": 500, "attributes": "userName,displayName,active"},
+            )
+            if resp.status_code != 200:
+                logger.warning("SCIM Users API returned %d: %s", resp.status_code, resp.text[:200])
+                return {"users": []}
+            resources = resp.json().get("Resources", [])
+            return {
+                "users": [
+                    {
+                        "email": u.get("userName", ""),
+                        "displayName": u.get("displayName", u.get("userName", "")),
+                        "active": u.get("active", True),
+                    }
+                    for u in resources
+                    if u.get("userName") and u.get("active", True)
+                ]
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error listing workspace users")
+        return {"users": []}
 
 
 @gateway_router.post("/settings/test-connection")

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, Trash2 } from 'lucide-react'
+import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, Trash2, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 import { useTheme } from '../../context/ThemeContext'
 import { useRole } from '../../context/RoleContext'
@@ -148,9 +148,11 @@ export default function SettingsPage() {
   // Users management state (manage role and above)
   const [users, setUsers] = useState([])
   const [usersLoading, setUsersLoading] = useState(false)
+  const [workspaceUsers, setWorkspaceUsers] = useState([])
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserRole, setNewUserRole] = useState('use')
   const [userSaving, setUserSaving] = useState(false)
+  const [userError, setUserError] = useState(null)
   const usersLoadedRef = useRef(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
@@ -211,39 +213,46 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Load users once when manage/owner navigates to the users section
+  // Load users + workspace users eagerly on mount when manage/owner
   useEffect(() => {
-    if (isManage && activeSection === 'users' && !usersLoadedRef.current) {
+    if (isManage && !usersLoadedRef.current) {
       usersLoadedRef.current = true
       setUsersLoading(true)
-      api.listUsers()
-        .then(setUsers)
-        .catch(() => setUsers([]))
-        .finally(() => setUsersLoading(false))
+      Promise.all([
+        api.listUsers().catch(() => []),
+        api.listWorkspaceUsers().then(d => d.users || []).catch(() => []),
+      ]).then(([roleUsers, wsUsers]) => {
+        setUsers(roleUsers)
+        setWorkspaceUsers(wsUsers)
+      }).finally(() => setUsersLoading(false))
     }
-  }, [isManage, activeSection])
+  }, [isManage])
 
   const handleAddUser = async () => {
     if (!newUserEmail.trim()) return
     setUserSaving(true)
+    setUserError(null)
     try {
       const saved = await api.setUserRole(newUserEmail.trim(), newUserRole)
-      // Optimistic update — upsert locally using the response, no second round-trip
       setUsers(prev => {
         const without = prev.filter(u => u.identity !== saved.identity)
         return [...without, saved]
       })
       setNewUserEmail('')
       setNewUserRole('use')
-    } catch { /* ignore */ }
-    finally { setUserSaving(false) }
+    } catch (err) {
+      setUserError(err.response?.data?.detail || err.message || 'Failed to assign role')
+    } finally { setUserSaving(false) }
   }
 
   const handleRemoveUser = async (email) => {
+    setUserError(null)
     try {
       await api.deleteUserRole(email)
       setUsers(prev => prev.filter(u => u.identity !== email))
-    } catch { /* ignore */ }
+    } catch (err) {
+      setUserError(err.response?.data?.detail || err.message || 'Failed to remove user')
+    }
   }
 
   const SIDEBAR = useMemo(
@@ -553,6 +562,15 @@ export default function SettingsPage() {
                 </table>
               </div>
 
+              {/* Error banner */}
+              {userError && (
+                <div className="flex items-center gap-2 p-3 rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 text-[13px] text-red-700 dark:text-red-300 mb-3">
+                  <AlertTriangle size={14} className="flex-shrink-0" />
+                  <span>{userError}</span>
+                  <button onClick={() => setUserError(null)} className="ml-auto hover:underline">dismiss</button>
+                </div>
+              )}
+
               {/* User list */}
               {usersLoading ? (
                 <div className="flex items-center gap-2 py-4 text-[13px] text-dbx-text-secondary">
@@ -597,17 +615,44 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Add user */}
+              {/* Add user — searchable combobox */}
               <div className="flex items-center gap-2">
-                <input
-                  type="email"
-                  placeholder="user@company.com"
-                  value={newUserEmail}
-                  onChange={(e) => setNewUserEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
-                  className={`${inputClass} flex-1`}
-                  style={{ maxWidth: '260px' }}
-                />
+                <div className="relative flex-1" style={{ maxWidth: '320px' }}>
+                  <input
+                    type="text"
+                    placeholder="Search users or type email..."
+                    value={newUserEmail}
+                    onChange={(e) => setNewUserEmail(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
+                    className={`${inputClass} w-full`}
+                    autoComplete="off"
+                  />
+                  {newUserEmail.trim() && workspaceUsers.length > 0 && (
+                    (() => {
+                      const q = newUserEmail.toLowerCase()
+                      const matches = workspaceUsers.filter(wu =>
+                        (wu.email.toLowerCase().includes(q) || wu.displayName.toLowerCase().includes(q))
+                        && wu.email.toLowerCase() !== q
+                      ).slice(0, 8)
+                      return matches.length > 0 ? (
+                        <ul className="absolute z-10 left-0 right-0 mt-1 bg-dbx-bg border border-dbx-border rounded shadow-lg max-h-48 overflow-auto">
+                          {matches.map(wu => (
+                            <li
+                              key={wu.email}
+                              onClick={() => setNewUserEmail(wu.email)}
+                              className="px-3 py-1.5 text-[13px] text-dbx-text hover:bg-dbx-neutral-hover cursor-pointer"
+                            >
+                              <span className="font-medium">{wu.displayName}</span>
+                              {wu.displayName !== wu.email && (
+                                <span className="text-dbx-text-secondary ml-1">({wu.email})</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null
+                    })()
+                  )}
+                </div>
                 <select
                   value={newUserRole}
                   onChange={(e) => setNewUserRole(e.target.value)}

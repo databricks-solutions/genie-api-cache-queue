@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
-import { Settings, PanelLeft } from 'lucide-react'
+import { Settings, PanelLeft, AlertTriangle } from 'lucide-react'
 import Sidebar from './components/layout/Sidebar'
 import GatewayListPage from './components/gateways/GatewayListPage'
 import GatewayDetailPage from './components/gateways/GatewayDetailPage'
@@ -9,6 +9,21 @@ import SettingsPage from './components/settings/SettingsPage'
 import ApiReferencePage from './components/api/ApiReferencePage'
 import McpPage from './components/mcp/McpPage'
 import DebugPage from './components/debug/DebugPage'
+import { api } from './services/api'
+
+function SpFallbackBanner({ onDismiss }) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-800 text-[12px] text-amber-800 dark:text-amber-300">
+      <AlertTriangle size={14} className="flex-shrink-0" />
+      <span>
+        User token passthrough is disabled. Queries use the app's service principal —
+        grant it access to your Genie Spaces and SQL Warehouses.
+        Per-user access controls and lineage are not enforced in this mode.
+      </span>
+      <button onClick={onDismiss} className="ml-auto text-amber-600 dark:text-amber-400 hover:underline flex-shrink-0">dismiss</button>
+    </div>
+  )
+}
 
 function TopBar({ onToggleSidebar }) {
   const navigate = useNavigate()
@@ -38,9 +53,19 @@ function TopBar({ onToggleSidebar }) {
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [showSpBanner, setShowSpBanner] = useState(false)
+
+  useEffect(() => {
+    api.checkAuthMode()
+      .then(data => {
+        if (data.auth_mode === 'service_principal') setShowSpBanner(true)
+      })
+      .catch(() => {})
+  }, [])
 
   return (
     <div className="flex flex-col h-screen bg-dbx-sidebar">
+      {showSpBanner && <SpFallbackBanner onDismiss={() => setShowSpBanner(false)} />}
       <TopBar onToggleSidebar={() => setSidebarOpen(v => !v)} />
       <div className="flex flex-1 min-h-0">
         <div

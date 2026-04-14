@@ -42,6 +42,46 @@ def extract_bearer_token_optional(request: Request) -> str:
     return ""
 
 
+def resolve_user_token(request: Request) -> str:
+    """Resolve a token for Genie/SQL API calls.
+
+    Priority:
+      1. X-Forwarded-Access-Token (user token passthrough enabled)
+      2. Authorization: Bearer header (external API clients)
+      3. App's service principal token (fallback when passthrough disabled)
+
+    When falling back to SP, per-user access controls and lineage are NOT
+    enforced.  The SP must have access to the target Genie Spaces and
+    SQL Warehouses.
+    """
+    token = extract_bearer_token_optional(request)
+    if token:
+        return token
+
+    # Fallback: use the app's SP token
+    from app.auth import get_service_principal_token
+    sp_token = get_service_principal_token()
+    if sp_token:
+        logger.warning(
+            "No user token available — falling back to service principal. "
+            "Per-user access controls and data lineage are NOT enforced."
+        )
+        return sp_token
+
+    raise HTTPException(
+        status_code=401,
+        detail="No user token (passthrough disabled) and no service principal token available.",
+    )
+
+
+def resolve_user_token_optional(request: Request) -> str:
+    """Same as resolve_user_token but returns empty string instead of raising."""
+    try:
+        return resolve_user_token(request)
+    except HTTPException:
+        return ""
+
+
 def build_simple_runtime_settings(token: str):
     """Build RuntimeSettings for management endpoints that only need a user token."""
     from app.models import RuntimeConfig

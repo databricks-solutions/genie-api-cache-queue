@@ -53,7 +53,8 @@ export default function GatewayDetailPage() {
       setShowDeleteConfirm(false)
       navigate('/')
     } catch (err) {
-      alert('Failed to delete gateway: ' + (err.response?.data?.detail || err.message))
+      setShowDeleteConfirm(false)
+      setError(err.response?.data?.detail || err.message || 'Failed to delete gateway')
     } finally {
       setDeleting(false)
     }

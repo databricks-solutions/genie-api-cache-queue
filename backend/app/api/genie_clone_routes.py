@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from app.auth import ensure_https
 from app.config import get_settings
 from app.api.config_store import get_effective_setting
-from app.api.auth_helpers import extract_bearer_token
+from app.api.auth_helpers import extract_bearer_token, extract_bearer_token_optional, resolve_user_token  # noqa: F401
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
 from app.utils import exponential_backoff
@@ -66,8 +66,8 @@ def _release_message_lock(msg_id: str) -> None:
 
 
 def _extract_token(request: Request) -> str:
-    """Extract auth token from request headers."""
-    return extract_bearer_token(request)
+    """Extract auth token: passthrough → Bearer → SP fallback."""
+    return resolve_user_token(request)
 
 
 async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:

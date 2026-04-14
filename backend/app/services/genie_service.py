@@ -45,7 +45,7 @@ class GenieService:
             token = runtime_settings.databricks_token
 
             if not token or (isinstance(token, str) and token.strip() == ""):
-                logger.warning("Empty X-Forwarded-Access-Token — Genie call will fail")
+                logger.warning("Empty user token — Genie call will fail")
 
             return (
                 f"{host}/api/2.0/genie",

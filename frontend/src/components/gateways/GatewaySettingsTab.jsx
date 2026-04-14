@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Save, RotateCcw, Loader2 } from 'lucide-react'
+import { Save, RotateCcw, Loader2, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 
 const secondsToTtl = (seconds) => {
@@ -58,6 +58,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState(null)
   const [endpoints, setEndpoints] = useState([])
   const [endpointsLoading, setEndpointsLoading] = useState(true)
   const [warehouses, setWarehouses] = useState([])
@@ -109,7 +110,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
       onUpdate?.(updated)
       setSaved(true)
     } catch (err) {
-      alert('Failed to save settings: ' + (err.response?.data?.detail || err.message))
+      setSaveError(err.response?.data?.detail || err.message || 'Failed to save settings')
     } finally {
       setSaving(false)
     }
@@ -155,6 +156,13 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
   return (
     <div className="max-w-xl space-y-6">
+      {saveError && (
+        <div className="flex items-center gap-2 p-3 rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30 text-[13px] text-red-700 dark:text-red-300">
+          <AlertTriangle size={14} className="flex-shrink-0" />
+          <span>{saveError}</span>
+          <button onClick={() => setSaveError(null)} className="ml-auto hover:underline">dismiss</button>
+        </div>
+      )}
       {/* ── Semantic Cache (top-level toggle) ── */}
       <SettingsField label="Semantic Cache" description="Enable cache lookup and storage for this gateway. When disabled, every query goes directly to Genie.">
         <ToggleSwitch checked={form.caching_enabled} onChange={(v) => handleChange('caching_enabled', v)} />

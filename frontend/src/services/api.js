@@ -246,6 +246,10 @@ export const api = {
     const response = await axios.get(`${API_BASE_URL}/workspace/serving-endpoints`);
     return response.data;
   },
+  listWorkspaceUsers: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/users`);
+    return response.data;
+  },
   testLakebaseConnection: async () => {
     const response = await axios.post(`${API_BASE_URL}/settings/test-connection`);
     return response.data;
@@ -286,6 +290,12 @@ export const api = {
     } catch {
       return { theme: null, source: 'error' };
     }
+  },
+
+  // Auth mode check (detects SP fallback when token passthrough is disabled)
+  checkAuthMode: async () => {
+    const response = await axios.get(`${API_BASE_URL}/auth/mode`);
+    return response.data;
   },
 
   getConfig: getConfig,

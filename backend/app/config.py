@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # when no users exist in the DB.  Required when user token passthrough is
     # disabled (workspace admin auto-detection via SCIM is unavailable).
     bootstrap_admin_email: str = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "")
-    
+
     # Application settings
     max_queries_per_minute: int = int(os.getenv("MAX_QUERIES_PER_MINUTE", "5"))
     similarity_threshold: float = float(os.getenv("SIMILARITY_THRESHOLD", "0.92"))
