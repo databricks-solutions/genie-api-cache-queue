@@ -25,6 +25,54 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+REQUIRED_USER_SCOPES = ["sql", "dashboards.genie", "serving.serving-endpoints"]
+
+
+async def _ensure_oauth_scopes():
+    """Ensure the Databricks App has the required OAuth scopes for user passthrough.
+    Automatically patches the app config on startup if scopes are missing.
+    """
+    import os
+    import httpx
+    from app.auth import get_service_principal_token, ensure_https
+
+    app_name = os.environ.get("DATABRICKS_APP_NAME", "")
+    if not app_name:
+        return  # Not running as a Databricks App
+
+    token = get_service_principal_token()
+    host = ensure_https(settings.databricks_host)
+    if not token or not host:
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{host}/api/2.0/apps/{app_name}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                return
+            current = set(resp.json().get("user_api_scopes") or [])
+            needed = set(REQUIRED_USER_SCOPES)
+            if needed.issubset(current):
+                logger.debug("OAuth scopes already configured: %s", current)
+                return
+
+            merged = list(current | needed)
+            patch = await client.patch(
+                f"{host}/api/2.0/apps/{app_name}",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"user_api_scopes": merged},
+            )
+            if patch.status_code == 200:
+                logger.info("OAuth scopes updated: %s", merged)
+            else:
+                logger.warning("Failed to update OAuth scopes: %d %s", patch.status_code, patch.text[:200])
+    except Exception as e:
+        logger.debug("Could not ensure OAuth scopes: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize storage backend (creates connection pool if using Lakebase/PGVector)
@@ -34,6 +82,9 @@ async def lifespan(app: FastAPI):
     # Bootstrap first admin if BOOTSTRAP_ADMIN_EMAIL is set and no users exist
     from app.services.rbac import bootstrap_admin_if_needed
     await bootstrap_admin_if_needed()
+
+    # Ensure the app has the required OAuth scopes for user token passthrough
+    await _ensure_oauth_scopes()
 
     # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
