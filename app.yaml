@@ -31,8 +31,8 @@ env:
     value: default
   - name: LAKEBASE_SCHEMA
     value: public
-  # RBAC bootstrap: auto-assign 'owner' on first startup when no users in DB.
-  # Required when user token passthrough is disabled.
+  # RBAC bootstrap: override for first admin email (optional).
+  # Auto-detected from app creator when empty.
   - name: BOOTSTRAP_ADMIN_EMAIL
     value: ""
 

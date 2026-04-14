@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from app.auth import ensure_https
 from app.config import get_settings
 from app.api.config_store import get_effective_setting
-from app.api.auth_helpers import extract_bearer_token, extract_bearer_token_optional, resolve_user_token  # noqa: F401
+from app.api.auth_helpers import resolve_user_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
 from app.utils import exponential_backoff

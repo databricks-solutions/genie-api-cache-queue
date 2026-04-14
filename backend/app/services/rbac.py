@@ -83,7 +83,6 @@ async def _detect_app_creator() -> str:
     Uses the app's SP credentials to call the Apps API.
     """
     import os
-    import httpx
     from app.auth import get_service_principal_token, ensure_https
     from app.config import get_settings
 
@@ -97,16 +96,15 @@ async def _detect_app_creator() -> str:
         return ""
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{host}/api/2.0/apps/{app_name}",
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            if resp.status_code == 200:
-                creator = resp.json().get("creator", "")
-                if creator:
-                    logger.info("Detected app creator: %s", creator)
-                return creator
+        resp = await _http_client.get(
+            f"{host}/api/2.0/apps/{app_name}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code == 200:
+            creator = resp.json().get("creator", "")
+            if creator:
+                logger.info("Detected app creator: %s", creator)
+            return creator
     except Exception as e:
         logger.debug("Could not detect app creator: %s", e)
     return ""
