@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # Example: instance-xxx.database.azuredatabricks.net
     lakebase_instance: str = os.getenv("LAKEBASE_INSTANCE", "")
     lakebase_catalog: str = os.getenv("LAKEBASE_CATALOG", "")  # e.g., sean_lakebase_genie
-    lakebase_schema: str = os.getenv("LAKEBASE_SCHEMA", "public")  # Usually 'public'
+    lakebase_schema: str = os.getenv("LAKEBASE_SCHEMA", "public")  # Custom schema recommended; 'public' requires manual GRANTs
     
     @property
     def postgres_connection_string(self) -> str:

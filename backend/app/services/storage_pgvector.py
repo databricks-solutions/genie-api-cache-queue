@@ -69,7 +69,7 @@ class PGVectorStorageService:
         self.oauth_token = None
         self.jwt_expires_at = 0  # epoch timestamp when the current JWT expires
         # All tables must live in the same schema as the cache table
-        schema_prefix = self.table_name.rsplit('.', 1)[0] if '.' in self.table_name else 'public'
+        schema_prefix = self.table_name.rsplit('.', 1)[0]
         self.schema_name = schema_prefix
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
         self.query_log_table_name = f"{schema_prefix}.{self.query_log_table_name.rsplit('.', 1)[-1]}"
@@ -175,7 +175,18 @@ class PGVectorStorageService:
                     await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{safe_schema}"')
                     logger.info("Ensured schema '%s' exists", self.schema_name)
                 except Exception as e:
-                    logger.warning("Schema creation skipped (may require manual CREATE): %s", e)
+                    # Check if schema exists despite the error (e.g., owned by another role)
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
+                        self.schema_name
+                    )
+                    if exists:
+                        logger.info("Schema '%s' already exists (owned by another role)", self.schema_name)
+                    else:
+                        raise RuntimeError(
+                            f"Schema '{self.schema_name}' does not exist and could not be created: {e}. "
+                            f"Grant CREATE on the database to the SP, or create the schema manually."
+                        ) from e
             await self._ensure_extension(conn)
             await register_vector(conn)
             await self._ensure_table(conn)
@@ -327,9 +338,8 @@ class PGVectorStorageService:
         (either SP client_id:client_secret or PAT).
 
         The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
-        role created via databricks_create_role(). When using a custom schema
-        (LAKEBASE_SCHEMA != 'public'), the SP also needs CREATE privilege on
-        the database for auto-creation of the schema.
+        role created via databricks_create_role(). CAN_MANAGE grants the
+        privileges needed for custom schema auto-creation.
         """
         from databricks.sdk import WorkspaceClient
         from databricks.sdk.core import Config
