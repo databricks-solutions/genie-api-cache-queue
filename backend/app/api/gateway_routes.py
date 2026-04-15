@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.auth import ensure_https
 from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
-from app.api.auth_helpers import extract_bearer_token
+from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token_optional
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
 import app.services.database as _db
@@ -27,10 +27,18 @@ settings = get_settings()
 
 async def _require_role(req: Request, min_role: str):
     """Resolve caller's effective role and raise 403 if below min_role.
-    Uses extract_bearer_token (user OBO token only — no service-token fallback).
+
+    When user token passthrough is disabled, falls back to email-only
+    identity (SCIM admin check is skipped, DB role lookup still works).
     """
-    token = extract_bearer_token(req)
     identity = req.headers.get("X-Forwarded-Email", "")
+    token = extract_bearer_token_optional(req)
+
+    if not token and not identity:
+        raise HTTPException(
+            status_code=401,
+            detail="No authentication token or user identity available.",
+        )
     host = _get_host()
     role = await resolve_role(identity, token, host)
     if not role_gte(role, min_role):
@@ -263,9 +271,14 @@ async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
 
 @gateway_router.get("/workspace/genie-spaces")
 async def list_genie_spaces(req: Request):
-    """List available Genie Spaces from the workspace."""
+    """List available Genie Spaces from the workspace.
+    Returns empty list when no user token is available.
+    """
     try:
-        token = extract_bearer_token(req)
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.info("No user token available for Genie Spaces discovery")
+            return {"spaces": []}
         host = _get_host()
 
         url = f"{host}/api/2.0/genie/spaces"
@@ -287,9 +300,14 @@ async def list_genie_spaces(req: Request):
 
 @gateway_router.get("/workspace/warehouses")
 async def list_warehouses(req: Request):
-    """List available SQL warehouses from the workspace."""
+    """List available SQL warehouses from the workspace.
+    Returns empty list when no user token is available.
+    """
     try:
-        token = extract_bearer_token(req)
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.info("No user token available for warehouse discovery")
+            return {"warehouses": []}
         host = _get_host()
 
         url = f"{host}/api/2.0/sql/warehouses"
@@ -311,9 +329,14 @@ async def list_warehouses(req: Request):
 
 @gateway_router.get("/workspace/serving-endpoints")
 async def list_serving_endpoints(req: Request):
-    """List available serving endpoints from the workspace."""
+    """List available serving endpoints from the workspace.
+    Returns empty list when no user token is available.
+    """
     try:
-        token = extract_bearer_token(req)
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.info("No user token available for serving endpoints discovery")
+            return {"endpoints": []}
         host = _get_host()
 
         url = f"{host}/api/2.0/serving-endpoints"

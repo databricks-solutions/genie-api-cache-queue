@@ -13,8 +13,8 @@ import GatewaySettingsTab from './GatewaySettingsTab'
 const ALL_TABS = [
   { id: 'overview', label: 'Overview' },
   { id: 'metrics', label: 'Metrics' },
-  { id: 'cache', label: 'Cache' },
-  { id: 'logs', label: 'Logs' },
+  { id: 'cache', label: 'Cache', minRole: 'manage' },
+  { id: 'logs', label: 'Logs', minRole: 'manage' },
   { id: 'settings', label: 'Settings', minRole: 'manage' },
 ]
 
