@@ -327,7 +327,9 @@ class PGVectorStorageService:
         (either SP client_id:client_secret or PAT).
 
         The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
-        role created via databricks_create_role().
+        role created via databricks_create_role(). When using a custom schema
+        (LAKEBASE_SCHEMA != 'public'), the SP also needs CREATE privilege on
+        the database for auto-creation of the schema.
         """
         from databricks.sdk import WorkspaceClient
         from databricks.sdk.core import Config
