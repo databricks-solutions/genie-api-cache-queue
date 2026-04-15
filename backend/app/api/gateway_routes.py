@@ -23,6 +23,13 @@ logger = logging.getLogger(__name__)
 gateway_router = APIRouter()
 settings = get_settings()
 
+_discovery_client = httpx.AsyncClient(timeout=15.0)
+
+
+async def close_discovery_client():
+    """Close the shared HTTP client. Call during app shutdown."""
+    await _discovery_client.aclose()
+
 
 
 async def _require_role(req: Request, min_role: str):
@@ -292,12 +299,11 @@ async def list_genie_spaces(req: Request):
         host = _get_host()
 
         url = f"{host}/api/2.0/genie/spaces"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code != 200:
-                logger.warning("Genie spaces API returned %d: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-            return resp.json()
+        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logger.warning("Genie spaces API returned %d: %s", resp.status_code, resp.text[:200])
+            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+        return resp.json()
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -321,12 +327,11 @@ async def list_warehouses(req: Request):
         host = _get_host()
 
         url = f"{host}/api/2.0/sql/warehouses"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code != 200:
-                logger.warning("Warehouses API returned %d: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-            return resp.json()
+        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logger.warning("Warehouses API returned %d: %s", resp.status_code, resp.text[:200])
+            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+        return resp.json()
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -350,25 +355,23 @@ async def list_serving_endpoints(req: Request):
         host = _get_host()
 
         url = f"{host}/api/2.0/serving-endpoints"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code != 200:
-                logger.warning("Serving endpoints API returned %d: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-            data = resp.json()
-            endpoints = data.get("endpoints", [])
-            # Return simplified list with name, task, state
-            return {
-                "endpoints": [
-                    {
-                        "name": ep.get("name", ""),
-                        "task": ep.get("task", ""),
-                        "state": ep.get("state", {}).get("ready", "UNKNOWN"),
-                    }
-                    for ep in endpoints
-                    if ep.get("state", {}).get("ready") == "READY"
-                ]
-            }
+        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logger.warning("Serving endpoints API returned %d: %s", resp.status_code, resp.text[:200])
+            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+        data = resp.json()
+        endpoints = data.get("endpoints", [])
+        return {
+            "endpoints": [
+                {
+                    "name": ep.get("name", ""),
+                    "task": ep.get("task", ""),
+                    "state": ep.get("state", {}).get("ready", "UNKNOWN"),
+                }
+                for ep in endpoints
+                if ep.get("state", {}).get("ready") == "READY"
+            ]
+        }
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -382,6 +385,7 @@ async def list_serving_endpoints(req: Request):
 @gateway_router.get("/workspace/users")
 async def list_workspace_users(req: Request):
     """List workspace users via SCIM API for role assignment autocomplete."""
+    await _require_role(req, "manage")
     try:
         token = resolve_user_token_optional(req)
         if not token:
@@ -393,27 +397,26 @@ async def list_workspace_users(req: Request):
         all_resources = []
         start_index = 1
         page_size = 500
-        async with httpx.AsyncClient(timeout=15) as client:
-            while True:
-                resp = await client.get(
-                    url,
-                    headers={"Authorization": f"Bearer {token}"},
-                    params={
-                        "count": page_size,
-                        "startIndex": start_index,
-                        "attributes": "userName,displayName,active",
-                    },
-                )
-                if resp.status_code != 200:
-                    logger.warning("SCIM Users API returned %d: %s", resp.status_code, resp.text[:200])
-                    return {"users": []}
-                data = resp.json()
-                resources = data.get("Resources", [])
-                all_resources.extend(resources)
-                total = data.get("totalResults", 0)
-                if start_index + page_size > total or not resources:
-                    break
-                start_index += page_size
+        while True:
+            resp = await _discovery_client.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "count": page_size,
+                    "startIndex": start_index,
+                    "attributes": "userName,displayName,active",
+                },
+            )
+            if resp.status_code != 200:
+                logger.warning("SCIM Users API returned %d: %s", resp.status_code, resp.text[:200])
+                return {"users": []}
+            data = resp.json()
+            resources = data.get("Resources", [])
+            all_resources.extend(resources)
+            total = data.get("totalResults", 0)
+            if start_index + page_size > total or not resources:
+                break
+            start_index += page_size
 
         return {
             "users": [

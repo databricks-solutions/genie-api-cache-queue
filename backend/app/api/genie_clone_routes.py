@@ -506,9 +506,9 @@ async def _handle_query(
     conv_id, msg_id, att_id = _make_synthetic_ids()
     response = _format_executing_response(conv_id, msg_id)
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
+    _sweep_synthetic_messages()
     async with _get_message_lock(msg_id):
         _synthetic_messages[msg_id] = response
-    _sweep_synthetic_messages()
 
     task = asyncio.create_task(_process_genie_background(
         space_id=space_id,

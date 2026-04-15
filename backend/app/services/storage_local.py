@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 import numpy as np
 from typing import Optional, List, Tuple, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 try:
@@ -244,7 +244,7 @@ class LocalStorageService:
             "identity": identity,
             "role": role,
             "granted_by": granted_by,
-            "granted_at": datetime.now().isoformat() + "Z",
+            "granted_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save_roles()
 

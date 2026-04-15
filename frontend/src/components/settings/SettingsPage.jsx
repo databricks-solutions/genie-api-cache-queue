@@ -154,7 +154,6 @@ export default function SettingsPage() {
   const [userSaving, setUserSaving] = useState(false)
   const usersLoadedRef = useRef(false)
   const [workspaceUsers, setWorkspaceUsers] = useState([])
-  const [userSearch, setUserSearch] = useState('')
   const [showUserDropdown, setShowUserDropdown] = useState(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
@@ -622,9 +621,8 @@ export default function SettingsPage() {
                   <input
                     type="email"
                     placeholder="user@company.com"
-                    value={userSearch || newUserEmail}
+                    value={newUserEmail}
                     onChange={(e) => {
-                      setUserSearch(e.target.value)
                       setNewUserEmail(e.target.value)
                       setShowUserDropdown(true)
                     }}
@@ -633,11 +631,14 @@ export default function SettingsPage() {
                     onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
                     className={`${inputClass} w-full`}
                   />
-                  {showUserDropdown && userSearch && workspaceUsers.length > 0 && (() => {
-                    const filtered = workspaceUsers.filter(u =>
-                      u.email.toLowerCase().includes(userSearch.toLowerCase()) ||
-                      (u.displayName && u.displayName.toLowerCase().includes(userSearch.toLowerCase()))
-                    ).slice(0, 8)
+                  {showUserDropdown && workspaceUsers.length > 0 && (() => {
+                    const query = newUserEmail.toLowerCase()
+                    const filtered = query
+                      ? workspaceUsers.filter(u =>
+                          u.email.toLowerCase().includes(query) ||
+                          (u.displayName && u.displayName.toLowerCase().includes(query))
+                        ).slice(0, 8)
+                      : workspaceUsers.slice(0, 8)
                     if (filtered.length === 0) return null
                     return (
                       <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded shadow-lg max-h-48 overflow-y-auto">
@@ -649,7 +650,6 @@ export default function SettingsPage() {
                             onMouseDown={(e) => {
                               e.preventDefault()
                               setNewUserEmail(u.email)
-                              setUserSearch('')
                               setShowUserDropdown(false)
                             }}
                           >

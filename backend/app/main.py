@@ -57,7 +57,9 @@ async def lifespan(app: FastAPI):
         pass
 
     from app.services.rbac import close_http_client
+    from app.api.gateway_routes import close_discovery_client
     await close_http_client()
+    await close_discovery_client()
 
 
 app = FastAPI(

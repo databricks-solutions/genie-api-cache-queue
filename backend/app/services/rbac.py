@@ -32,6 +32,7 @@ _http_client = httpx.AsyncClient(timeout=5.0)
 _ADMIN_CACHE_TTL = 60.0   # seconds
 _ROLE_CACHE_TTL = 120.0   # seconds
 _ADMIN_CACHE_MAX = 500
+_ROLE_CACHE_MAX = 500
 _admin_cache: dict[str, tuple[bool, float]] = {}   # token → (is_admin, expires_at)
 _role_cache: dict[str, tuple[str, float]] = {}     # identity → (role, expires_at)
 
@@ -47,6 +48,14 @@ def _sweep_expired_admin_cache():
     expired = [k for k, (_, exp) in _admin_cache.items() if now >= exp]
     for k in expired:
         del _admin_cache[k]
+
+
+def _sweep_expired_role_cache():
+    """Remove expired entries from role cache to prevent unbounded growth."""
+    now = time.monotonic()
+    expired = [k for k, (_, exp) in _role_cache.items() if now >= exp]
+    for k in expired:
+        del _role_cache[k]
 
 
 def role_gte(a: str, b: str) -> bool:
@@ -120,5 +129,7 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
         assigned = await _db.db_service.get_user_role(identity)
 
     role = assigned or DEFAULT_ROLE
+    if len(_role_cache) > _ROLE_CACHE_MAX:
+        _sweep_expired_role_cache()
     _role_cache[identity] = (role, now + _ROLE_CACHE_TTL)
     return role
