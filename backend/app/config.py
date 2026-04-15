@@ -92,7 +92,6 @@ class Settings(BaseSettings):
             # Lakebase uses three-level namespace: catalog.schema.table
             return f"{self.lakebase_catalog}.{self.lakebase_schema}.{self.pgvector_table_name}"
 
-        # Always qualify with schema for consistent table references
         return f"{self.lakebase_schema}.{self.pgvector_table_name}"
     
     @property

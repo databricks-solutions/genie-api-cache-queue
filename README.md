@@ -187,7 +187,7 @@ SELECT databricks_create_role('<app-sp-client-id>', 'SERVICE_PRINCIPAL');
 
 > **Important:** Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication. See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
 
-**Custom schema (recommended):** Configure `LAKEBASE_SCHEMA` in `app.yaml` (e.g., `genie_cache_queue`). The app creates the schema on startup and the SP owns it — no manual GRANTs needed.
+**Custom schema (recommended):** Configure `LAKEBASE_SCHEMA` in `app.yaml` (e.g., `genie_cache_queue`). The app creates the schema on startup and the SP owns it — no manual GRANTs needed. Requires that the SP has `CAN_MANAGE` on the Lakebase project.
 
 **`public` schema (default):** The SP cannot own the `public` schema, so you must grant access manually:
 

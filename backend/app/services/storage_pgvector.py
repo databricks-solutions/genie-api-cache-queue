@@ -68,7 +68,6 @@ class PGVectorStorageService:
         self.oauth_token = None
         self.jwt_expires_at = 0  # epoch timestamp when the current JWT expires
         self._schema_ensured = False
-        # All tables must live in the same schema as the cache table
         schema_prefix = self.table_name.rsplit('.', 1)[0]
         self.schema_name = schema_prefix
         log_base = self._normalize_table_name(query_log_table_name).rsplit('.', 1)[-1]
@@ -96,6 +95,7 @@ class PGVectorStorageService:
         """Generate a fresh JWT and create a new connection pool.
         Atomic swap: new pool is created before old pool is closed."""
         old_pool = self.pool
+        self._schema_ensured = False
         logger.info("Reinitializing Lakebase pool (JWT expiring soon)")
         await self.initialize()
         if old_pool and old_pool is not self.pool:
@@ -340,8 +340,7 @@ class PGVectorStorageService:
         (either SP client_id:client_secret or PAT).
 
         The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
-        role created via databricks_create_role(). CAN_MANAGE grants the
-        privileges needed for custom schema auto-creation.
+        role created via databricks_create_role().
         """
         from databricks.sdk import WorkspaceClient
         from databricks.sdk.core import Config
