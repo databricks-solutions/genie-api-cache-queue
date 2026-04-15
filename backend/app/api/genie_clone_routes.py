@@ -53,14 +53,22 @@ ATT_PREFIX = "acache_"
 
 
 def _sweep_synthetic_messages():
-    """Evict oldest entries when the store exceeds _SYNTHETIC_MAX."""
+    """Evict oldest completed entries when the store exceeds _SYNTHETIC_MAX.
+    Only removes entries whose background processing is finished (no active lock).
+    """
     overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
     if overflow <= 0:
         return
-    keys = list(_synthetic_messages.keys())[:overflow]
-    for k in keys:
+    evicted = 0
+    for k in list(_synthetic_messages.keys()):
+        if evicted >= overflow:
+            break
+        lock = _message_locks.get(k)
+        if lock is not None and lock.locked():
+            continue
         _synthetic_messages.pop(k, None)
         _message_locks.pop(k, None)
+        evicted += 1
 
 
 # ---------------------------------------------------------------------------

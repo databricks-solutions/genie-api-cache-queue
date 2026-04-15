@@ -14,6 +14,8 @@ from app.services.rbac import resolve_role, role_gte, ROLES, invalidate_role_cac
 logger = logging.getLogger(__name__)
 rbac_router = APIRouter()
 _settings = get_settings()
+# Serializes last-owner checks against role writes. Sufficient because
+# Databricks Apps runs a single replica — no cross-instance coordination needed.
 _owner_lock = asyncio.Lock()
 
 
@@ -39,6 +41,8 @@ async def _resolve_caller(req: Request):
             status_code=401,
             detail="No authentication token or user identity available.",
         )
+    if not token and identity:
+        logger.info("Email-only identity for %s (no bearer token) — SCIM admin check skipped", identity)
 
     role = await resolve_role(identity, token, _get_host())
     return identity, token, role

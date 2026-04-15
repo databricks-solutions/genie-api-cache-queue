@@ -39,7 +39,12 @@ async def _require_role(req: Request, min_role: str):
             status_code=401,
             detail="No authentication token or user identity available.",
         )
-    host = _get_host()
+    if not token and identity:
+        logger.info("Email-only identity for %s (no bearer token) — SCIM admin check skipped", identity)
+    try:
+        host = _get_host()
+    except HTTPException:
+        host = ""
     role = await resolve_role(identity, token, host)
     if not role_gte(role, min_role):
         raise HTTPException(
@@ -59,8 +64,9 @@ def _get_host() -> str:
 # --- Gateway CRUD ---
 
 @gateway_router.get("/gateways")
-async def list_gateways():
-    """List all gateways with stats."""
+async def list_gateways(req: Request):
+    """List all gateways with stats. Requires authentication."""
+    await _require_role(req, "use")
     try:
         gateways = await _db.db_service.list_gateways()
         # Attach stats to each gateway
@@ -114,14 +120,17 @@ async def create_gateway(body: GatewayCreateRequest, req: Request):
         result = await _db.db_service.create_gateway(config)
         logger.info("Gateway created: id=%s name=%s by=%s", config["id"], config["name"], user_email)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error creating gateway")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @gateway_router.get("/gateways/{gateway_id}")
-async def get_gateway(gateway_id: str):
-    """Get a single gateway with stats."""
+async def get_gateway(gateway_id: str, req: Request):
+    """Get a single gateway with stats. Requires authentication."""
+    await _require_role(req, "use")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -184,8 +193,9 @@ async def delete_gateway(gateway_id: str, req: Request):
 
 
 @gateway_router.get("/gateways/{gateway_id}/metrics")
-async def get_gateway_metrics(gateway_id: str):
-    """Get cache entries and query stats for a gateway."""
+async def get_gateway_metrics(gateway_id: str, req: Request):
+    """Get cache entries and query stats for a gateway. Requires authentication."""
+    await _require_role(req, "use")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
