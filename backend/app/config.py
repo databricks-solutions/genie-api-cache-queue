@@ -92,7 +92,11 @@ class Settings(BaseSettings):
             # Lakebase uses three-level namespace: catalog.schema.table
             return f"{self.lakebase_catalog}.{self.lakebase_schema}.{self.pgvector_table_name}"
 
-        return f"{self.lakebase_schema}.{self.pgvector_table_name}"
+        if self.lakebase_schema and self.lakebase_schema != "public":
+            return f"{self.lakebase_schema}.{self.pgvector_table_name}"
+
+        # Plain PostgreSQL: bare table name, schema resolved via search_path
+        return self.pgvector_table_name
     
     @property
     def is_production(self) -> bool:

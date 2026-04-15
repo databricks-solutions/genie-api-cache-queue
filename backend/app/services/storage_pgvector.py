@@ -95,7 +95,6 @@ class PGVectorStorageService:
         """Generate a fresh JWT and create a new connection pool.
         Atomic swap: new pool is created before old pool is closed."""
         old_pool = self.pool
-        self._schema_ensured = False
         logger.info("Reinitializing Lakebase pool (JWT expiring soon)")
         await self.initialize()
         if old_pool and old_pool is not self.pool:

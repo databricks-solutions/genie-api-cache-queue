@@ -142,7 +142,9 @@ class RuntimeSettings:
                 else self.base.pgvector_table_name)
         if catalog:
             return f"{catalog}.{schema}.{table}"
-        return f"{schema}.{table}"
+        if schema and schema != "public":
+            return f"{schema}.{table}"
+        return table
 
     @property
     def query_log_table_name(self) -> str:
@@ -154,7 +156,9 @@ class RuntimeSettings:
                 else "query_logs")
         if catalog:
             return f"{catalog}.{schema}.{table}"
-        return f"{schema}.{table}"
+        if schema and schema != "public":
+            return f"{schema}.{table}"
+        return table
 
     @property
     def postgres_connection_string(self) -> str:
