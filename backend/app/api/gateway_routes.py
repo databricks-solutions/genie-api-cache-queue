@@ -207,8 +207,9 @@ async def get_gateway_metrics(gateway_id: str):
 # --- Gateway-scoped cache & logs ---
 
 @gateway_router.get("/gateways/{gateway_id}/cache")
-async def get_gateway_cache(gateway_id: str):
-    """List all cached entries for a specific gateway."""
+async def get_gateway_cache(gateway_id: str, req: Request):
+    """List all cached entries for a specific gateway. Manage or above."""
+    await _require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -242,8 +243,9 @@ async def clear_gateway_cache(gateway_id: str, req: Request):
 
 
 @gateway_router.get("/gateways/{gateway_id}/logs")
-async def get_gateway_logs(gateway_id: str, limit: int = 50):
-    """List query logs for a specific gateway."""
+async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
+    """List query logs for a specific gateway. Manage or above."""
+    await _require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:

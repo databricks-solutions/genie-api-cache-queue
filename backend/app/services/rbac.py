@@ -31,8 +31,22 @@ _http_client = httpx.AsyncClient(timeout=5.0)
 # role changes take effect within the TTL window without a restart.
 _ADMIN_CACHE_TTL = 60.0   # seconds
 _ROLE_CACHE_TTL = 120.0   # seconds
+_ADMIN_CACHE_MAX = 500
 _admin_cache: dict[str, tuple[bool, float]] = {}   # token → (is_admin, expires_at)
 _role_cache: dict[str, tuple[str, float]] = {}     # identity → (role, expires_at)
+
+
+async def close_http_client():
+    """Close the shared HTTP client. Call during app shutdown."""
+    await _http_client.aclose()
+
+
+def _sweep_expired_admin_cache():
+    """Remove expired entries from admin cache to prevent unbounded growth."""
+    now = time.monotonic()
+    expired = [k for k, (_, exp) in _admin_cache.items() if now >= exp]
+    for k in expired:
+        del _admin_cache[k]
 
 
 def role_gte(a: str, b: str) -> bool:
@@ -56,6 +70,9 @@ async def is_workspace_admin(token: str, host: str) -> bool:
     host = ensure_https(host)
 
     now = time.monotonic()
+    if len(_admin_cache) > _ADMIN_CACHE_MAX:
+        _sweep_expired_admin_cache()
+
     cached = _admin_cache.get(token)
     if cached is not None:
         result, expires_at = cached
@@ -87,7 +104,8 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
     """
     import app.services.database as _db
 
-    if await is_workspace_admin(token, host):
+    # Only check workspace admin with a real user token (not empty/SP)
+    if token and await is_workspace_admin(token, host):
         return 'owner'
 
     now = time.monotonic()

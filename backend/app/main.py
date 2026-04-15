@@ -56,6 +56,9 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    from app.services.rbac import close_http_client
+    await close_http_client()
+
 
 app = FastAPI(
     title="Genie API with Cache & Queue",

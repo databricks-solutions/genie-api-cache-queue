@@ -36,7 +36,8 @@ settings = get_settings()
 @router.post("/query", response_model=QueryResponse)
 async def submit_query(request: QueryRequest, req: Request):
     try:
-        token = req.headers.get("X-Forwarded-Access-Token") or ""
+        from app.api.auth_helpers import resolve_user_token
+        token = resolve_user_token(req)
         identity = req.headers.get("X-Forwarded-Email") or ""
 
         if not identity:

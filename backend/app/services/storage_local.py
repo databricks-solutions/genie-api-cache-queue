@@ -5,7 +5,9 @@ Uses JSON files and numpy arrays for lightweight operation.
 
 import logging
 import json
+import os
 import threading
+from pathlib import Path
 import numpy as np
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timedelta
@@ -30,9 +32,10 @@ class LocalStorageService:
         self.embeddings_file = embeddings_file
         self.cache_ttl_hours = cache_ttl_hours
         self._gateways: Dict = {}
-        self._user_roles: Dict = {}  # identity -> {role, granted_by, granted_at}
+        self._roles_file = str(Path(cache_file).parent / "user_roles.json")
         self._ensure_data_dir()
         self._load_data()
+        self._load_roles()
 
     def _ensure_data_dir(self):
         """Ensure data directory exists"""
@@ -219,7 +222,18 @@ class LocalStorageService:
         logger.info("Gateway deleted: id=%s", gateway_id)
         return True
 
-    # --- User roles CRUD ---
+    # --- User roles CRUD (persisted to disk) ---
+
+    def _load_roles(self):
+        if os.path.exists(self._roles_file):
+            with open(self._roles_file, 'r') as f:
+                self._user_roles = json.load(f)
+        else:
+            self._user_roles = {}
+
+    def _save_roles(self):
+        with open(self._roles_file, 'w') as f:
+            json.dump(self._user_roles, f, indent=2, default=str)
 
     def get_user_role(self, identity: str):
         entry = self._user_roles.get(identity)
@@ -232,12 +246,14 @@ class LocalStorageService:
             "granted_by": granted_by,
             "granted_at": datetime.now().isoformat() + "Z",
         }
+        self._save_roles()
 
     def list_user_roles(self) -> list:
         return sorted(self._user_roles.values(), key=lambda r: r.get("granted_at", ""), reverse=True)
 
     def delete_user_role(self, identity: str):
         self._user_roles.pop(identity, None)
+        self._save_roles()
 
     def get_gateway_stats(self, gateway_id: str) -> Dict:
         """Get cache and query stats for a gateway."""

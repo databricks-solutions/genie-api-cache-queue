@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from app.auth import ensure_https
 from app.config import get_settings
 from app.api.config_store import get_effective_setting
-from app.api.auth_helpers import extract_bearer_token
+from app.api.auth_helpers import resolve_user_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
 from app.utils import exponential_backoff
@@ -66,8 +66,8 @@ def _release_message_lock(msg_id: str) -> None:
 
 
 def _extract_token(request: Request) -> str:
-    """Extract auth token from request headers."""
-    return extract_bearer_token(request)
+    """Extract auth token: passthrough → Bearer → SP fallback."""
+    return resolve_user_token(request)
 
 
 async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:
@@ -90,15 +90,10 @@ def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
     from app.models import RuntimeConfig
     from app.runtime_config import RuntimeSettings
 
-    # For Lakebase: use service token from server config (set via Settings UI), fallback to caller token
-    lakebase_pat = get_effective_setting("lakebase_service_token") or token
-
     # Per-gateway overrides take priority over global settings
     gw = gateway or {}
 
     rc = RuntimeConfig(
-        auth_mode="user",
-        user_pat=lakebase_pat,
         genie_space_id=space_id,
         sql_warehouse_id=gw.get("sql_warehouse_id") or get_effective_setting("sql_warehouse_id") or None,
         similarity_threshold=gw.get("similarity_threshold") or get_effective_setting("similarity_threshold"),
