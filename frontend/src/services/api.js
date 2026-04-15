@@ -284,6 +284,11 @@ export const api = {
     return response.data;
   },
 
+  listWorkspaceUsers: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/users`);
+    return response.data.users || [];
+  },
+
   getWorkspaceAppearance: async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/workspace-appearance`);

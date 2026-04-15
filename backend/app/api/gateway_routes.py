@@ -379,6 +379,63 @@ async def list_serving_endpoints(req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@gateway_router.get("/workspace/users")
+async def list_workspace_users(req: Request):
+    """List workspace users via SCIM API for role assignment autocomplete."""
+    try:
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.info("No token available for workspace user discovery")
+            return {"users": []}
+        host = _get_host()
+
+        url = f"{host}/api/2.0/preview/scim/v2/Users"
+        all_resources = []
+        start_index = 1
+        page_size = 500
+        async with httpx.AsyncClient(timeout=15) as client:
+            while True:
+                resp = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={
+                        "count": page_size,
+                        "startIndex": start_index,
+                        "attributes": "userName,displayName,active",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning("SCIM Users API returned %d: %s", resp.status_code, resp.text[:200])
+                    return {"users": []}
+                data = resp.json()
+                resources = data.get("Resources", [])
+                all_resources.extend(resources)
+                total = data.get("totalResults", 0)
+                if start_index + page_size > total or not resources:
+                    break
+                start_index += page_size
+
+        return {
+            "users": [
+                {
+                    "email": u.get("userName", ""),
+                    "displayName": u.get("displayName", u.get("userName", "")),
+                    "active": u.get("active", True),
+                }
+                for u in all_resources
+                if u.get("userName") and u.get("active", True)
+            ]
+        }
+    except HTTPException:
+        raise
+    except httpx.HTTPError as e:
+        logger.exception("Failed to reach SCIM API")
+        raise HTTPException(status_code=502, detail=f"Failed to reach Databricks API: {e}")
+    except Exception as e:
+        logger.exception("Error listing workspace users")
+        return {"users": []}
+
+
 @gateway_router.post("/settings/test-connection")
 async def test_lakebase_connection():
     """Test Lakebase connection and check if required tables exist."""

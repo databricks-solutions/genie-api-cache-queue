@@ -153,6 +153,9 @@ export default function SettingsPage() {
   const [newUserRole, setNewUserRole] = useState('use')
   const [userSaving, setUserSaving] = useState(false)
   const usersLoadedRef = useRef(false)
+  const [workspaceUsers, setWorkspaceUsers] = useState([])
+  const [userSearch, setUserSearch] = useState('')
+  const [showUserDropdown, setShowUserDropdown] = useState(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -212,15 +215,18 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Load users once when manage/owner navigates to the users section
+  // Load users and workspace users once when manage/owner navigates to the users section
   useEffect(() => {
     if (isManage && activeSection === 'users' && !usersLoadedRef.current) {
       usersLoadedRef.current = true
       setUsersLoading(true)
-      api.listUsers()
-        .then(setUsers)
-        .catch(() => setUsers([]))
-        .finally(() => setUsersLoading(false))
+      Promise.all([
+        api.listUsers().catch(() => []),
+        api.listWorkspaceUsers().catch(() => []),
+      ]).then(([roleUsers, wsUsers]) => {
+        setUsers(roleUsers)
+        setWorkspaceUsers(wsUsers)
+      }).finally(() => setUsersLoading(false))
     }
   }, [isManage, activeSection])
 
@@ -612,15 +618,49 @@ export default function SettingsPage() {
 
               {/* Add user */}
               <div className="flex items-center gap-2">
-                <input
-                  type="email"
-                  placeholder="user@company.com"
-                  value={newUserEmail}
-                  onChange={(e) => setNewUserEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
-                  className={`${inputClass} flex-1`}
-                  style={{ maxWidth: '260px' }}
-                />
+                <div className="relative flex-1" style={{ maxWidth: '260px' }}>
+                  <input
+                    type="email"
+                    placeholder="user@company.com"
+                    value={userSearch || newUserEmail}
+                    onChange={(e) => {
+                      setUserSearch(e.target.value)
+                      setNewUserEmail(e.target.value)
+                      setShowUserDropdown(true)
+                    }}
+                    onFocus={() => setShowUserDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowUserDropdown(false), 150)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
+                    className={`${inputClass} w-full`}
+                  />
+                  {showUserDropdown && userSearch && workspaceUsers.length > 0 && (() => {
+                    const filtered = workspaceUsers.filter(u =>
+                      u.email.toLowerCase().includes(userSearch.toLowerCase()) ||
+                      (u.displayName && u.displayName.toLowerCase().includes(userSearch.toLowerCase()))
+                    ).slice(0, 8)
+                    if (filtered.length === 0) return null
+                    return (
+                      <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded shadow-lg max-h-48 overflow-y-auto">
+                        {filtered.map(u => (
+                          <button
+                            key={u.email}
+                            type="button"
+                            className="w-full text-left px-3 py-2 text-[13px] hover:bg-dbx-sidebar transition-colors"
+                            onMouseDown={(e) => {
+                              e.preventDefault()
+                              setNewUserEmail(u.email)
+                              setUserSearch('')
+                              setShowUserDropdown(false)
+                            }}
+                          >
+                            <div className="text-dbx-text">{u.displayName || u.email}</div>
+                            {u.displayName && <div className="text-dbx-text-secondary text-[11px]">{u.email}</div>}
+                          </button>
+                        ))}
+                      </div>
+                    )
+                  })()}
+                </div>
                 <select
                   value={newUserRole}
                   onChange={(e) => setNewUserRole(e.target.value)}
