@@ -183,7 +183,6 @@ export default function SettingsPage() {
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserRole, setNewUserRole] = useState('use')
   const [userSaving, setUserSaving] = useState(false)
-  const usersLoadedRef = useRef(false)
   const [workspaceUsers, setWorkspaceUsers] = useState([])
   const [showUserDropdown, setShowUserDropdown] = useState(false)
   const [config, setConfig] = useState({
@@ -245,10 +244,9 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Load users and workspace users once when manage/owner navigates to the users section
+  // Load users and workspace users when manage/owner navigates to the users section
   useEffect(() => {
-    if (isManage && activeSection === 'users' && !usersLoadedRef.current) {
-      usersLoadedRef.current = true
+    if (isManage && activeSection === 'users') {
       setUsersLoading(true)
       Promise.all([
         api.listUsers().catch(() => []),
@@ -682,7 +680,7 @@ export default function SettingsPage() {
                 >
                   <option value="use">Use</option>
                   <option value="manage">Manage</option>
-                  <option value="owner">Owner</option>
+                  {isOwner && <option value="owner">Owner</option>}
                 </select>
                 <button
                   onClick={handleAddUser}

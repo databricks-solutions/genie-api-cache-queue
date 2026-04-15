@@ -89,6 +89,9 @@ def _get_message_lock(msg_id: str) -> asyncio.Lock:
 
 
 def _release_message_lock(msg_id: str) -> None:
+    """Remove a message's lock entry. Must be called inside the async with
+    block that holds the lock, or from a synchronous done-callback where
+    no other coroutine can race on the same key."""
     _message_locks.pop(msg_id, None)
 
 
@@ -317,7 +320,7 @@ async def _process_genie_background(
                         "sql_query": sql_query,
                         "result": actual_result,
                     }
-                _release_message_lock(msg_id)
+                    _release_message_lock(msg_id)
 
                 # Save query log
                 try:
@@ -344,7 +347,7 @@ async def _process_genie_background(
                     "error": result.get("error"),
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
-            _release_message_lock(msg_id)
+                _release_message_lock(msg_id)
             return
 
         except GenieRateLimitError as e:
@@ -364,7 +367,7 @@ async def _process_genie_background(
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
-            _release_message_lock(msg_id)
+                _release_message_lock(msg_id)
             return
         except Exception as e:
             last_error = str(e)
@@ -387,7 +390,7 @@ async def _process_genie_background(
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
             "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
         }
-    _release_message_lock(msg_id)
+        _release_message_lock(msg_id)
 
 
 # ---------------------------------------------------------------------------
@@ -487,11 +490,11 @@ async def _handle_query(
             "sql_query": sql_query,
             "result": actual_result,
         }
-        _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
+            _sweep_synthetic_messages()
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-        _release_message_lock(msg_id)
+            _release_message_lock(msg_id)
 
         # Save query log
         try:
@@ -513,8 +516,8 @@ async def _handle_query(
     conv_id, msg_id, att_id = _make_synthetic_ids()
     response = _format_executing_response(conv_id, msg_id)
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
-    _sweep_synthetic_messages()
     async with _get_message_lock(msg_id):
+        _sweep_synthetic_messages()
         _synthetic_messages[msg_id] = response
 
     task = asyncio.create_task(_process_genie_background(

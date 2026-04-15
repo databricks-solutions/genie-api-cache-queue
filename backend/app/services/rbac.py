@@ -134,7 +134,10 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
 
     assigned = None
     if _db.db_service and identity:
-        assigned = await _db.db_service.get_user_role(identity)
+        try:
+            assigned = await _db.db_service.get_user_role(identity)
+        except ValueError:
+            pass
 
     role = assigned or DEFAULT_ROLE
     if len(_role_cache) > _ROLE_CACHE_MAX:

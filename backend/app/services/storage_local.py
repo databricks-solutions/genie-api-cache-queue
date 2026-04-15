@@ -30,10 +30,8 @@ class LocalStorageService:
         self.embeddings_file = embeddings_file
         self.cache_ttl_hours = cache_ttl_hours
         self._gateways: Dict = {}
-        self._roles_file = str(Path(cache_file).parent / "user_roles.json")
         self._ensure_data_dir()
         self._load_data()
-        self._load_roles()
 
     def _ensure_data_dir(self):
         """Ensure data directory exists"""
@@ -219,42 +217,6 @@ class LocalStorageService:
         del self._gateways[gateway_id]
         logger.info("Gateway deleted: id=%s", gateway_id)
         return True
-
-    # --- User roles CRUD (persisted to disk) ---
-
-    def _load_roles(self):
-        if os.path.exists(self._roles_file):
-            with open(self._roles_file, 'r') as f:
-                self._user_roles = json.load(f)
-        else:
-            self._user_roles = {}
-
-    def _save_roles(self):
-        with open(self._roles_file, 'w') as f:
-            json.dump(self._user_roles, f, indent=2, default=str)
-
-    def get_user_role(self, identity: str):
-        entry = self._user_roles.get(identity)
-        return entry["role"] if entry else None
-
-    def set_user_role(self, identity: str, role: str, granted_by: str = None):
-        self._user_roles[identity] = {
-            "identity": identity,
-            "role": role,
-            "granted_by": granted_by,
-            "granted_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._save_roles()
-
-    def list_user_roles(self) -> list:
-        return sorted(self._user_roles.values(), key=lambda r: r.get("granted_at", ""), reverse=True)
-
-    def delete_user_role(self, identity: str):
-        self._user_roles.pop(identity, None)
-        self._save_roles()
-
-    def count_owners(self) -> int:
-        return sum(1 for r in self._user_roles.values() if r.get("role") == "owner")
 
     def get_gateway_stats(self, gateway_id: str) -> Dict:
         """Get cache and query stats for a gateway."""

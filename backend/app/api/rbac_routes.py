@@ -58,6 +58,8 @@ async def _check_last_owner(email: str, new_role: str = None, *, caller_token: s
     implicit owner will remain after the operation.
     """
     import app.services.database as _db
+    if not _db.db_service:
+        return
     target_role = await _db.db_service.get_user_role(email)
     if target_role == "owner" and new_role != "owner":
         owner_count = await _db.db_service.count_owners()
