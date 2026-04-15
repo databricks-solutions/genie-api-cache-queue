@@ -77,7 +77,7 @@ class DynamicStorageService:
                 connection_string=runtime_settings.postgres_connection_string,
                 table_name=runtime_settings.full_table_name,
                 query_log_table_name=runtime_settings.query_log_table_name,
-                databricks_pat=sp_token,
+                lakebase_service_token=sp_token,
                 databricks_host=runtime_settings.databricks_host,
                 lakebase_instance_name=runtime_settings.runtime.lakebase_instance_name if runtime_settings.runtime else None,
                 cache_ttl_hours=ttl

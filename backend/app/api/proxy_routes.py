@@ -62,19 +62,6 @@ def _map_status(raw_status: dict) -> ProxyQueryStatusResponse:
     )
 
 
-def _validate_required_ids(runtime_config: RuntimeConfig):
-    """Validate that space_id and warehouse_id are present."""
-    if not runtime_config.genie_space_id:
-        raise HTTPException(
-            status_code=400,
-            detail="space_id is required (either in the request body or configured as server default)",
-        )
-    if not runtime_config.sql_warehouse_id:
-        raise HTTPException(
-            status_code=400,
-            detail="warehouse_id is required (either in the request body or configured as server default)",
-        )
-
 
 @proxy_router.post("/query", response_model=ProxyQueryResponse)
 async def proxy_submit_query(body: ProxyQueryRequest, request: Request):

@@ -54,21 +54,28 @@ ATT_PREFIX = "acache_"
 
 def _sweep_synthetic_messages():
     """Evict oldest completed entries when the store exceeds _SYNTHETIC_MAX.
-    Only removes entries whose background processing is finished (no active lock).
+    Prefers unlocked entries; falls back to oldest locked entries if all are locked.
     """
     overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
     if overflow <= 0:
         return
     evicted = 0
+    skipped_locked = []
     for k in list(_synthetic_messages.keys()):
         if evicted >= overflow:
             break
         lock = _message_locks.get(k)
         if lock is not None and lock.locked():
+            skipped_locked.append(k)
             continue
         _synthetic_messages.pop(k, None)
         _message_locks.pop(k, None)
         evicted += 1
+    remaining = overflow - evicted
+    if remaining > 0:
+        for k in skipped_locked[:remaining]:
+            _synthetic_messages.pop(k, None)
+            _message_locks.pop(k, None)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +317,7 @@ async def _process_genie_background(
                         "sql_query": sql_query,
                         "result": actual_result,
                     }
-                _release_message_lock(msg_id)
+                    _release_message_lock(msg_id)
 
                 # Save query log
                 try:
@@ -337,7 +344,7 @@ async def _process_genie_background(
                     "error": result.get("error"),
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
-            _release_message_lock(msg_id)
+                _release_message_lock(msg_id)
             return
 
         except GenieRateLimitError as e:
@@ -357,7 +364,7 @@ async def _process_genie_background(
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
-            _release_message_lock(msg_id)
+                _release_message_lock(msg_id)
             return
         except Exception as e:
             last_error = str(e)
@@ -380,7 +387,7 @@ async def _process_genie_background(
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
             "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
         }
-    _release_message_lock(msg_id)
+        _release_message_lock(msg_id)
 
 
 # ---------------------------------------------------------------------------
@@ -480,11 +487,11 @@ async def _handle_query(
             "sql_query": sql_query,
             "result": actual_result,
         }
+        _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-        _release_message_lock(msg_id)
-        _sweep_synthetic_messages()
+            _release_message_lock(msg_id)
 
         # Save query log
         try:

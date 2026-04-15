@@ -11,8 +11,6 @@ from pathlib import Path
 import numpy as np
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timedelta, timezone
-import os
-from pathlib import Path
 try:
     from sklearn.metrics.pairwise import cosine_similarity
 except ImportError:

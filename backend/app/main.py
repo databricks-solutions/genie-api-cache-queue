@@ -55,11 +55,11 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
         pass
-
-    from app.services.rbac import close_http_client
-    from app.api.gateway_routes import close_discovery_client
-    await close_http_client()
-    await close_discovery_client()
+    finally:
+        from app.services.rbac import close_http_client
+        from app.api.gateway_routes import close_discovery_client
+        await close_http_client()
+        await close_discovery_client()
 
 
 app = FastAPI(

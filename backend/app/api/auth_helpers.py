@@ -105,7 +105,14 @@ async def require_role(req: Request, min_role: str) -> tuple:
             detail="No authentication token or user identity available.",
         )
     if not token and identity:
-        logger.info("Email-only identity for %s (no bearer token) — SCIM admin check skipped", identity)
+        logger.info("Email-only identity for %s (no bearer token) — default role only", identity)
+        role = "use"
+        if not role_gte(role, min_role):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Role '{min_role}' required. Without a bearer token, only the default 'use' role is granted.",
+            )
+        return identity, token, role
 
     _s = get_settings()
     host = get_effective_setting("databricks_host") or _s.databricks_host or ""
