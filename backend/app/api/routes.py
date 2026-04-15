@@ -369,7 +369,7 @@ async def cache_count(req: Request):
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
-            storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
+            storage_backend="lakebase",
             lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
             lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
             cache_table_name=get_effective_setting("cache_table_name") or settings.pgvector_table_name or "cached_queries",
@@ -390,7 +390,7 @@ async def clear_cache(req: Request, space_id: Optional[str] = None):
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
-            storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
+            storage_backend="lakebase",
             lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
             lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
             cache_table_name=get_effective_setting("cache_table_name") or settings.pgvector_table_name or "cached_queries",

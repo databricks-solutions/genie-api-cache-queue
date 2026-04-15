@@ -59,7 +59,7 @@ def resolve_user_token(request: Request) -> str:
     from app.auth import get_service_principal_token
     sp_token = get_service_principal_token()
     if sp_token:
-        logger.warning("Using service principal token — user token passthrough is disabled.")
+        logger.debug("Using service principal token — user token passthrough is disabled.")
         return sp_token
 
     raise HTTPException(

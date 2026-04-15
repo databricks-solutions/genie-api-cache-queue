@@ -147,8 +147,8 @@ class DynamicStorageService:
                 backend = await self._get_or_create_pgvector_backend(runtime_settings)
                 await self._proactive_refresh(backend)
                 return backend
-            if rt.storage_backend == 'local':
-                return self.default_backend
+            if rt.storage_backend not in ('lakebase', 'pgvector'):
+                raise ValueError(f"Unsupported storage backend: '{rt.storage_backend}'. Only 'lakebase' is supported.")
         return self.default_backend
 
     async def _with_reconnect(self, operation, runtime_settings):

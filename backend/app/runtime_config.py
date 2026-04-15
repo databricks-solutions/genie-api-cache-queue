@@ -103,14 +103,6 @@ class RuntimeSettings:
         return self.base.is_databricks
 
     @property
-    def local_cache_file(self) -> str:
-        return self.base.local_cache_file
-
-    @property
-    def local_embeddings_file(self) -> str:
-        return self.base.local_embeddings_file
-
-    @property
     def shared_cache(self) -> bool:
         if self.runtime and self.runtime.shared_cache is not None:
             return self.runtime.shared_cache

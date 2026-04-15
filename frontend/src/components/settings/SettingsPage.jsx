@@ -472,7 +472,7 @@ export default function SettingsPage() {
             </FieldRow>
 
             <FieldRow label="Lakebase Service Token" description={
-              tokenSource === 'auto' ? 'Using auto-injected DATABRICKS_TOKEN. Set a custom token to override.'
+              tokenSource === 'auto' ? 'Using app service principal credentials (DATABRICKS_CLIENT_ID/SECRET). Set a custom token to override.'
                 : tokenSource === 'override' ? 'Custom token active (in-memory override).'
                 : 'Service principal token for Lakebase operations.'
             }>

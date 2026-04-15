@@ -43,6 +43,8 @@ async def list_users(req: Request):
     """List all explicit role assignments. Manage or above."""
     await require_role(req, "manage")
     import app.services.database as _db
+    if not _db.db_service:
+        raise HTTPException(status_code=503, detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.")
     try:
         return await _db.db_service.list_user_roles()
     except ValueError as e:
@@ -62,7 +64,10 @@ async def _check_last_owner(email: str, new_role: str = None, *, caller_token: s
     """
     import app.services.database as _db
     if not _db.db_service:
-        return
+        raise HTTPException(
+            status_code=503,
+            detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.",
+        )
     try:
         target_role = await _db.db_service.get_user_role(email)
     except ValueError:
@@ -108,15 +113,23 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
     host = get_effective_setting("databricks_host") or _s.databricks_host or ""
     host = ensure_https(host) if host else ""
     import app.services.database as _db
+    if not _db.db_service:
+        raise HTTPException(status_code=503, detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.")
     try:
         async with _owner_lock:
+            target_role = await _db.db_service.get_user_role(email)
+            if target_role and not role_gte(caller_role, target_role):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Cannot modify a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
+                )
             await _check_last_owner(email, body.role, caller_token=token, host=host)
             await _db.db_service.set_user_role(email, body.role, granted_by=identity)
+            invalidate_role_cache(email)
     except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    invalidate_role_cache(email)
     logger.info("Role assigned: %s → %s by %s", email, body.role, identity)
     return {"identity": email, "role": body.role, "granted_by": identity}
 
@@ -132,6 +145,8 @@ async def remove_user_role(email: str, req: Request):
     host = get_effective_setting("databricks_host") or _s.databricks_host or ""
     host = ensure_https(host) if host else ""
     import app.services.database as _db
+    if not _db.db_service:
+        raise HTTPException(status_code=503, detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.")
     try:
         async with _owner_lock:
             target_role = await _db.db_service.get_user_role(email)
@@ -142,10 +157,10 @@ async def remove_user_role(email: str, req: Request):
                 )
             await _check_last_owner(email, caller_token=token, host=host)
             await _db.db_service.delete_user_role(email)
+            invalidate_role_cache(email)
     except HTTPException:
         raise
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    invalidate_role_cache(email)
     logger.info("Role removed: %s by %s", email, identity)
     return {"success": True}

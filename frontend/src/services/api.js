@@ -25,7 +25,7 @@ const _syncServerConfig = async () => {
         shared_cache: server.shared_cache ?? local.shared_cache ?? true,
         embedding_provider: server.embedding_provider || local.embedding_provider || 'databricks',
         databricks_embedding_endpoint: server.databricks_embedding_endpoint || local.databricks_embedding_endpoint || 'databricks-gte-large-en',
-        storage_backend: server.storage_backend === 'pgvector' ? 'lakebase' : (server.storage_backend || local.storage_backend || 'local'),
+        storage_backend: 'lakebase',
         lakebase_instance_name: server.lakebase_instance_name || local.lakebase_instance_name || '',
         lakebase_catalog: server.lakebase_catalog || local.lakebase_catalog || '',
         lakebase_schema: server.lakebase_schema || local.lakebase_schema || 'public',
@@ -90,7 +90,7 @@ const withConfig = (data = {}) => {
     return {
       ...data,
       config: {
-        storage_backend: config.storage_backend || 'local',
+        storage_backend: 'lakebase',
         genie_space_id: activeSpaceId,
         sql_warehouse_id: config.sql_warehouse_id,
         similarity_threshold: parseFloat(config.similarity_threshold) || 0.92,

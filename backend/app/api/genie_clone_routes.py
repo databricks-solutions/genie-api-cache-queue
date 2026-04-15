@@ -30,10 +30,10 @@ from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
 from app.services.prompt_enricher import get_space_context
-from app.services.storage_local import get_local_queue as _get_local_queue
+from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
 import app.services.database as _db
 
-_rate_limiter = _get_local_queue()
+_rate_limiter = _get_rate_limiter()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -45,6 +45,7 @@ genie_clone_router = APIRouter()
 # ---------------------------------------------------------------------------
 _synthetic_messages: dict[str, dict] = {}
 _message_locks: dict[str, asyncio.Lock] = {}
+_sweep_lock = asyncio.Lock()
 _SYNTHETIC_MAX = 2000
 
 CONV_PREFIX = "ccache_"
@@ -52,30 +53,35 @@ MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
 
 
-def _sweep_synthetic_messages():
+async def _sweep_synthetic_messages():
     """Evict oldest completed entries when the store exceeds _SYNTHETIC_MAX.
+    Acquires _sweep_lock to serialize access to the full dict.
     Prefers unlocked entries; falls back to oldest locked entries if all are locked.
     """
     overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
     if overflow <= 0:
         return
-    evicted = 0
-    skipped_locked = []
-    for k in list(_synthetic_messages.keys()):
-        if evicted >= overflow:
-            break
-        lock = _message_locks.get(k)
-        if lock is not None and lock.locked():
-            skipped_locked.append(k)
-            continue
-        _synthetic_messages.pop(k, None)
-        _message_locks.pop(k, None)
-        evicted += 1
-    remaining = overflow - evicted
-    if remaining > 0:
-        for k in skipped_locked[:remaining]:
+    async with _sweep_lock:
+        overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
+        if overflow <= 0:
+            return
+        evicted = 0
+        skipped_locked = []
+        for k in list(_synthetic_messages.keys()):
+            if evicted >= overflow:
+                break
+            lock = _message_locks.get(k)
+            if lock is not None and lock.locked():
+                skipped_locked.append(k)
+                continue
             _synthetic_messages.pop(k, None)
             _message_locks.pop(k, None)
+            evicted += 1
+        remaining = overflow - evicted
+        if remaining > 0:
+            for k in skipped_locked[:remaining]:
+                _synthetic_messages.pop(k, None)
+                _message_locks.pop(k, None)
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +234,7 @@ async def _process_genie_background(
     delay: float = 0,
     max_retries: int = 3,
     gateway_id: str = None,
+    auth_mode: str = "user",
 ):
     """Call Genie in the background. Updates _synthetic_messages when done."""
     logger.info(
@@ -304,6 +311,7 @@ async def _process_genie_background(
                     "from_cache": False,
                     "sql_query": sql_query,
                     "result": None,
+                    "auth_mode": auth_mode,
                 }
                 async with _get_message_lock(msg_id):
                     _synthetic_messages[msg_id] = completed
@@ -329,6 +337,7 @@ async def _process_genie_background(
                         "from_cache": False,
                         "sql_query": sql_query,
                         "result": actual_result,
+                        "auth_mode": auth_mode,
                     }
 
                 # Save query log
@@ -354,7 +363,7 @@ async def _process_genie_background(
                     "status": result.get("status", "FAILED"),
                     "attachments": [],
                     "error": result.get("error"),
-                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
                 }
             return
 
@@ -373,7 +382,7 @@ async def _process_genie_background(
                     "status": "FAILED",
                     "attachments": [],
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
-                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
                 }
             return
         except Exception as e:
@@ -395,7 +404,7 @@ async def _process_genie_background(
             "status": "FAILED",
             "attachments": [],
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
-            "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+            "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
         }
 
 
@@ -498,10 +507,11 @@ async def _handle_query(
             "result": actual_result,
             "auth_mode": auth_mode,
         }
+        await _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
-            _sweep_synthetic_messages()
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+        _release_message_lock(msg_id)
 
         # Save query log
         try:
@@ -523,8 +533,8 @@ async def _handle_query(
     conv_id, msg_id, att_id = _make_synthetic_ids()
     response = _format_executing_response(conv_id, msg_id)
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode}
+    await _sweep_synthetic_messages()
     async with _get_message_lock(msg_id):
-        _sweep_synthetic_messages()
         _synthetic_messages[msg_id] = response
 
     task = asyncio.create_task(_process_genie_background(
@@ -539,6 +549,7 @@ async def _handle_query(
         att_id=att_id,
         conversation_id=conversation_id,
         gateway_id=gateway.get("id") if gateway else None,
+        auth_mode=auth_mode,
     ))
 
     def _on_task_done(t):
@@ -551,7 +562,7 @@ async def _handle_query(
                 "status": "FAILED",
                 "attachments": [],
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
-                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
             }
         _release_message_lock(msg_id)
 

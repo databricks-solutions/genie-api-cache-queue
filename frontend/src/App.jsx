@@ -52,11 +52,17 @@ function App() {
   const [spWarning, setSpWarning] = useState(null)
 
   useEffect(() => {
-    api.checkAuthMode()
-      .then(data => {
-        if (data.auth_mode === 'service_principal') setSpWarning(data.message)
-      })
-      .catch(() => {})
+    const checkAuth = () => {
+      api.checkAuthMode()
+        .then(data => {
+          setSpWarning(data.auth_mode === 'service_principal' ? data.message : null)
+        })
+        .catch(() => {})
+    }
+    checkAuth()
+    const onVisibility = () => { if (document.visibilityState === 'visible') checkAuth() }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
   }, [])
 
   return (
