@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth_helpers import extract_bearer_token_optional, require_role
-from app.services.rbac import ROLES, role_gte, invalidate_role_cache
+from app.services.rbac import ROLES, role_gte, invalidate_role_cache, is_workspace_admin
 
 logger = logging.getLogger(__name__)
 rbac_router = APIRouter()
@@ -50,23 +50,30 @@ class RoleAssignment(BaseModel):
     role: str
 
 
-async def _check_last_owner(email: str, new_role: str = None):
-    """Prevent removing or downgrading the last owner."""
+async def _check_last_owner(email: str, new_role: str = None, *, caller_token: str = "", host: str = ""):
+    """Prevent removing or downgrading the last owner.
+
+    Workspace admins are implicit owners not tracked in the DB.  If the
+    caller is a workspace admin the guard is relaxed because at least one
+    implicit owner will remain after the operation.
+    """
     import app.services.database as _db
     target_role = await _db.db_service.get_user_role(email)
     if target_role == "owner" and new_role != "owner":
         owner_count = await _db.db_service.count_owners()
         if owner_count <= 1:
+            if caller_token and host and await is_workspace_admin(caller_token, host):
+                return
             raise HTTPException(
                 status_code=409,
-                detail="Cannot remove or downgrade the last owner. Assign another owner first.",
+                detail="Cannot remove or downgrade the last owner. Assign another owner first, or ensure a workspace admin exists.",
             )
 
 
 @rbac_router.post("/users/{email}/role", status_code=200)
 async def assign_role(email: str, body: RoleAssignment, req: Request):
     """Assign a role to a user. Manage or above."""
-    identity, _, caller_role = await require_role(req, "manage")
+    identity, token, caller_role = await require_role(req, "manage")
     if body.role not in ROLES:
         raise HTTPException(
             status_code=400,
@@ -77,9 +84,15 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
             status_code=403,
             detail=f"Cannot assign role '{body.role}' — your role ('{caller_role}') is insufficient.",
         )
+    from app.api.config_store import get_effective_setting
+    from app.auth import ensure_https
+    from app.config import get_settings
+    _s = get_settings()
+    host = get_effective_setting("databricks_host") or _s.databricks_host or ""
+    host = ensure_https(host) if host else ""
     import app.services.database as _db
     async with _owner_lock:
-        await _check_last_owner(email, body.role)
+        await _check_last_owner(email, body.role, caller_token=token, host=host)
         await _db.db_service.set_user_role(email, body.role, granted_by=identity)
     invalidate_role_cache(email)
     logger.info("Role assigned: %s → %s by %s", email, body.role, identity)
@@ -89,7 +102,13 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
 @rbac_router.delete("/users/{email}")
 async def remove_user_role(email: str, req: Request):
     """Remove explicit role assignment (reverts to default 'use'). Manage or above."""
-    identity, _, caller_role = await require_role(req, "manage")
+    identity, token, caller_role = await require_role(req, "manage")
+    from app.api.config_store import get_effective_setting
+    from app.auth import ensure_https
+    from app.config import get_settings
+    _s = get_settings()
+    host = get_effective_setting("databricks_host") or _s.databricks_host or ""
+    host = ensure_https(host) if host else ""
     import app.services.database as _db
     async with _owner_lock:
         target_role = await _db.db_service.get_user_role(email)
@@ -98,7 +117,7 @@ async def remove_user_role(email: str, req: Request):
                 status_code=403,
                 detail=f"Cannot remove a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
             )
-        await _check_last_owner(email)
+        await _check_last_owner(email, caller_token=token, host=host)
         await _db.db_service.delete_user_role(email)
     invalidate_role_cache(email)
     logger.info("Role removed: %s by %s", email, identity)

@@ -317,7 +317,7 @@ async def _process_genie_background(
                         "sql_query": sql_query,
                         "result": actual_result,
                     }
-                    _release_message_lock(msg_id)
+                _release_message_lock(msg_id)
 
                 # Save query log
                 try:
@@ -344,7 +344,7 @@ async def _process_genie_background(
                     "error": result.get("error"),
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
-                _release_message_lock(msg_id)
+            _release_message_lock(msg_id)
             return
 
         except GenieRateLimitError as e:
@@ -364,7 +364,7 @@ async def _process_genie_background(
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
                 }
-                _release_message_lock(msg_id)
+            _release_message_lock(msg_id)
             return
         except Exception as e:
             last_error = str(e)
@@ -387,7 +387,7 @@ async def _process_genie_background(
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
             "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
         }
-        _release_message_lock(msg_id)
+    _release_message_lock(msg_id)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +491,7 @@ async def _handle_query(
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-            _release_message_lock(msg_id)
+        _release_message_lock(msg_id)
 
         # Save query log
         try:

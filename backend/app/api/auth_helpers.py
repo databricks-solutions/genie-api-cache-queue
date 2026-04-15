@@ -88,8 +88,8 @@ async def require_role(req: Request, min_role: str) -> tuple:
     """Resolve caller's effective role and raise 403 if below min_role.
 
     Returns (identity, token, role).  When user token passthrough is
-    disabled, falls back to email-only identity (SCIM admin check is
-    skipped, DB role lookup still works).
+    disabled, falls back to email-only identity with empty token — SCIM
+    admin check is skipped but DB role assignments are still honoured.
     """
     from app.api.config_store import get_effective_setting
     from app.auth import ensure_https
@@ -104,15 +104,6 @@ async def require_role(req: Request, min_role: str) -> tuple:
             status_code=401,
             detail="No authentication token or user identity available.",
         )
-    if not token and identity:
-        logger.info("Email-only identity for %s (no bearer token) — default role only", identity)
-        role = "use"
-        if not role_gte(role, min_role):
-            raise HTTPException(
-                status_code=403,
-                detail=f"Role '{min_role}' required. Without a bearer token, only the default 'use' role is granted.",
-            )
-        return identity, token, role
 
     _s = get_settings()
     host = get_effective_setting("databricks_host") or _s.databricks_host or ""
