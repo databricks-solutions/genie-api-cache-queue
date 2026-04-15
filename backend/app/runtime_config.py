@@ -138,7 +138,6 @@ class RuntimeSettings:
                   else self.base.lakebase_catalog)
         schema = (self.runtime.lakebase_schema if self.runtime and self.runtime.lakebase_schema
                  else self.base.lakebase_schema)
-        # runtime.cache_table_name is the frontend override; falls back to env var PGVECTOR_TABLE_NAME
         table = (self.runtime.cache_table_name if self.runtime and self.runtime.cache_table_name
                 else self.base.pgvector_table_name)
         if catalog:
