@@ -72,8 +72,7 @@ class PGVectorStorageService:
         schema_prefix = self.table_name.rsplit('.', 1)[0] if '.' in self.table_name else 'public'
         self.schema_name = schema_prefix
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
-        query_log_bare = self.query_log_table_name.rsplit('.', 1)[-1]
-        self.query_log_table_name = f"{schema_prefix}.{query_log_bare}"
+        self.query_log_table_name = f"{schema_prefix}.{self.query_log_table_name.rsplit('.', 1)[-1]}"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -171,8 +170,12 @@ class PGVectorStorageService:
 
         async with self.pool.acquire() as conn:
             if self.schema_name != 'public':
-                await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema_name}")
-                logger.info("Ensured schema '%s' exists", self.schema_name)
+                safe_schema = self.schema_name.replace('"', '""')
+                try:
+                    await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{safe_schema}"')
+                    logger.info("Ensured schema '%s' exists", self.schema_name)
+                except Exception as e:
+                    logger.warning("Schema creation skipped (may require manual CREATE): %s", e)
             await self._ensure_extension(conn)
             await register_vector(conn)
             await self._ensure_table(conn)

@@ -91,7 +91,10 @@ class Settings(BaseSettings):
         if self.lakebase_catalog:
             # Lakebase uses three-level namespace: catalog.schema.table
             return f"{self.lakebase_catalog}.{self.lakebase_schema}.{self.pgvector_table_name}"
-        
+
+        if self.lakebase_schema and self.lakebase_schema != "public":
+            return f"{self.lakebase_schema}.{self.pgvector_table_name}"
+
         # Standard PostgreSQL uses schema.table (schema is set in search_path)
         return self.pgvector_table_name
     
