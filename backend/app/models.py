@@ -157,8 +157,8 @@ class GatewayConfig(BaseModel):
     similarity_threshold: float = 0.92
     max_queries_per_minute: int = 5
     cache_ttl_hours: float = 24
-    question_normalization_enabled: bool = True
-    cache_validation_enabled: bool = True
+    question_normalization_enabled: bool = False
+    cache_validation_enabled: bool = False
     caching_enabled: bool = True
     embedding_provider: str = "databricks"
     databricks_embedding_endpoint: str = "databricks-gte-large-en"

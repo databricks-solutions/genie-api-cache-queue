@@ -57,7 +57,6 @@ class PGVectorStorageService:
     ):
         self.connection_string = connection_string
         self.table_name = self._normalize_table_name(table_name)
-        self.query_log_table_name = self._normalize_table_name(query_log_table_name)
         self.databricks_pat = databricks_pat
         # Ensure host has https:// prefix
         self.databricks_host = databricks_host
@@ -68,9 +67,12 @@ class PGVectorStorageService:
         self.pool = None
         self.oauth_token = None
         self.jwt_expires_at = 0  # epoch timestamp when the current JWT expires
-        # Gateway table in same schema as cache table
-        schema_prefix = self.table_name.rsplit('.', 1)[0] if '.' in self.table_name else 'public'
+        self._schema_ensured = False
+        schema_prefix = self.table_name.rsplit('.', 1)[0]
+        self.schema_name = schema_prefix
+        log_base = self._normalize_table_name(query_log_table_name).rsplit('.', 1)[-1]
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
+        self.query_log_table_name = f"{schema_prefix}.{log_base}"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -167,6 +169,25 @@ class PGVectorStorageService:
         logger.info("Connection pool created with SSL")
 
         async with self.pool.acquire() as conn:
+            if self.schema_name != 'public' and not self._schema_ensured:
+                safe_schema = self.schema_name.replace('"', '""')
+                try:
+                    await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{safe_schema}"')
+                    logger.info("Ensured schema '%s' exists", self.schema_name)
+                except Exception as e:
+                    # Check if schema exists despite the error (e.g., owned by another role)
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
+                        self.schema_name
+                    )
+                    if exists:
+                        logger.info("Schema '%s' already exists (owned by another role)", self.schema_name)
+                    else:
+                        raise RuntimeError(
+                            f"Schema '{self.schema_name}' does not exist and could not be created: {e}. "
+                            f"Ensure the SP has CAN_MANAGE on the Lakebase project, or create the schema manually."
+                        ) from e
+                self._schema_ensured = True
             await self._ensure_extension(conn)
             await register_vector(conn)
             await self._ensure_table(conn)
@@ -470,8 +491,8 @@ class PGVectorStorageService:
                 similarity_threshold FLOAT DEFAULT 0.92,
                 max_queries_per_minute INT DEFAULT 5,
                 cache_ttl_hours FLOAT DEFAULT 24,
-                question_normalization_enabled BOOLEAN DEFAULT true,
-                cache_validation_enabled BOOLEAN DEFAULT true,
+                question_normalization_enabled BOOLEAN DEFAULT false,
+                cache_validation_enabled BOOLEAN DEFAULT false,
                 caching_enabled BOOLEAN DEFAULT true,
                 embedding_provider TEXT DEFAULT 'databricks',
                 databricks_embedding_endpoint TEXT DEFAULT 'databricks-gte-large-en',
@@ -830,8 +851,8 @@ class PGVectorStorageService:
             """,
                 config["id"], config["name"], config["genie_space_id"], config["sql_warehouse_id"],
                 config.get("similarity_threshold", 0.92), config.get("max_queries_per_minute", 5),
-                config.get("cache_ttl_hours", 24), config.get("question_normalization_enabled", True),
-                config.get("cache_validation_enabled", True), config.get("caching_enabled", True),
+                config.get("cache_ttl_hours", 24), config.get("question_normalization_enabled", False),
+                config.get("cache_validation_enabled", False), config.get("caching_enabled", True),
                 config.get("embedding_provider", "databricks"),
                 config.get("databricks_embedding_endpoint", "databricks-gte-large-en"),
                 config.get("shared_cache", True), config.get("status", "active"),

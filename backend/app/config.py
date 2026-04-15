@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # Example: instance-xxx.database.azuredatabricks.net
     lakebase_instance: str = os.getenv("LAKEBASE_INSTANCE", "")
     lakebase_catalog: str = os.getenv("LAKEBASE_CATALOG", "")  # e.g., sean_lakebase_genie
-    lakebase_schema: str = os.getenv("LAKEBASE_SCHEMA", "public")  # Usually 'public'
+    lakebase_schema: str = os.getenv("LAKEBASE_SCHEMA", "public")
     
     @property
     def postgres_connection_string(self) -> str:
@@ -91,8 +91,11 @@ class Settings(BaseSettings):
         if self.lakebase_catalog:
             # Lakebase uses three-level namespace: catalog.schema.table
             return f"{self.lakebase_catalog}.{self.lakebase_schema}.{self.pgvector_table_name}"
-        
-        # Standard PostgreSQL uses schema.table (schema is set in search_path)
+
+        if self.lakebase_schema and self.lakebase_schema != "public":
+            return f"{self.lakebase_schema}.{self.pgvector_table_name}"
+
+        # Plain PostgreSQL: bare table name, schema resolved via search_path
         return self.pgvector_table_name
     
     @property

@@ -134,7 +134,6 @@ class RuntimeSettings:
 
     @property
     def full_table_name(self) -> str:
-        from urllib.parse import quote_plus
         catalog = (self.runtime.lakebase_catalog if self.runtime and self.runtime.lakebase_catalog
                   else self.base.lakebase_catalog)
         schema = (self.runtime.lakebase_schema if self.runtime and self.runtime.lakebase_schema
@@ -143,6 +142,8 @@ class RuntimeSettings:
                 else self.base.pgvector_table_name)
         if catalog:
             return f"{catalog}.{schema}.{table}"
+        if schema and schema != "public":
+            return f"{schema}.{table}"
         return table
 
     @property
@@ -155,6 +156,8 @@ class RuntimeSettings:
                 else "query_logs")
         if catalog:
             return f"{catalog}.{schema}.{table}"
+        if schema and schema != "public":
+            return f"{schema}.{table}"
         return table
 
     @property
