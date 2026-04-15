@@ -265,8 +265,8 @@ async def list_genie_spaces(req: Request):
     try:
         token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No user token available for Genie Spaces discovery")
-            return {"spaces": []}
+            logger.warning("No token available for Genie Spaces discovery — enable user token passthrough or configure a service principal")
+            return {"spaces": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/genie/spaces"
@@ -293,8 +293,8 @@ async def list_warehouses(req: Request):
     try:
         token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No user token available for warehouse discovery")
-            return {"warehouses": []}
+            logger.warning("No token available for warehouse discovery — enable user token passthrough or configure a service principal")
+            return {"warehouses": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/sql/warehouses"
@@ -321,8 +321,8 @@ async def list_serving_endpoints(req: Request):
     try:
         token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No user token available for serving endpoints discovery")
-            return {"endpoints": []}
+            logger.warning("No token available for serving endpoints discovery — enable user token passthrough or configure a service principal")
+            return {"endpoints": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/serving-endpoints"
@@ -360,8 +360,8 @@ async def list_workspace_users(req: Request):
     try:
         token = resolve_user_token_optional(req)
         if not token:
-            logger.info("No token available for workspace user discovery")
-            return {"users": []}
+            logger.warning("No token available for workspace user discovery — enable user token passthrough or configure a service principal")
+            return {"users": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/preview/scim/v2/Users"

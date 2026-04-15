@@ -125,6 +125,11 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
     if token and await is_workspace_admin(token, host):
         return 'owner'
 
+    # Skip cache for empty identity to prevent all anonymous requests sharing
+    # a single cache slot (key ""), which could leak an elevated role.
+    if not identity:
+        return DEFAULT_ROLE
+
     now = time.monotonic()
     cached = _role_cache.get(identity)
     if cached is not None:
@@ -133,7 +138,7 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
             return role
 
     assigned = None
-    if _db.db_service and identity:
+    if _db.db_service:
         try:
             assigned = await _db.db_service.get_user_role(identity)
         except ValueError:
