@@ -148,6 +148,7 @@ export default function SettingsPage() {
   // Users management state (manage role and above)
   const [users, setUsers] = useState([])
   const [usersLoading, setUsersLoading] = useState(false)
+  const [userError, setUserError] = useState(null)
   const [newUserEmail, setNewUserEmail] = useState('')
   const [newUserRole, setNewUserRole] = useState('use')
   const [userSaving, setUserSaving] = useState(false)
@@ -226,24 +227,30 @@ export default function SettingsPage() {
   const handleAddUser = async () => {
     if (!newUserEmail.trim()) return
     setUserSaving(true)
+    setUserError(null)
     try {
       const saved = await api.setUserRole(newUserEmail.trim(), newUserRole)
-      // Optimistic update — upsert locally using the response, no second round-trip
       setUsers(prev => {
         const without = prev.filter(u => u.identity !== saved.identity)
         return [...without, saved]
       })
       setNewUserEmail('')
       setNewUserRole('use')
-    } catch { /* ignore */ }
-    finally { setUserSaving(false) }
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Failed to assign role.'
+      setUserError(msg)
+    } finally { setUserSaving(false) }
   }
 
   const handleRemoveUser = async (email) => {
+    setUserError(null)
     try {
       await api.deleteUserRole(email)
       setUsers(prev => prev.filter(u => u.identity !== email))
-    } catch { /* ignore */ }
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Failed to remove user.'
+      setUserError(msg)
+    }
   }
 
   const SIDEBAR = useMemo(
@@ -552,6 +559,12 @@ export default function SettingsPage() {
                   </tbody>
                 </table>
               </div>
+
+              {userError && (
+                <div className="mb-3 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[13px]">
+                  {userError}
+                </div>
+              )}
 
               {/* User list */}
               {usersLoading ? (

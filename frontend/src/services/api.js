@@ -259,6 +259,11 @@ export const api = {
     return response.data;
   },
 
+  checkAuthMode: async () => {
+    const response = await axios.get(`${API_BASE_URL}/auth/mode`);
+    return response.data; // { auth_mode: 'user' | 'service_principal', message }
+  },
+
   getMyRole: async () => {
     const response = await axios.get(`${API_BASE_URL}/users/me`);
     return response.data; // { identity, role }

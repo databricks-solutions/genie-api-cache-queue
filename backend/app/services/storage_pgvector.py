@@ -338,7 +338,7 @@ class PGVectorStorageService:
         (X-Forwarded-Access-Token) is NOT used for Lakebase.
 
         Local development: uses the lakebase_service_token from Settings
-        (either SP client_id:client_secret or PAT).
+        (SP client_id:client_secret format).
 
         The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
         role created via databricks_create_role().
@@ -347,14 +347,12 @@ class PGVectorStorageService:
         from databricks.sdk.core import Config
         import os
 
-        # Inside Databricks Apps: use the app's built-in SP (env vars auto-detected)
         if os.getenv("DATABRICKS_CLIENT_ID"):
             logger.info("Lakebase auth: app built-in SP (DATABRICKS_CLIENT_ID)")
             return WorkspaceClient()
 
-        # Local dev: use the configured lakebase_service_token
         token = self.databricks_pat or ""
-        if ":" in token and not token.startswith("dapi") and not token.startswith("eyJ"):
+        if ":" in token and not token.startswith("eyJ"):
             client_id, client_secret = token.split(":", 1)
             logger.info("Lakebase auth: SP OAuth (client_id=%s...)", client_id[:12])
             config = Config(
@@ -364,19 +362,11 @@ class PGVectorStorageService:
                 auth_type="oauth-m2m",
             )
             return WorkspaceClient(config=config)
-        elif token:
-            logger.info("Lakebase auth: PAT")
-            config = Config(
-                host=self.databricks_host,
-                token=token,
-                auth_type="pat",
-            )
-            return WorkspaceClient(config=config)
-        else:
-            raise ValueError(
-                "No Lakebase credentials available. "
-                "Ensure the app's SP has CAN_MANAGE on the Lakebase project."
-            )
+
+        raise ValueError(
+            "No Lakebase credentials available. "
+            "Set DATABRICKS_CLIENT_ID/SECRET or provide SP client_id:client_secret."
+        )
 
     def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
         """Resolve Lakebase Autoscaling project to (hostname, endpoint_name)."""

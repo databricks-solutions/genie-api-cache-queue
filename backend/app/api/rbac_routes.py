@@ -130,13 +130,13 @@ async def remove_user_role(email: str, req: Request):
     """Remove explicit role assignment (reverts to default 'use'). Manage or above."""
     identity, _, caller_role = await _require_role(req, "manage")
     import app.services.database as _db
-    target_role = await _db.db_service.get_user_role(email)
-    if target_role and not role_gte(caller_role, target_role):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Cannot remove a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
-        )
     async with _owner_lock:
+        target_role = await _db.db_service.get_user_role(email)
+        if target_role and not role_gte(caller_role, target_role):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Cannot remove a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
+            )
         await _check_last_owner(email)
         await _db.db_service.delete_user_role(email)
     invalidate_role_cache(email)

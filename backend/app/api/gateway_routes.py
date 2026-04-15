@@ -272,7 +272,7 @@ async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
 @gateway_router.get("/workspace/genie-spaces")
 async def list_genie_spaces(req: Request):
     """List available Genie Spaces from the workspace.
-    Returns empty list when no user token is available.
+    Uses the user's token when passthrough is enabled, SP token otherwise.
     """
     try:
         token = resolve_user_token_optional(req)
@@ -301,7 +301,7 @@ async def list_genie_spaces(req: Request):
 @gateway_router.get("/workspace/warehouses")
 async def list_warehouses(req: Request):
     """List available SQL warehouses from the workspace.
-    Returns empty list when no user token is available.
+    Uses the user's token when passthrough is enabled, SP token otherwise.
     """
     try:
         token = resolve_user_token_optional(req)
@@ -330,7 +330,7 @@ async def list_warehouses(req: Request):
 @gateway_router.get("/workspace/serving-endpoints")
 async def list_serving_endpoints(req: Request):
     """List available serving endpoints from the workspace.
-    Returns empty list when no user token is available.
+    Uses the user's token when passthrough is enabled, SP token otherwise.
     """
     try:
         token = resolve_user_token_optional(req)

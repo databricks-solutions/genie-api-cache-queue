@@ -27,6 +27,7 @@ import app.services.database as _db
 from app.config import get_settings
 
 _proxy_registry: dict[str, str] = {}
+_PROXY_REGISTRY_MAX = 2000
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -85,6 +86,10 @@ async def submit_query(request: QueryRequest, req: Request):
         if not msg_id:
             raise HTTPException(status_code=500, detail="Internal error: no message_id returned")
         _proxy_registry[query_id] = msg_id
+        if len(_proxy_registry) > _PROXY_REGISTRY_MAX:
+            keys = list(_proxy_registry.keys())[:len(_proxy_registry) - _PROXY_REGISTRY_MAX]
+            for k in keys:
+                _proxy_registry.pop(k, None)
 
         return QueryResponse(query_id=query_id, stage=QueryStage.RECEIVED, message="Query submitted successfully")
     except HTTPException:

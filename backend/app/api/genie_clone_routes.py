@@ -45,10 +45,22 @@ genie_clone_router = APIRouter()
 # ---------------------------------------------------------------------------
 _synthetic_messages: dict[str, dict] = {}
 _message_locks: dict[str, asyncio.Lock] = {}
+_SYNTHETIC_MAX = 2000
 
 CONV_PREFIX = "ccache_"
 MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
+
+
+def _sweep_synthetic_messages():
+    """Evict oldest entries when the store exceeds _SYNTHETIC_MAX."""
+    overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
+    if overflow <= 0:
+        return
+    keys = list(_synthetic_messages.keys())[:overflow]
+    for k in keys:
+        _synthetic_messages.pop(k, None)
+        _message_locks.pop(k, None)
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +98,7 @@ async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:
 def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
     """Build RuntimeSettings using server config overrides (PUT /config) + env defaults.
     If a gateway config is provided, its per-gateway settings override globals.
-    Uses server PAT for Lakebase cache, caller OAuth for Genie/SQL."""
+    Uses app SP OAuth for Lakebase cache, caller OAuth for Genie/SQL."""
     from app.models import RuntimeConfig
     from app.runtime_config import RuntimeSettings
 
@@ -464,6 +476,7 @@ async def _handle_query(
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
             _release_message_lock(msg_id)
+        _sweep_synthetic_messages()
 
         # Save query log
         try:
@@ -487,6 +500,7 @@ async def _handle_query(
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
     async with _get_message_lock(msg_id):
         _synthetic_messages[msg_id] = response
+    _sweep_synthetic_messages()
 
     task = asyncio.create_task(_process_genie_background(
         space_id=space_id,
