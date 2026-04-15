@@ -52,7 +52,7 @@ async def initialize_storage():
             connection_string=settings.postgres_connection_string,
             table_name=settings.full_table_name,
             cache_ttl_hours=settings.cache_ttl_hours,
-            databricks_pat=token,
+            lakebase_service_token=token,
             databricks_host=settings.databricks_host,
             lakebase_instance_name=settings.lakebase_instance,
         )
@@ -171,3 +171,6 @@ class DatabaseService:
 
     async def delete_user_role(self, identity: str):
         return await self.backend.delete_user_role(identity)
+
+    async def count_owners(self) -> int:
+        return await self.backend.count_owners()

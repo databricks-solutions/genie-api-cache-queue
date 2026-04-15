@@ -79,6 +79,37 @@ function EditableText({ value, onChange, placeholder, masked }) {
   )
 }
 
+/* ── User search dropdown ── */
+function UserSearchDropdown({ query, users, onSelect }) {
+  const filtered = query
+    ? users.filter(u =>
+        u.email.toLowerCase().includes(query.toLowerCase()) ||
+        (u.displayName && u.displayName.toLowerCase().includes(query.toLowerCase()))
+      ).slice(0, 8)
+    : users.slice(0, 8)
+
+  if (filtered.length === 0) return null
+
+  return (
+    <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded shadow-lg max-h-48 overflow-y-auto">
+      {filtered.map(u => (
+        <button
+          key={u.email}
+          type="button"
+          className="w-full text-left px-3 py-2 text-[13px] hover:bg-dbx-sidebar transition-colors"
+          onMouseDown={(e) => {
+            e.preventDefault()
+            onSelect(u.email)
+          }}
+        >
+          <div className="text-dbx-text">{u.displayName || u.email}</div>
+          {u.displayName && <div className="text-dbx-text-secondary text-[11px]">{u.email}</div>}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /* ── Field row container ── */
 function FieldRow({ label, description, children, noBorder }) {
   return (
@@ -248,6 +279,7 @@ export default function SettingsPage() {
   }
 
   const handleRemoveUser = async (email) => {
+    if (!window.confirm(`Remove role assignment for ${email}? They will revert to the default 'use' role.`)) return
     setUserError(null)
     try {
       await api.deleteUserRole(email)
@@ -631,35 +663,16 @@ export default function SettingsPage() {
                     onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
                     className={`${inputClass} w-full`}
                   />
-                  {showUserDropdown && workspaceUsers.length > 0 && (() => {
-                    const query = newUserEmail.toLowerCase()
-                    const filtered = query
-                      ? workspaceUsers.filter(u =>
-                          u.email.toLowerCase().includes(query) ||
-                          (u.displayName && u.displayName.toLowerCase().includes(query))
-                        ).slice(0, 8)
-                      : workspaceUsers.slice(0, 8)
-                    if (filtered.length === 0) return null
-                    return (
-                      <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded shadow-lg max-h-48 overflow-y-auto">
-                        {filtered.map(u => (
-                          <button
-                            key={u.email}
-                            type="button"
-                            className="w-full text-left px-3 py-2 text-[13px] hover:bg-dbx-sidebar transition-colors"
-                            onMouseDown={(e) => {
-                              e.preventDefault()
-                              setNewUserEmail(u.email)
-                              setShowUserDropdown(false)
-                            }}
-                          >
-                            <div className="text-dbx-text">{u.displayName || u.email}</div>
-                            {u.displayName && <div className="text-dbx-text-secondary text-[11px]">{u.email}</div>}
-                          </button>
-                        ))}
-                      </div>
-                    )
-                  })()}
+                  {showUserDropdown && workspaceUsers.length > 0 && (
+                    <UserSearchDropdown
+                      query={newUserEmail}
+                      users={workspaceUsers}
+                      onSelect={(email) => {
+                        setNewUserEmail(email)
+                        setShowUserDropdown(false)
+                      }}
+                    />
+                  )}
                 </div>
                 <select
                   value={newUserRole}

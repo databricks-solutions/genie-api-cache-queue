@@ -84,6 +84,42 @@ def build_simple_runtime_settings(token: str):
     return RuntimeSettings(rc, token, None)
 
 
+async def require_role(req: Request, min_role: str) -> tuple:
+    """Resolve caller's effective role and raise 403 if below min_role.
+
+    Returns (identity, token, role).  When user token passthrough is
+    disabled, falls back to email-only identity (SCIM admin check is
+    skipped, DB role lookup still works).
+    """
+    from app.api.config_store import get_effective_setting
+    from app.auth import ensure_https
+    from app.config import get_settings
+    from app.services.rbac import resolve_role, role_gte
+
+    identity = req.headers.get("X-Forwarded-Email", "")
+    token = extract_bearer_token_optional(req)
+
+    if not token and not identity:
+        raise HTTPException(
+            status_code=401,
+            detail="No authentication token or user identity available.",
+        )
+    if not token and identity:
+        logger.info("Email-only identity for %s (no bearer token) — SCIM admin check skipped", identity)
+
+    _s = get_settings()
+    host = get_effective_setting("databricks_host") or _s.databricks_host or ""
+    host = ensure_https(host) if host else ""
+
+    role = await resolve_role(identity, token, host)
+    if not role_gte(role, min_role):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Role '{min_role}' required. You have '{role}'.",
+        )
+    return identity, token, role
+
+
 def ttl_hours_to_seconds(hours: float) -> int:
     return int(hours * 3600)
 

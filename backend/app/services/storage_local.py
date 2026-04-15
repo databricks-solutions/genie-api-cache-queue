@@ -255,6 +255,9 @@ class LocalStorageService:
         self._user_roles.pop(identity, None)
         self._save_roles()
 
+    def count_owners(self) -> int:
+        return sum(1 for r in self._user_roles.values() if r.get("role") == "owner")
+
     def get_gateway_stats(self, gateway_id: str) -> Dict:
         """Get cache and query stats for a gateway."""
         gw = self._gateways.get(gateway_id)

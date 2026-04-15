@@ -13,11 +13,10 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.auth import ensure_https
 from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
-from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token_optional
+from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token_optional, require_role
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
 import app.services.database as _db
-from app.services.rbac import resolve_role, role_gte
 
 logger = logging.getLogger(__name__)
 gateway_router = APIRouter()
@@ -30,34 +29,6 @@ async def close_discovery_client():
     """Close the shared HTTP client. Call during app shutdown."""
     await _discovery_client.aclose()
 
-
-
-async def _require_role(req: Request, min_role: str):
-    """Resolve caller's effective role and raise 403 if below min_role.
-
-    When user token passthrough is disabled, falls back to email-only
-    identity (SCIM admin check is skipped, DB role lookup still works).
-    """
-    identity = req.headers.get("X-Forwarded-Email", "")
-    token = extract_bearer_token_optional(req)
-
-    if not token and not identity:
-        raise HTTPException(
-            status_code=401,
-            detail="No authentication token or user identity available.",
-        )
-    if not token and identity:
-        logger.info("Email-only identity for %s (no bearer token) — SCIM admin check skipped", identity)
-    try:
-        host = _get_host()
-    except HTTPException:
-        host = ""
-    role = await resolve_role(identity, token, host)
-    if not role_gte(role, min_role):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Role '{min_role}' required. You have '{role}'."
-        )
 
 
 def _get_host() -> str:
@@ -73,7 +44,7 @@ def _get_host() -> str:
 @gateway_router.get("/gateways")
 async def list_gateways(req: Request):
     """List all gateways with stats. Requires authentication."""
-    await _require_role(req, "use")
+    await require_role(req, "use")
     try:
         gateways = await _db.db_service.list_gateways()
         # Attach stats to each gateway
@@ -94,7 +65,7 @@ async def list_gateways(req: Request):
 @gateway_router.post("/gateways", status_code=201)
 async def create_gateway(body: GatewayCreateRequest, req: Request):
     """Create a new gateway configuration. Owner only."""
-    await _require_role(req, "owner")
+    await require_role(req, "owner")
     try:
         now = datetime.now(timezone.utc)
         user_email = req.headers.get("X-Forwarded-Email")
@@ -137,7 +108,7 @@ async def create_gateway(body: GatewayCreateRequest, req: Request):
 @gateway_router.get("/gateways/{gateway_id}")
 async def get_gateway(gateway_id: str, req: Request):
     """Get a single gateway with stats. Requires authentication."""
-    await _require_role(req, "use")
+    await require_role(req, "use")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -162,7 +133,7 @@ async def get_gateway(gateway_id: str, req: Request):
 @gateway_router.put("/gateways/{gateway_id}")
 async def update_gateway(gateway_id: str, body: GatewayUpdateRequest, req: Request):
     """Update gateway fields. Manage or above."""
-    await _require_role(req, "manage")
+    await require_role(req, "manage")
     try:
         updates = body.model_dump(exclude_none=True)
         if not updates:
@@ -184,7 +155,7 @@ async def update_gateway(gateway_id: str, body: GatewayUpdateRequest, req: Reque
 @gateway_router.delete("/gateways/{gateway_id}")
 async def delete_gateway(gateway_id: str, req: Request):
     """Delete a gateway. Owner only."""
-    await _require_role(req, "owner")
+    await require_role(req, "owner")
     try:
         deleted = await _db.db_service.delete_gateway(gateway_id)
         if not deleted:
@@ -202,7 +173,7 @@ async def delete_gateway(gateway_id: str, req: Request):
 @gateway_router.get("/gateways/{gateway_id}/metrics")
 async def get_gateway_metrics(gateway_id: str, req: Request):
     """Get cache entries and query stats for a gateway. Requires authentication."""
-    await _require_role(req, "use")
+    await require_role(req, "use")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -234,7 +205,7 @@ async def get_gateway_metrics(gateway_id: str, req: Request):
 @gateway_router.get("/gateways/{gateway_id}/cache")
 async def get_gateway_cache(gateway_id: str, req: Request):
     """List all cached entries for a specific gateway. Manage or above."""
-    await _require_role(req, "manage")
+    await require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -252,7 +223,7 @@ async def get_gateway_cache(gateway_id: str, req: Request):
 @gateway_router.delete("/gateways/{gateway_id}/cache")
 async def clear_gateway_cache(gateway_id: str, req: Request):
     """Clear all cached entries for a specific gateway. Manage or above."""
-    await _require_role(req, "manage")
+    await require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -270,7 +241,7 @@ async def clear_gateway_cache(gateway_id: str, req: Request):
 @gateway_router.get("/gateways/{gateway_id}/logs")
 async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
     """List query logs for a specific gateway. Manage or above."""
-    await _require_role(req, "manage")
+    await require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -385,7 +356,7 @@ async def list_serving_endpoints(req: Request):
 @gateway_router.get("/workspace/users")
 async def list_workspace_users(req: Request):
     """List workspace users via SCIM API for role assignment autocomplete."""
-    await _require_role(req, "manage")
+    await require_role(req, "manage")
     try:
         token = resolve_user_token_optional(req)
         if not token:
@@ -543,7 +514,7 @@ class SettingsUpdateRequest(GatewayUpdateRequest):
 @gateway_router.put("/settings")
 async def update_settings_endpoint(body: SettingsUpdateRequest, req: Request):
     """Update server configuration. Owner only."""
-    await _require_role(req, "owner")
+    await require_role(req, "owner")
     batch = {}
     updated = {}
     for field, value in body.model_dump(exclude_none=True).items():

@@ -338,8 +338,10 @@ async def get_config():
 
 
 @router.put("/config")
-async def put_config(body: UIConfigUpdate):
-    """Update server configuration. Used by Settings UI and external API."""
+async def put_config(body: UIConfigUpdate, req: Request):
+    """Update server configuration. Owner only."""
+    from app.api.auth_helpers import require_role
+    await require_role(req, "owner")
     batch = {}
     updated = {}
     for field, value in body.model_dump(exclude_none=True).items():

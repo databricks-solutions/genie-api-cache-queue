@@ -43,19 +43,27 @@ async def close_http_client():
 
 
 def _sweep_expired_admin_cache():
-    """Remove expired entries from admin cache to prevent unbounded growth."""
+    """Remove expired entries, then evict oldest if still over max."""
     now = time.monotonic()
     expired = [k for k, (_, exp) in _admin_cache.items() if now >= exp]
     for k in expired:
         del _admin_cache[k]
+    if len(_admin_cache) > _ADMIN_CACHE_MAX:
+        by_expiry = sorted(_admin_cache.items(), key=lambda kv: kv[1][1])
+        for k, _ in by_expiry[:len(_admin_cache) - _ADMIN_CACHE_MAX]:
+            del _admin_cache[k]
 
 
 def _sweep_expired_role_cache():
-    """Remove expired entries from role cache to prevent unbounded growth."""
+    """Remove expired entries, then evict oldest if still over max."""
     now = time.monotonic()
     expired = [k for k, (_, exp) in _role_cache.items() if now >= exp]
     for k in expired:
         del _role_cache[k]
+    if len(_role_cache) > _ROLE_CACHE_MAX:
+        by_expiry = sorted(_role_cache.items(), key=lambda kv: kv[1][1])
+        for k, _ in by_expiry[:len(_role_cache) - _ROLE_CACHE_MAX]:
+            del _role_cache[k]
 
 
 def role_gte(a: str, b: str) -> bool:

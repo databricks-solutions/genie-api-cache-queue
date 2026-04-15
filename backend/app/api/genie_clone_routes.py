@@ -310,7 +310,7 @@ async def _process_genie_background(
                         "sql_query": sql_query,
                         "result": actual_result,
                     }
-                    _release_message_lock(msg_id)
+                _release_message_lock(msg_id)
 
                 # Save query log
                 try:
@@ -483,7 +483,7 @@ async def _handle_query(
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-            _release_message_lock(msg_id)
+        _release_message_lock(msg_id)
         _sweep_synthetic_messages()
 
         # Save query log

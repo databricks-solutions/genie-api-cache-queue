@@ -5,63 +5,20 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.auth import ensure_https
-from app.api.auth_helpers import extract_bearer_token_optional
-from app.api.config_store import get_effective_setting
-from app.config import get_settings
-from app.services.rbac import resolve_role, role_gte, ROLES, invalidate_role_cache
+from app.api.auth_helpers import extract_bearer_token_optional, require_role
+from app.services.rbac import ROLES, role_gte, invalidate_role_cache
 
 logger = logging.getLogger(__name__)
 rbac_router = APIRouter()
-_settings = get_settings()
 # Serializes last-owner checks against role writes. Sufficient because
 # Databricks Apps runs a single replica — no cross-instance coordination needed.
 _owner_lock = asyncio.Lock()
 
 
-def _get_host() -> str:
-    host = get_effective_setting("databricks_host") or _settings.databricks_host or ""
-    return ensure_https(host) if host else host
-
-
-async def _resolve_caller(req: Request):
-    """Extract and resolve the calling user's identity and effective role.
-
-    When user token passthrough is disabled in Databricks Apps, the user's
-    OAuth token is unavailable.  We still identify the user via the
-    X-Forwarded-Email header (always present for SSO-authenticated users)
-    and resolve their role from the database.  The SCIM workspace-admin
-    check is skipped (requires the user's own token).
-    """
-    identity = req.headers.get("X-Forwarded-Email", "")
-    token = extract_bearer_token_optional(req)
-
-    if not token and not identity:
-        raise HTTPException(
-            status_code=401,
-            detail="No authentication token or user identity available.",
-        )
-    if not token and identity:
-        logger.info("Email-only identity for %s (no bearer token) — SCIM admin check skipped", identity)
-
-    role = await resolve_role(identity, token, _get_host())
-    return identity, token, role
-
-
-async def _require_role(req: Request, min_role: str):
-    identity, token, role = await _resolve_caller(req)
-    if not role_gte(role, min_role):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Role '{min_role}' required. You have '{role}'."
-        )
-    return identity, token, role
-
-
 @rbac_router.get("/users/me")
 async def get_my_role(req: Request):
     """Return the current user's identity and effective role."""
-    identity, _, role = await _resolve_caller(req)
+    identity, _, role = await require_role(req, "use")
     return {"identity": identity, "role": role}
 
 
@@ -84,7 +41,7 @@ async def get_auth_mode(req: Request):
 @rbac_router.get("/users")
 async def list_users(req: Request):
     """List all explicit role assignments. Manage or above."""
-    await _require_role(req, "manage")
+    await require_role(req, "manage")
     import app.services.database as _db
     return await _db.db_service.list_user_roles()
 
@@ -96,20 +53,20 @@ class RoleAssignment(BaseModel):
 async def _check_last_owner(email: str, new_role: str = None):
     """Prevent removing or downgrading the last owner."""
     import app.services.database as _db
-    all_roles = await _db.db_service.list_user_roles()
-    owners = [u for u in all_roles if u.get("role") == "owner"]
-    is_target_owner = any(u["identity"] == email for u in owners)
-    if is_target_owner and len(owners) <= 1 and new_role != "owner":
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot remove or downgrade the last owner. Assign another owner first.",
-        )
+    target_role = await _db.db_service.get_user_role(email)
+    if target_role == "owner" and new_role != "owner":
+        owner_count = await _db.db_service.count_owners()
+        if owner_count <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot remove or downgrade the last owner. Assign another owner first.",
+            )
 
 
 @rbac_router.post("/users/{email}/role", status_code=200)
 async def assign_role(email: str, body: RoleAssignment, req: Request):
     """Assign a role to a user. Manage or above."""
-    identity, _, caller_role = await _require_role(req, "manage")
+    identity, _, caller_role = await require_role(req, "manage")
     if body.role not in ROLES:
         raise HTTPException(
             status_code=400,
@@ -132,7 +89,7 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
 @rbac_router.delete("/users/{email}")
 async def remove_user_role(email: str, req: Request):
     """Remove explicit role assignment (reverts to default 'use'). Manage or above."""
-    identity, _, caller_role = await _require_role(req, "manage")
+    identity, _, caller_role = await require_role(req, "manage")
     import app.services.database as _db
     async with _owner_lock:
         target_role = await _db.db_service.get_user_role(email)

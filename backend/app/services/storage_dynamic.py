@@ -368,3 +368,9 @@ class DynamicStorageService:
         if hasattr(backend, 'pool'):
             return await backend.delete_user_role(identity)
         return backend.delete_user_role(identity)
+
+    async def count_owners(self) -> int:
+        backend = self.default_backend
+        if hasattr(backend, 'pool'):
+            return await backend.count_owners()
+        return backend.count_owners()
