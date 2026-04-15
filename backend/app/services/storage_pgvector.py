@@ -68,9 +68,12 @@ class PGVectorStorageService:
         self.pool = None
         self.oauth_token = None
         self.jwt_expires_at = 0  # epoch timestamp when the current JWT expires
-        # Gateway table in same schema as cache table
+        # All tables must live in the same schema as the cache table
         schema_prefix = self.table_name.rsplit('.', 1)[0] if '.' in self.table_name else 'public'
+        self.schema_name = schema_prefix
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
+        query_log_bare = self.query_log_table_name.rsplit('.', 1)[-1]
+        self.query_log_table_name = f"{schema_prefix}.{query_log_bare}"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -167,6 +170,9 @@ class PGVectorStorageService:
         logger.info("Connection pool created with SSL")
 
         async with self.pool.acquire() as conn:
+            if self.schema_name != 'public':
+                await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema_name}")
+                logger.info("Ensured schema '%s' exists", self.schema_name)
             await self._ensure_extension(conn)
             await register_vector(conn)
             await self._ensure_table(conn)

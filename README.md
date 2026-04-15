@@ -183,15 +183,23 @@ Connect to Lakebase as a human user and run (replace `<app-sp-client-id>` with t
 ```sql
 CREATE EXTENSION IF NOT EXISTS databricks_auth;
 SELECT databricks_create_role('<app-sp-client-id>', 'SERVICE_PRINCIPAL');
-
-GRANT ALL ON SCHEMA public TO "<app-sp-client-id>";
-GRANT ALL ON ALL TABLES IN SCHEMA public TO "<app-sp-client-id>";
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "<app-sp-client-id>";
 ```
 
-> **Important:**
-> - Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication. See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
-> - **Do not create the cache tables manually.** Let the app create them on first use. If tables were already created by a different user, drop them first so the app's SP recreates them as owner.
+> **Important:** Use `databricks_create_role()` — not `CREATE ROLE`. Only `databricks_create_role` enables OAuth JWT authentication. See: [Create Postgres roles](https://docs.databricks.com/aws/en/oltp/projects/postgres-roles)
+
+**Custom schema (recommended):** Configure `LAKEBASE_SCHEMA` in `app.yaml` (e.g., `genie_cache_queue`). The app creates the schema on startup and the SP owns it — no manual GRANTs needed.
+
+**`public` schema (default):** The SP cannot own the `public` schema, so you must grant access manually:
+
+```sql
+GRANT ALL ON SCHEMA public TO "<app-sp-client-id>";
+GRANT ALL ON ALL TABLES IN SCHEMA public TO "<app-sp-client-id>";
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO "<app-sp-client-id>";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "<app-sp-client-id>";
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "<app-sp-client-id>";
+```
+
+> **Note:** Do not create the cache tables manually. Let the app create them on first use. If tables were already created by a different user, drop them first so the app's SP recreates them as owner.
 
 ### 3. Configure in Settings
 
