@@ -363,7 +363,8 @@ async def list_workspace_users(req: Request):
     identity via extract_bearer_token_optional (no SP elevation)."""
     await require_role(req, "manage")
     try:
-        token = resolve_user_token_optional(req)
+        from app.services.rbac import _get_sp_token
+        token = _get_sp_token() or resolve_user_token_optional(req)
         if not token:
             logger.warning("No token available for workspace user discovery — enable user token passthrough or configure a service principal")
             return {"users": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
@@ -413,6 +414,16 @@ async def list_workspace_users(req: Request):
     except Exception as e:
         logger.exception("Error listing workspace users")
         return {"users": []}
+
+
+@gateway_router.get("/workspace/groups")
+async def list_workspace_groups_endpoint(req: Request):
+    """List workspace groups via SCIM for group role assignment autocomplete."""
+    await require_role(req, "manage")
+    from app.services.rbac import list_workspace_groups
+    host = _get_host()
+    groups = await list_workspace_groups(host)
+    return {"groups": groups}
 
 
 @gateway_router.post("/settings/test-connection")

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth_helpers import extract_bearer_token_optional, require_role
-from app.services.rbac import ROLES, role_gte, invalidate_role_cache, is_workspace_admin, is_user_workspace_admin
+from app.services.rbac import ROLES, role_gte, invalidate_role_cache, is_workspace_admin, is_user_workspace_admin, invalidate_group_cache
 
 logger = logging.getLogger(__name__)
 rbac_router = APIRouter()
@@ -190,4 +190,44 @@ async def remove_user_role(email: str, req: Request):
     except ValueError as e:
         raise HTTPException(status_code=503, detail=str(e))
     logger.info("Role removed: %s by %s", email, identity)
+    return {"success": True}
+
+
+@rbac_router.get("/groups")
+async def list_groups(req: Request):
+    """List all group role assignments. Manage or above."""
+    await require_role(req, "manage")
+    import app.services.database as _db
+    if not _db.db_service:
+        raise HTTPException(status_code=503, detail="RBAC requires Lakebase.")
+    return await _db.db_service.list_group_roles()
+
+
+@rbac_router.post("/groups/{group_name}/role", status_code=200)
+async def assign_group_role(group_name: str, body: RoleAssignment, req: Request):
+    """Assign a role to a workspace group. Manage or above."""
+    identity, _, caller_role = await require_role(req, "manage")
+    if body.role not in ROLES:
+        raise HTTPException(status_code=400, detail=f"Invalid role '{body.role}'. Valid: {ROLES}")
+    if not role_gte(caller_role, body.role):
+        raise HTTPException(status_code=403, detail=f"Cannot assign role '{body.role}' — your role ('{caller_role}') is insufficient.")
+    import app.services.database as _db
+    if not _db.db_service:
+        raise HTTPException(status_code=503, detail="RBAC requires Lakebase.")
+    await _db.db_service.set_group_role(group_name, body.role, granted_by=identity)
+    invalidate_group_cache()
+    logger.info("Group role assigned: %s → %s by %s", group_name, body.role, identity)
+    return {"group_name": group_name, "role": body.role, "granted_by": identity}
+
+
+@rbac_router.delete("/groups/{group_name}")
+async def remove_group_role(group_name: str, req: Request):
+    """Remove group role assignment. Manage or above."""
+    identity, _, _ = await require_role(req, "manage")
+    import app.services.database as _db
+    if not _db.db_service:
+        raise HTTPException(status_code=503, detail="RBAC requires Lakebase.")
+    await _db.db_service.delete_group_role(group_name)
+    invalidate_group_cache()
+    logger.info("Group role removed: %s by %s", group_name, identity)
     return {"success": True}
