@@ -329,9 +329,9 @@ async def get_config():
         "lakebase_schema": settings.lakebase_schema or overrides.get("lakebase_schema"),
         "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
         "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
-        # True if any Lakebase token is available (custom override in memory OR auto-injected DATABRICKS_TOKEN)
-        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or settings.databricks_token),
-        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if settings.databricks_token else "none"),
+        # True if any Lakebase token is available (custom override or SP credentials)
+        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or os.getenv("DATABRICKS_CLIENT_ID")),
+        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if os.getenv("DATABRICKS_CLIENT_ID") else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
     }

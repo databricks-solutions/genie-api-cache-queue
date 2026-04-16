@@ -16,7 +16,7 @@ import logging
 import uuid
 import asyncio
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from app.auth import ensure_https
@@ -511,7 +511,6 @@ async def _handle_query(
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-        _release_message_lock(msg_id)
 
         # Save query log
         try:
@@ -577,36 +576,41 @@ async def _handle_query(
 # ---------------------------------------------------------------------------
 
 @genie_clone_router.get("/spaces/{space_id}")
-async def clone_get_space(space_id: str, request: Request):
+async def clone_get_space(space_id: str, request: Request, response: Response):
     """Proxy GET space metadata to real Genie API. Resolves gateway_id if needed."""
     token = _extract_token(request)
+    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
     real_space_id, _ = await _resolve_gateway_space_id(space_id)
     return await _proxy_passthrough(request, "GET", f"/api/2.0/genie/spaces/{real_space_id}", token)
 
 
 @genie_clone_router.post("/spaces/{space_id}/start-conversation")
-async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request):
+async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request, response: Response):
     """Clone of POST /api/2.0/genie/spaces/{space_id}/start-conversation.
     Accepts gateway_id (our UUID) or real Genie space_id. Returns immediately."""
     token = _extract_token(request)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
     real_space_id, gateway = await _resolve_gateway_space_id(space_id)
-    return await _handle_query(real_space_id, body.content, token, identity, gateway=gateway, auth_mode=_detect_auth_mode(request))
+    auth_mode = _detect_auth_mode(request)
+    response.headers["X-Genie-Auth-Mode"] = auth_mode
+    return await _handle_query(real_space_id, body.content, token, identity, gateway=gateway, auth_mode=auth_mode)
 
 
 @genie_clone_router.post("/spaces/{space_id}/conversations/{conversation_id}/messages")
-async def clone_create_message(space_id: str, conversation_id: str, body: GenieContentBody, request: Request):
+async def clone_create_message(space_id: str, conversation_id: str, body: GenieContentBody, request: Request, response: Response):
     """Clone of POST create-message. Resolves gateway_id if needed."""
     token = _extract_token(request)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
     real_space_id, gateway = await _resolve_gateway_space_id(space_id)
-    return await _handle_query(real_space_id, body.content, token, identity, conversation_id=conversation_id, gateway=gateway, auth_mode=_detect_auth_mode(request))
+    auth_mode = _detect_auth_mode(request)
+    response.headers["X-Genie-Auth-Mode"] = auth_mode
+    return await _handle_query(real_space_id, body.content, token, identity, conversation_id=conversation_id, gateway=gateway, auth_mode=auth_mode)
 
 
 @genie_clone_router.get(
     "/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
 )
-async def clone_get_message(space_id: str, conversation_id: str, message_id: str, request: Request):
+async def clone_get_message(space_id: str, conversation_id: str, message_id: str, request: Request, response: Response):
     """Clone of GET get-message. Returns synthetic result or proxies to real Genie."""
     token = _extract_token(request)
 
@@ -614,9 +618,12 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
         stored = _synthetic_messages.get(message_id)
         if not stored:
             raise HTTPException(status_code=404, detail="Message not found")
+        proxy = stored.get("_proxy", {})
+        response.headers["X-Genie-Auth-Mode"] = proxy.get("auth_mode", "unknown")
         return {k: v for k, v in stored.items() if not k.startswith("_")}
 
     # Real message — proxy to Genie
+    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
     path = f"/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
     return await _proxy_passthrough(request, "GET", path, token)
 
@@ -625,10 +632,11 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
     "/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}/query-result"
 )
 async def clone_get_query_result(
-    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request
+    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request, response: Response
 ):
     """Clone of GET query-result. Executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
+    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
 
     # Check if we have cached SQL for this attachment (synthetic or registered real Genie ID)
     stored = _synthetic_messages.get(attachment_id)
@@ -653,10 +661,11 @@ async def clone_get_query_result(
     "/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}/execute-query"
 )
 async def clone_execute_query(
-    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request
+    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request, response: Response
 ):
     """Clone of POST execute-query. Re-executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
+    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
 
     stored = _synthetic_messages.get(attachment_id)
     if stored and stored.get("sql_query"):

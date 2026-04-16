@@ -4,6 +4,7 @@ Manages gateway configurations and provides workspace discovery endpoints.
 """
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -411,8 +412,9 @@ async def list_workspace_users(req: Request):
 
 
 @gateway_router.post("/settings/test-connection")
-async def test_lakebase_connection():
-    """Test Lakebase connection and check if required tables exist."""
+async def test_lakebase_connection(req: Request):
+    """Test Lakebase connection and check if required tables exist. Owner only."""
+    await require_role(req, "owner")
     results = {
         "connected": False,
         "cache_table_exists": False,
@@ -469,8 +471,9 @@ async def test_lakebase_connection():
 # --- Settings endpoints (reuse existing config_store) ---
 
 @gateway_router.get("/settings")
-async def get_settings_endpoint():
-    """Return current server configuration."""
+async def get_settings_endpoint(req: Request):
+    """Return current server configuration. Owner only."""
+    await require_role(req, "owner")
     overrides = get_overrides()
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)
@@ -490,8 +493,8 @@ async def get_settings_endpoint():
         "lakebase_schema": settings.lakebase_schema or overrides.get("lakebase_schema"),
         "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
         "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
-        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or settings.databricks_token),
-        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if settings.databricks_token else "none"),
+        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or os.getenv("DATABRICKS_CLIENT_ID")),
+        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if os.getenv("DATABRICKS_CLIENT_ID") else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
     }

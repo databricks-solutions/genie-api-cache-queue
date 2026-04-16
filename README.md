@@ -208,8 +208,7 @@ Set **Storage Backend** to `Lakebase` and fill in the **Instance Name**. The app
 ### Local Development
 
 For local development (outside Databricks Apps), configure the **Lakebase Service Token** in Settings or `.env`:
-- **Service Principal:** `<client_id>:<client_secret>` (recommended)
-- **PAT:** `dapi...` (simpler, for development)
+- **Service Principal:** `<client_id>:<client_secret>` (always use SP credentials — never PATs)
 
 ---
 

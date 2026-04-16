@@ -112,6 +112,33 @@ async def is_workspace_admin(token: str, host: str) -> bool:
     return result
 
 
+async def is_user_workspace_admin(email: str, caller_token: str, host: str) -> bool:
+    """Check if a specific user (by email) is a workspace admin via SCIM Users API.
+
+    Unlike is_workspace_admin (which checks the token owner via /Me), this
+    looks up an arbitrary user by email.  Uses the caller's token for the
+    SCIM request — the caller must have permission to read user records.
+    """
+    if not email or not caller_token or not host:
+        return False
+    host = ensure_https(host)
+    try:
+        safe_email = email.replace('"', '')
+        resp = await _http_client.get(
+            f"{host}/api/2.0/preview/scim/v2/Users",
+            headers={"Authorization": f"Bearer {caller_token}"},
+            params={"filter": f'userName eq "{safe_email}"', "attributes": "groups"},
+        )
+        if resp.status_code == 200:
+            resources = resp.json().get("Resources", [])
+            if resources:
+                groups = resources[0].get("groups", [])
+                return any(g.get("display") == "admins" for g in groups)
+    except Exception as e:
+        logger.debug("User workspace admin check failed for %s: %s", email, e)
+    return False
+
+
 async def resolve_role(identity: str, token: str, host: str) -> str:
     """
     Resolve the effective role for a user:

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.api.auth_helpers import extract_bearer_token_optional, require_role
-from app.services.rbac import ROLES, role_gte, invalidate_role_cache, is_workspace_admin
+from app.services.rbac import ROLES, role_gte, invalidate_role_cache, is_workspace_admin, is_user_workspace_admin
 
 logger = logging.getLogger(__name__)
 rbac_router = APIRouter()
@@ -28,12 +28,24 @@ async def get_auth_mode(req: Request):
     token = extract_bearer_token_optional(req)
     if token:
         return {"auth_mode": "user", "message": "User token passthrough is active."}
+
+    from app.auth import get_service_principal_token
+    sp_token = get_service_principal_token()
+    if sp_token:
+        return {
+            "auth_mode": "service_principal",
+            "message": (
+                "User token passthrough is disabled. Queries use the app's service principal. "
+                "Grant the SP access to Genie Spaces and SQL Warehouses. "
+                "Per-user access controls and lineage are not enforced."
+            ),
+        }
+
     return {
-        "auth_mode": "service_principal",
+        "auth_mode": "none",
         "message": (
-            "User token passthrough is disabled. Queries use the app's service principal. "
-            "Grant the SP access to Genie Spaces and SQL Warehouses. "
-            "Per-user access controls and lineage are not enforced."
+            "No authentication configured. Enable user token passthrough "
+            "or set DATABRICKS_CLIENT_ID and DATABRICKS_CLIENT_SECRET for the service principal."
         ),
     }
 
@@ -55,12 +67,22 @@ class RoleAssignment(BaseModel):
     role: str
 
 
-async def _check_last_owner(email: str, new_role: str = None, *, caller_token: str = "", host: str = ""):
+async def _check_last_owner(
+    email: str,
+    new_role: str = None,
+    *,
+    caller_token: str = "",
+    host: str = "",
+    target_role: str = None,
+):
     """Prevent removing or downgrading the last owner.
 
-    Workspace admins are implicit owners not tracked in the DB.  If the
-    caller is a workspace admin the guard is relaxed because at least one
-    implicit owner will remain after the operation.
+    Workspace admins are implicit owners not tracked in the DB.  The guard
+    is relaxed when the caller OR the target is a workspace admin, because
+    at least one implicit owner will remain after the operation.
+
+    Pass target_role from the caller to avoid a redundant DB read under
+    the _owner_lock.
     """
     import app.services.database as _db
     if not _db.db_service:
@@ -68,13 +90,14 @@ async def _check_last_owner(email: str, new_role: str = None, *, caller_token: s
             status_code=503,
             detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.",
         )
-    try:
-        target_role = await _db.db_service.get_user_role(email)
-    except ValueError:
-        raise HTTPException(
-            status_code=503,
-            detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.",
-        )
+    if target_role is None:
+        try:
+            target_role = await _db.db_service.get_user_role(email)
+        except ValueError:
+            raise HTTPException(
+                status_code=503,
+                detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.",
+            )
     if target_role == "owner" and new_role != "owner":
         try:
             owner_count = await _db.db_service.count_owners()
@@ -85,6 +108,8 @@ async def _check_last_owner(email: str, new_role: str = None, *, caller_token: s
             )
         if owner_count <= 1:
             if caller_token and host and await is_workspace_admin(caller_token, host):
+                return
+            if caller_token and host and await is_user_workspace_admin(email, caller_token, host):
                 return
             raise HTTPException(
                 status_code=409,
@@ -123,7 +148,7 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
                     status_code=403,
                     detail=f"Cannot modify a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
                 )
-            await _check_last_owner(email, body.role, caller_token=token, host=host)
+            await _check_last_owner(email, body.role, caller_token=token, host=host, target_role=target_role)
             await _db.db_service.set_user_role(email, body.role, granted_by=identity)
             invalidate_role_cache(email)
     except HTTPException:
@@ -155,7 +180,7 @@ async def remove_user_role(email: str, req: Request):
                     status_code=403,
                     detail=f"Cannot remove a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
                 )
-            await _check_last_owner(email, caller_token=token, host=host)
+            await _check_last_owner(email, caller_token=token, host=host, target_role=target_role)
             await _db.db_service.delete_user_role(email)
             invalidate_role_cache(email)
     except HTTPException:
