@@ -82,24 +82,28 @@ function EditableText({ value, onChange, placeholder, masked }) {
 /* ── Principal search dropdown ── */
 function PrincipalSearchDropdown({ query, users, groups, onSelect }) {
   const q = (query || '').toLowerCase()
+  const words = q.split(/\s+/).filter(Boolean)
+  const matchesAll = (text) => words.every(w => text.includes(w))
 
   const matchedGroups = groups.filter(g =>
-    g.displayName.toLowerCase().includes(q)
+    matchesAll(g.displayName.toLowerCase())
   ).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: g.displayName, detail: `${g.memberCount} members` }))
 
-  const matchedUsers = users.filter(u =>
-    u.email.toLowerCase().includes(q) ||
-    (u.displayName && u.displayName.toLowerCase().includes(q))
-  ).slice(0, 6).map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
+  const matchedUsers = users.filter(u => {
+    const hay = `${u.email} ${u.displayName || ''}`.toLowerCase()
+    return matchesAll(hay)
+  }).slice(0, 6).map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
 
   const items = q ? [...matchedGroups, ...matchedUsers] : [...matchedGroups.slice(0, 5), ...matchedUsers.slice(0, 3)]
-  if (items.length === 0) return null
 
   const label = q ? `Results for "${query}"` : 'Suggested choices'
 
   return (
     <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded-lg shadow-lg max-h-64 overflow-y-auto">
       <div className="px-3 py-2 text-[11px] text-dbx-text-secondary font-medium">{label}</div>
+      {items.length === 0 && q && (
+        <div className="px-3 py-4 text-[13px] text-dbx-text-secondary text-center">No matching users or groups</div>
+      )}
       {items.map(item => (
         <button key={`${item.type}-${item.id}`} type="button"
           className="w-full text-left px-3 py-2.5 hover:bg-dbx-sidebar transition-colors flex items-center gap-3"
@@ -650,7 +654,7 @@ export default function SettingsPage() {
                     onBlur={() => setTimeout(() => setShowSearch(false), 200)}
                     className={`${inputClass} w-full`}
                   />
-                  {showSearch && (workspaceUsers.length > 0 || workspaceGroups.length > 0) && (
+                  {showSearch && (
                     <PrincipalSearchDropdown
                       query={searchQuery}
                       users={workspaceUsers}
