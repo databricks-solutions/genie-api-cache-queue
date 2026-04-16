@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, Trash2 } from 'lucide-react'
+import { Pencil, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users } from 'lucide-react'
 import { api } from '../../services/api'
 import { useTheme } from '../../context/ThemeContext'
 import { useRole } from '../../context/RoleContext'
@@ -79,51 +79,44 @@ function EditableText({ value, onChange, placeholder, masked }) {
   )
 }
 
-/* ── User search dropdown ── */
-function UserSearchDropdown({ query, users, onSelect }) {
-  const filtered = query
-    ? users.filter(u =>
-        u.email.toLowerCase().includes(query.toLowerCase()) ||
-        (u.displayName && u.displayName.toLowerCase().includes(query.toLowerCase()))
-      ).slice(0, 8)
-    : users.slice(0, 8)
+/* ── Principal search dropdown ── */
+function PrincipalSearchDropdown({ query, users, groups, onSelect }) {
+  const q = (query || '').toLowerCase()
 
-  if (filtered.length === 0) return null
+  const matchedGroups = groups.filter(g =>
+    g.displayName.toLowerCase().includes(q)
+  ).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: g.displayName, detail: `${g.memberCount} members` }))
+
+  const matchedUsers = users.filter(u =>
+    u.email.toLowerCase().includes(q) ||
+    (u.displayName && u.displayName.toLowerCase().includes(q))
+  ).slice(0, 6).map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
+
+  const items = q ? [...matchedUsers, ...matchedGroups] : [...matchedGroups.slice(0, 3), ...matchedUsers.slice(0, 5)]
+  if (items.length === 0) return null
+
+  const label = q ? `Results for "${query}"` : 'Suggested choices'
 
   return (
-    <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded shadow-lg max-h-48 overflow-y-auto">
-      {filtered.map(u => (
-        <button
-          key={u.email}
-          type="button"
-          className="w-full text-left px-3 py-2 text-[13px] hover:bg-dbx-sidebar transition-colors"
-          onMouseDown={(e) => {
-            e.preventDefault()
-            onSelect(u.email)
-          }}
-        >
-          <div className="text-dbx-text">{u.displayName || u.email}</div>
-          {u.displayName && <div className="text-dbx-text-secondary text-[11px]">{u.email}</div>}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-/* ── Group search dropdown ── */
-function GroupSearchDropdown({ query, groups, onSelect }) {
-  const filtered = groups.filter(g =>
-    g.displayName.toLowerCase().includes((query || '').toLowerCase())
-  ).slice(0, 8)
-  if (filtered.length === 0) return null
-  return (
-    <div className="absolute top-full left-0 right-0 mt-1 bg-dbx-bg border border-dbx-border rounded shadow-lg z-50 max-h-48 overflow-y-auto">
-      {filtered.map(g => (
-        <button key={g.displayName}
-          onMouseDown={() => onSelect(g.displayName)}
-          className="w-full text-left px-3 py-2 text-[13px] hover:bg-dbx-neutral-hover transition-colors flex justify-between items-center">
-          <span className="text-dbx-text">{g.displayName}</span>
-          <span className="text-[11px] text-dbx-text-secondary">{g.memberCount} members</span>
+    <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded-lg shadow-lg max-h-64 overflow-y-auto">
+      <div className="px-3 py-2 text-[11px] text-dbx-text-secondary font-medium">{label}</div>
+      {items.map(item => (
+        <button key={`${item.type}-${item.id}`} type="button"
+          className="w-full text-left px-3 py-2.5 hover:bg-dbx-sidebar transition-colors flex items-center gap-3"
+          onMouseDown={(e) => { e.preventDefault(); onSelect(item) }}>
+          {item.type === 'user' ? (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+              <path d="M10 10a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM3 17.5c0-3.5 3.134-5.5 7-5.5s7 2 7 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+              <path d="M7 9a3 3 0 100-6 3 3 0 000 6zM1.5 16.5c0-3 2.686-4.5 5.5-4.5 1 0 1.9.2 2.7.5M13 9a3 3 0 100-6 3 3 0 000 6zM18.5 16.5c0-3-2.686-4.5-5.5-4.5-1.2 0-2.3.3-3.2.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] text-dbx-text truncate">{item.name}</div>
+            {item.detail && <div className="text-[11px] text-dbx-text-secondary truncate">{item.detail}</div>}
+          </div>
         </button>
       ))}
     </div>
@@ -187,10 +180,7 @@ const SIDEBAR_BASE = [
   ]},
 ]
 const SIDEBAR_MANAGE = [
-  { category: 'Access Control', icon: Users, items: [
-    { id: 'users', label: 'Users' },
-    { id: 'groups', label: 'Groups' },
-  ]},
+  { category: 'Access Control', icon: Users, items: [{ id: 'access', label: 'Access Control' }] },
 ]
 
 /* ── Main component ── */
@@ -199,23 +189,15 @@ export default function SettingsPage() {
   const { isOwner, isManage } = useRole()
   const [activeSection, setActiveSection] = useState('appearance')
 
-  // Users management state (manage role and above)
-  const [users, setUsers] = useState([])
-  const [usersLoading, setUsersLoading] = useState(false)
-  const [userError, setUserError] = useState(null)
-  const [newUserEmail, setNewUserEmail] = useState('')
-  const [newUserRole, setNewUserRole] = useState('use')
-  const [userSaving, setUserSaving] = useState(false)
+  const [principals, setPrincipals] = useState([])
+  const [principalsLoading, setPrincipalsLoading] = useState(false)
+  const [principalError, setPrincipalError] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchRole, setSearchRole] = useState('use')
+  const [searchSaving, setSearchSaving] = useState(false)
+  const [showSearch, setShowSearch] = useState(false)
   const [workspaceUsers, setWorkspaceUsers] = useState([])
-  const [showUserDropdown, setShowUserDropdown] = useState(false)
-  const [groups, setGroups] = useState([])
-  const [groupsLoading, setGroupsLoading] = useState(false)
-  const [groupError, setGroupError] = useState(null)
-  const [newGroupName, setNewGroupName] = useState('')
-  const [newGroupRole, setNewGroupRole] = useState('use')
-  const [groupSaving, setGroupSaving] = useState(false)
   const [workspaceGroups, setWorkspaceGroups] = useState([])
-  const [showGroupDropdown, setShowGroupDropdown] = useState(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -275,88 +257,78 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Load users and workspace users when manage/owner navigates to the users section
   useEffect(() => {
-    if (isManage && activeSection === 'users') {
-      setUsersLoading(true)
+    if (isManage && activeSection === 'access') {
+      setPrincipalsLoading(true)
       Promise.all([
         api.listUsers().catch(() => []),
-        api.listWorkspaceUsers().catch(() => []),
-      ]).then(([roleUsers, wsUsers]) => {
-        setUsers(roleUsers)
-        setWorkspaceUsers(wsUsers)
-      }).finally(() => setUsersLoading(false))
-    }
-  }, [isManage, activeSection])
-
-  useEffect(() => {
-    if (isManage && activeSection === 'groups') {
-      setGroupsLoading(true)
-      Promise.all([
         api.listGroups().catch(() => []),
+        api.listWorkspaceUsers().catch(() => []),
         api.listWorkspaceGroups().catch(() => []),
-      ]).then(([roleGroups, wsGroups]) => {
-        setGroups(roleGroups)
+      ]).then(([roleUsers, roleGroups, wsUsers, wsGroups]) => {
+        const merged = [
+          ...roleUsers.map(u => ({ type: 'user', identity: u.identity, displayName: wsUsers.find(w => w.email === u.identity)?.displayName || '', role: u.role, granted_by: u.granted_by })),
+          ...roleGroups.map(g => ({ type: 'group', identity: g.group_name, displayName: g.group_name, role: g.role, granted_by: g.granted_by })),
+        ]
+        setPrincipals(merged)
+        setWorkspaceUsers(wsUsers)
         setWorkspaceGroups(wsGroups)
-      }).finally(() => setGroupsLoading(false))
+      }).finally(() => setPrincipalsLoading(false))
     }
   }, [isManage, activeSection])
 
-  const handleAddUser = async () => {
-    if (!newUserEmail.trim()) return
-    setUserSaving(true)
-    setUserError(null)
+  const handleAddPrincipal = async (item) => {
+    setSearchSaving(true)
+    setPrincipalError(null)
     try {
-      const saved = await api.setUserRole(newUserEmail.trim(), newUserRole)
-      setUsers(prev => {
-        const without = prev.filter(u => u.identity !== saved.identity)
-        return [...without, saved]
-      })
-      setNewUserEmail('')
-      setNewUserRole('use')
+      if (item.type === 'user') {
+        const saved = await api.setUserRole(item.id, searchRole)
+        setPrincipals(prev => {
+          const without = prev.filter(p => !(p.type === 'user' && p.identity === saved.identity))
+          return [...without, { type: 'user', identity: saved.identity, displayName: item.name, role: saved.role, granted_by: saved.granted_by }]
+        })
+      } else {
+        const saved = await api.setGroupRole(item.id, searchRole)
+        setPrincipals(prev => {
+          const without = prev.filter(p => !(p.type === 'group' && p.identity === saved.group_name))
+          return [...without, { type: 'group', identity: saved.group_name, displayName: saved.group_name, role: saved.role, granted_by: saved.granted_by }]
+        })
+      }
+      setSearchQuery('')
+      setSearchRole('use')
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Failed to assign role.'
-      setUserError(msg)
-    } finally { setUserSaving(false) }
+      setPrincipalError(err.response?.data?.detail || 'Failed to assign role.')
+    } finally { setSearchSaving(false) }
   }
 
-  const handleRemoveUser = async (email) => {
-    if (!window.confirm(`Remove role assignment for ${email}? They will revert to the default 'use' role.`)) return
-    setUserError(null)
+  const handleChangePrincipalRole = async (principal, newRole) => {
+    setPrincipalError(null)
     try {
-      await api.deleteUserRole(email)
-      setUsers(prev => prev.filter(u => u.identity !== email))
+      if (principal.type === 'user') {
+        await api.setUserRole(principal.identity, newRole)
+      } else {
+        await api.setGroupRole(principal.identity, newRole)
+      }
+      setPrincipals(prev => prev.map(p =>
+        p.type === principal.type && p.identity === principal.identity ? { ...p, role: newRole } : p
+      ))
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Failed to remove user.'
-      setUserError(msg)
+      setPrincipalError(err.response?.data?.detail || 'Failed to change role.')
     }
   }
 
-  const handleAddGroup = async () => {
-    if (!newGroupName.trim()) return
-    setGroupSaving(true)
-    setGroupError(null)
+  const handleRemovePrincipal = async (principal) => {
+    if (!window.confirm(`Remove ${principal.type === 'group' ? 'group' : ''} "${principal.identity}"?`)) return
+    setPrincipalError(null)
     try {
-      const saved = await api.setGroupRole(newGroupName.trim(), newGroupRole)
-      setGroups(prev => {
-        const without = prev.filter(g => g.group_name !== saved.group_name)
-        return [...without, saved]
-      })
-      setNewGroupName('')
-      setNewGroupRole('use')
+      if (principal.type === 'user') {
+        await api.deleteUserRole(principal.identity)
+      } else {
+        await api.deleteGroupRole(principal.identity)
+      }
+      setPrincipals(prev => prev.filter(p => !(p.type === principal.type && p.identity === principal.identity)))
     } catch (err) {
-      setGroupError(err.response?.data?.detail || 'Failed to assign group role.')
-    } finally { setGroupSaving(false) }
-  }
-
-  const handleRemoveGroup = async (groupName) => {
-    if (!window.confirm(`Remove role for group "${groupName}"?`)) return
-    setGroupError(null)
-    try {
-      await api.deleteGroupRole(groupName)
-      setGroups(prev => prev.filter(g => g.group_name !== groupName))
-    } catch (err) {
-      setGroupError(err.response?.data?.detail || 'Failed to remove group role.')
+      setPrincipalError(err.response?.data?.detail || 'Failed to remove.')
     }
   }
 
@@ -627,13 +599,13 @@ export default function SettingsPage() {
             </FieldRow>
           </div>
 
-          {/* ── Users (manage+) ── */}
+          {/* ── Access Control (manage+) ── */}
           {isManage && (
-            <div ref={el => sectionRefs.current['users'] = el} className="mb-10">
-              <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Users</h2>
+            <div ref={el => sectionRefs.current['access'] = el} className="mb-10">
+              <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Access Control</h2>
 
               <div className="py-4 text-[12px] text-dbx-text-secondary">
-                Workspace admins always have <span className="font-semibold text-dbx-text">Owner</span> access regardless of this list.
+                Workspace admins always have <span className="font-semibold text-dbx-text">Owner</span> access. Group roles use highest privilege when a user belongs to multiple groups.
               </div>
 
               {/* Role matrix */}
@@ -667,188 +639,88 @@ export default function SettingsPage() {
                 </table>
               </div>
 
-              {userError && (
-                <div className="mb-3 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[13px]">
-                  {userError}
-                </div>
-              )}
-
-              {/* User list */}
-              {usersLoading ? (
-                <div className="flex items-center gap-2 py-4 text-[13px] text-dbx-text-secondary">
-                  <Loader2 size={14} className="animate-spin" /> Loading users...
-                </div>
-              ) : (
-                <div className="rounded border border-dbx-border overflow-hidden mb-4 text-[13px]">
-                  {users.length === 0 ? (
-                    <div className="px-4 py-6 text-center text-dbx-text-secondary">
-                      No explicit role assignments. Add users below.
-                    </div>
-                  ) : (
-                    <table className="w-full">
-                      <thead>
-                        <tr className="bg-dbx-sidebar text-dbx-text-secondary text-[12px]">
-                          <th className="text-left px-3 py-2 font-medium">User</th>
-                          <th className="text-left px-3 py-2 font-medium">Role</th>
-                          <th className="text-left px-3 py-2 font-medium">Granted by</th>
-                          <th className="px-3 py-2" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {users.map((u) => (
-                          <tr key={u.identity} className="border-t border-dbx-border">
-                            <td className="px-3 py-2 text-dbx-text">{u.identity}</td>
-                            <td className="px-3 py-2 capitalize text-dbx-text">{u.role}</td>
-                            <td className="px-3 py-2 text-dbx-text-secondary">{u.granted_by || '—'}</td>
-                            <td className="px-3 py-2 text-right">
-                              <button
-                                onClick={() => handleRemoveUser(u.identity)}
-                                className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1"
-                                title="Remove role"
-                              >
-                                <Trash2 size={13} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              )}
-
-              {/* Add user */}
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1" style={{ maxWidth: '260px' }}>
-                  <input
-                    type="email"
-                    placeholder="user@company.com"
-                    value={newUserEmail}
-                    onChange={(e) => {
-                      setNewUserEmail(e.target.value)
-                      setShowUserDropdown(true)
-                    }}
-                    onFocus={() => setShowUserDropdown(true)}
-                    onBlur={() => setTimeout(() => setShowUserDropdown(false), 150)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddUser()}
+              {/* Search input + role selector */}
+              <div className="flex items-center gap-2 mb-4">
+                <div className="relative flex-1">
+                  <input type="text"
+                    placeholder="Type to add users or groups"
+                    value={searchQuery}
+                    onChange={(e) => { setSearchQuery(e.target.value); setShowSearch(true) }}
+                    onFocus={() => setShowSearch(true)}
+                    onBlur={() => setTimeout(() => setShowSearch(false), 200)}
                     className={`${inputClass} w-full`}
                   />
-                  {showUserDropdown && workspaceUsers.length > 0 && (
-                    <UserSearchDropdown
-                      query={newUserEmail}
+                  {showSearch && (workspaceUsers.length > 0 || workspaceGroups.length > 0) && (
+                    <PrincipalSearchDropdown
+                      query={searchQuery}
                       users={workspaceUsers}
-                      onSelect={(email) => {
-                        setNewUserEmail(email)
-                        setShowUserDropdown(false)
+                      groups={workspaceGroups}
+                      onSelect={(item) => {
+                        handleAddPrincipal(item)
+                        setShowSearch(false)
                       }}
                     />
                   )}
                 </div>
-                <select
-                  value={newUserRole}
-                  onChange={(e) => setNewUserRole(e.target.value)}
-                  className={`${inputClass} bg-dbx-bg`}
-                  style={{ width: '110px' }}
-                >
+                <select value={searchRole} onChange={(e) => setSearchRole(e.target.value)}
+                  className={`${inputClass} bg-dbx-bg`} style={{ width: '120px' }}>
                   <option value="use">Use</option>
                   <option value="manage">Manage</option>
                   {isOwner && <option value="owner">Owner</option>}
                 </select>
-                <button
-                  onClick={handleAddUser}
-                  disabled={userSaving || !newUserEmail.trim()}
-                  className="h-8 px-3 text-[13px] text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors disabled:opacity-50"
-                >
-                  {userSaving ? <Loader2 size={13} className="animate-spin" /> : 'Add'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {isManage && (
-            <div ref={el => sectionRefs.current['groups'] = el} className="mb-10">
-              <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Groups</h2>
-
-              <div className="py-4 text-[12px] text-dbx-text-secondary">
-                Assign roles to workspace groups. When a user belongs to multiple groups, the highest privilege wins.
               </div>
 
-              {groupError && (
+              {principalError && (
                 <div className="mb-3 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[13px]">
-                  {groupError}
+                  {principalError}
                 </div>
               )}
 
-              {groupsLoading ? (
+              {/* Principals with access */}
+              <div className="text-[12px] text-dbx-text-secondary font-medium mb-2 mt-6">Principals with access</div>
+              {principalsLoading ? (
                 <div className="flex items-center gap-2 py-4 text-[13px] text-dbx-text-secondary">
-                  <Loader2 size={14} className="animate-spin" /> Loading groups...
+                  <Loader2 size={14} className="animate-spin" /> Loading...
+                </div>
+              ) : principals.length === 0 ? (
+                <div className="py-6 text-center text-[13px] text-dbx-text-secondary border border-dbx-border rounded">
+                  No explicit role assignments yet.
                 </div>
               ) : (
-                <div className="rounded border border-dbx-border overflow-hidden mb-4 text-[13px]">
-                  {groups.length === 0 ? (
-                    <div className="px-4 py-6 text-center text-dbx-text-secondary">
-                      No group role assignments. Add groups below.
+                <div className="space-y-0 border border-dbx-border rounded overflow-hidden">
+                  {principals.map((p) => (
+                    <div key={`${p.type}-${p.identity}`}
+                      className="flex items-center gap-3 px-4 py-3 border-b last:border-b-0 border-dbx-border">
+                      {p.type === 'user' ? (
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+                          <path d="M10 10a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM3 17.5c0-3.5 3.134-5.5 7-5.5s7 2 7 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                      ) : (
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+                          <path d="M7 9a3 3 0 100-6 3 3 0 000 6zM1.5 16.5c0-3 2.686-4.5 5.5-4.5 1 0 1.9.2 2.7.5M13 9a3 3 0 100-6 3 3 0 000 6zM18.5 16.5c0-3-2.686-4.5-5.5-4.5-1.2 0-2.3.3-3.2.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] text-dbx-text truncate">{p.displayName || p.identity}</div>
+                        {p.type === 'user' && p.displayName && (
+                          <div className="text-[11px] text-dbx-text-secondary truncate">{p.identity}</div>
+                        )}
+                      </div>
+                      <select value={p.role}
+                        onChange={(e) => handleChangePrincipalRole(p, e.target.value)}
+                        className="h-7 text-[12px] text-dbx-text bg-dbx-bg border border-dbx-border rounded px-2 outline-none">
+                        <option value="use">Use</option>
+                        <option value="manage">Manage</option>
+                        {isOwner && <option value="owner">Owner</option>}
+                      </select>
+                      <button onClick={() => handleRemovePrincipal(p)}
+                        className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1" title="Remove">
+                        <XCircle size={14} />
+                      </button>
                     </div>
-                  ) : (
-                    <table className="w-full">
-                      <thead>
-                        <tr className="bg-dbx-sidebar text-dbx-text-secondary text-[12px]">
-                          <th className="text-left px-3 py-2 font-medium">Group</th>
-                          <th className="text-left px-3 py-2 font-medium">Role</th>
-                          <th className="text-left px-3 py-2 font-medium">Granted by</th>
-                          <th className="px-3 py-2" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {groups.map((g) => (
-                          <tr key={g.group_name} className="border-t border-dbx-border">
-                            <td className="px-3 py-2 text-dbx-text">{g.group_name}</td>
-                            <td className="px-3 py-2 capitalize text-dbx-text">{g.role}</td>
-                            <td className="px-3 py-2 text-dbx-text-secondary">{g.granted_by || '—'}</td>
-                            <td className="px-3 py-2 text-right">
-                              <button onClick={() => handleRemoveGroup(g.group_name)}
-                                className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1" title="Remove group role">
-                                <Trash2 size={13} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+                  ))}
                 </div>
               )}
-
-              {/* Add group */}
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1" style={{ maxWidth: '260px' }}>
-                  <input type="text" placeholder="Group name"
-                    value={newGroupName}
-                    onChange={(e) => { setNewGroupName(e.target.value); setShowGroupDropdown(true) }}
-                    onFocus={() => setShowGroupDropdown(true)}
-                    onBlur={() => setTimeout(() => setShowGroupDropdown(false), 150)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddGroup()}
-                    className={`${inputClass} w-full`}
-                  />
-                  {showGroupDropdown && workspaceGroups.length > 0 && (
-                    <GroupSearchDropdown
-                      query={newGroupName}
-                      groups={workspaceGroups}
-                      onSelect={(name) => { setNewGroupName(name); setShowGroupDropdown(false) }}
-                    />
-                  )}
-                </div>
-                <select value={newGroupRole} onChange={(e) => setNewGroupRole(e.target.value)}
-                  className={`${inputClass} bg-dbx-bg`} style={{ width: '110px' }}>
-                  <option value="use">Use</option>
-                  <option value="manage">Manage</option>
-                  {isOwner && <option value="owner">Owner</option>}
-                </select>
-                <button onClick={handleAddGroup} disabled={groupSaving || !newGroupName.trim()}
-                  className="h-8 px-4 text-[13px] rounded bg-dbx-blue text-white hover:bg-dbx-blue-hover disabled:opacity-50 transition-colors">
-                  {groupSaving ? 'Adding...' : 'Add'}
-                </button>
-              </div>
             </div>
           )}
 
