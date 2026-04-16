@@ -164,3 +164,17 @@ class DatabaseService:
 
     async def count_owners(self) -> int:
         return await self.backend.count_owners()
+
+    # --- Group roles ---
+
+    async def get_group_role(self, group_name: str):
+        return await self.backend.get_group_role(group_name)
+
+    async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
+        return await self.backend.set_group_role(group_name, role, granted_by)
+
+    async def list_group_roles(self) -> list:
+        return await self.backend.list_group_roles()
+
+    async def delete_group_role(self, group_name: str):
+        return await self.backend.delete_group_role(group_name)

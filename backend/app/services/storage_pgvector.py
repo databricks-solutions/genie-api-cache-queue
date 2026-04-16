@@ -74,6 +74,7 @@ class PGVectorStorageService:
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
         self.query_log_table_name = f"{schema_prefix}.{log_base}"
         self.user_roles_table_name = f"{schema_prefix}.user_roles"
+        self.group_roles_table_name = f"{schema_prefix}.group_roles"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -197,6 +198,7 @@ class PGVectorStorageService:
             await self._ensure_query_log_table(conn)
             await self._ensure_gateway_table(conn)
             await self._ensure_user_roles_table(conn)
+            await self._ensure_group_roles_table(conn)
             await self._migrate_genie_space_id_columns(conn)
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
@@ -485,6 +487,18 @@ class PGVectorStorageService:
             )
         """)
         logger.info("User roles table '%s' initialized", self.user_roles_table_name)
+
+    async def _ensure_group_roles_table(self, conn):
+        """Create the group_roles table if it does not exist."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.group_roles_table_name} (
+                group_name TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                granted_by TEXT,
+                granted_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("Group roles table '%s' initialized", self.group_roles_table_name)
 
     async def _ensure_gateway_table(self, conn):
         """Create the gateway_configs table if it does not exist."""
@@ -1054,6 +1068,44 @@ class PGVectorStorageService:
                 "owner",
             )
             return row["cnt"] if row else 0
+
+    async def get_group_role(self, group_name: str) -> str | None:
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT role FROM {self.group_roles_table_name} WHERE group_name = $1",
+                group_name
+            )
+            return row["role"] if row else None
+
+    async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
+        if not self.pool:
+            raise ValueError("RBAC requires Lakebase (pgvector).")
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"""
+                INSERT INTO {self.group_roles_table_name} (group_name, role, granted_by, granted_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (group_name) DO UPDATE SET role = $2, granted_by = $3, granted_at = NOW()
+            """, group_name, role, granted_by)
+
+    async def list_group_roles(self) -> list:
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT group_name, role, granted_by, granted_at FROM {self.group_roles_table_name} ORDER BY granted_at DESC"
+            )
+            return [dict(r) for r in rows]
+
+    async def delete_group_role(self, group_name: str):
+        if not self.pool:
+            raise ValueError("RBAC requires Lakebase (pgvector).")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM {self.group_roles_table_name} WHERE group_name = $1",
+                group_name
+            )
 
     def _row_to_gateway_dict(self, row) -> dict:
         """Convert a database row to a gateway dict."""
