@@ -266,28 +266,23 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
-  // Preload workspace users/groups as soon as manage+ user loads Settings
+  // Load RBAC data as soon as user has manage+ role
   useEffect(() => {
     if (!isManage) return
-    api.listWorkspaceGroups().catch(() => []).then(setWorkspaceGroups)
+    setPrincipalsLoading(true)
+    Promise.all([
+      api.listUsers().catch(() => []),
+      api.listGroups().catch(() => []),
+      api.listWorkspaceGroups().catch((e) => { console.error('Failed to load workspace groups:', e); return [] }),
+    ]).then(([roleUsers, roleGroups, wsGroups]) => {
+      const merged = [
+        ...roleUsers.map(u => ({ type: 'user', identity: u.identity, displayName: '', role: u.role, granted_by: u.granted_by })),
+        ...roleGroups.map(g => ({ type: 'group', identity: g.group_name, displayName: g.group_name, role: g.role, granted_by: g.granted_by })),
+      ]
+      setPrincipals(merged)
+      setWorkspaceGroups(wsGroups)
+    }).finally(() => setPrincipalsLoading(false))
   }, [isManage])
-
-  // Load role assignments when navigating to access section
-  useEffect(() => {
-    if (isManage && activeSection === 'access') {
-      setPrincipalsLoading(true)
-      Promise.all([
-        api.listUsers().catch(() => []),
-        api.listGroups().catch(() => []),
-      ]).then(([roleUsers, roleGroups]) => {
-        const merged = [
-          ...roleUsers.map(u => ({ type: 'user', identity: u.identity, displayName: '', role: u.role, granted_by: u.granted_by })),
-          ...roleGroups.map(g => ({ type: 'group', identity: g.group_name, displayName: g.group_name, role: g.role, granted_by: g.granted_by })),
-        ]
-        setPrincipals(merged)
-      }).finally(() => setPrincipalsLoading(false))
-    }
-  }, [isManage, activeSection])
 
   // Debounced server-side user search
   const searchTimerRef = useRef(null)
@@ -673,7 +668,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2 mb-4">
                 <div className="relative flex-1">
                   <input type="text"
-                    placeholder="Type to add users or groups"
+                    placeholder={workspaceGroups.length > 0 ? `Type to add users or groups (${workspaceGroups.length} groups loaded)` : 'Type to add users or groups'}
                     value={searchQuery}
                     onChange={(e) => { setSearchQuery(e.target.value); setShowSearch(true) }}
                     onFocus={() => setShowSearch(true)}
