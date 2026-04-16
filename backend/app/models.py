@@ -176,7 +176,7 @@ class GatewayConfig(BaseModel):
 class GatewayCreateRequest(BaseModel):
     name: str
     genie_space_id: str
-    sql_warehouse_id: str
+    sql_warehouse_id: Optional[str] = None
     similarity_threshold: Optional[float] = None
     max_queries_per_minute: Optional[int] = None
     cache_ttl_hours: Optional[float] = None

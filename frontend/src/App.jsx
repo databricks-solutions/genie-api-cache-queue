@@ -55,7 +55,7 @@ function App() {
     const checkAuth = () => {
       api.checkAuthMode()
         .then(data => {
-          setSpWarning(data.auth_mode === 'service_principal' ? data.message : null)
+          setSpWarning(data.auth_mode !== 'user' ? data.message : null)
         })
         .catch(() => {})
     }

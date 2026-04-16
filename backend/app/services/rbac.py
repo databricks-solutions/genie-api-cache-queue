@@ -11,11 +11,14 @@ Unassigned users default to 'use'.
 """
 
 import logging
+import re
 import time
 
 import httpx
 
 from app.auth import ensure_https
+
+_EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+$')
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +109,7 @@ async def is_workspace_admin(token: str, host: str) -> bool:
             groups = resp.json().get("groups", [])
             result = any(g.get("display") == "admins" for g in groups)
     except Exception as e:
-        logger.debug("Workspace admin check failed: %s", e)
+        logger.warning("Workspace admin check failed: %s", e)
 
     _admin_cache[token] = (result, now + _ADMIN_CACHE_TTL)
     return result
@@ -121,13 +124,14 @@ async def is_user_workspace_admin(email: str, caller_token: str, host: str) -> b
     """
     if not email or not caller_token or not host:
         return False
+    if not _EMAIL_RE.match(email):
+        return False
     host = ensure_https(host)
     try:
-        safe_email = email.replace('"', '')
         resp = await _http_client.get(
             f"{host}/api/2.0/preview/scim/v2/Users",
             headers={"Authorization": f"Bearer {caller_token}"},
-            params={"filter": f'userName eq "{safe_email}"', "attributes": "groups"},
+            params={"filter": f'userName eq "{email}"', "attributes": "groups"},
         )
         if resp.status_code == 200:
             resources = resp.json().get("Resources", [])
@@ -135,7 +139,7 @@ async def is_user_workspace_admin(email: str, caller_token: str, host: str) -> b
                 groups = resources[0].get("groups", [])
                 return any(g.get("display") == "admins" for g in groups)
     except Exception as e:
-        logger.debug("User workspace admin check failed for %s: %s", email, e)
+        logger.warning("User workspace admin check failed for %s: %s", email, e)
     return False
 
 
@@ -166,10 +170,7 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
 
     assigned = None
     if _db.db_service:
-        try:
-            assigned = await _db.db_service.get_user_role(identity)
-        except ValueError:
-            pass
+        assigned = await _db.db_service.get_user_role(identity)
 
     role = assigned or DEFAULT_ROLE
     if len(_role_cache) > _ROLE_CACHE_MAX:

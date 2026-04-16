@@ -308,8 +308,10 @@ class UIConfigUpdate(BaseModel):
 
 
 @router.get("/config")
-async def get_config():
+async def get_config(req: Request):
     """Get server configuration. Used by Settings UI and external API."""
+    from app.api.auth_helpers import require_role
+    await require_role(req, "use")
     overrides = get_overrides()
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)

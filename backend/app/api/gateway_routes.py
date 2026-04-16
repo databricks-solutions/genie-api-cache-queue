@@ -356,7 +356,11 @@ async def list_serving_endpoints(req: Request):
 
 @gateway_router.get("/workspace/users")
 async def list_workspace_users(req: Request):
-    """List workspace users via SCIM API for role assignment autocomplete."""
+    """List workspace users via SCIM API for role assignment autocomplete.
+    Uses resolve_user_token_optional intentionally: SP fallback is acceptable
+    here because this is a discovery endpoint (user enumeration), not role
+    resolution. The require_role guard above already verified the caller's
+    identity via extract_bearer_token_optional (no SP elevation)."""
     await require_role(req, "manage")
     try:
         token = resolve_user_token_optional(req)

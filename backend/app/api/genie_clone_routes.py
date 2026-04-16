@@ -54,9 +54,8 @@ ATT_PREFIX = "acache_"
 
 
 async def _sweep_synthetic_messages():
-    """Evict oldest completed entries when the store exceeds _SYNTHETIC_MAX.
-    Acquires _sweep_lock to serialize access to the full dict.
-    Prefers unlocked entries; falls back to oldest locked entries if all are locked.
+    """Evict oldest entries when the store exceeds _SYNTHETIC_MAX.
+    Acquires _sweep_lock to serialize access. Skips locked entries.
     """
     overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
     if overflow <= 0:
@@ -77,11 +76,6 @@ async def _sweep_synthetic_messages():
             _synthetic_messages.pop(k, None)
             _message_locks.pop(k, None)
             evicted += 1
-        remaining = overflow - evicted
-        if remaining > 0:
-            for k in skipped_locked[:remaining]:
-                _synthetic_messages.pop(k, None)
-                _message_locks.pop(k, None)
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +573,6 @@ async def _handle_query(
 async def clone_get_space(space_id: str, request: Request, response: Response):
     """Proxy GET space metadata to real Genie API. Resolves gateway_id if needed."""
     token = _extract_token(request)
-    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
     real_space_id, _ = await _resolve_gateway_space_id(space_id)
     return await _proxy_passthrough(request, "GET", f"/api/2.0/genie/spaces/{real_space_id}", token)
 
@@ -592,7 +585,6 @@ async def clone_start_conversation(space_id: str, body: GenieContentBody, reques
     identity = request.headers.get("X-Forwarded-Email", "api-user")
     real_space_id, gateway = await _resolve_gateway_space_id(space_id)
     auth_mode = _detect_auth_mode(request)
-    response.headers["X-Genie-Auth-Mode"] = auth_mode
     return await _handle_query(real_space_id, body.content, token, identity, gateway=gateway, auth_mode=auth_mode)
 
 
@@ -603,7 +595,6 @@ async def clone_create_message(space_id: str, conversation_id: str, body: GenieC
     identity = request.headers.get("X-Forwarded-Email", "api-user")
     real_space_id, gateway = await _resolve_gateway_space_id(space_id)
     auth_mode = _detect_auth_mode(request)
-    response.headers["X-Genie-Auth-Mode"] = auth_mode
     return await _handle_query(real_space_id, body.content, token, identity, conversation_id=conversation_id, gateway=gateway, auth_mode=auth_mode)
 
 
@@ -619,11 +610,9 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
         if not stored:
             raise HTTPException(status_code=404, detail="Message not found")
         proxy = stored.get("_proxy", {})
-        response.headers["X-Genie-Auth-Mode"] = proxy.get("auth_mode", "unknown")
         return {k: v for k, v in stored.items() if not k.startswith("_")}
 
     # Real message — proxy to Genie
-    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
     path = f"/api/2.0/genie/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
     return await _proxy_passthrough(request, "GET", path, token)
 
@@ -636,7 +625,6 @@ async def clone_get_query_result(
 ):
     """Clone of GET query-result. Executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
-    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
 
     # Check if we have cached SQL for this attachment (synthetic or registered real Genie ID)
     stored = _synthetic_messages.get(attachment_id)
@@ -665,7 +653,6 @@ async def clone_execute_query(
 ):
     """Clone of POST execute-query. Re-executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
-    response.headers["X-Genie-Auth-Mode"] = _detect_auth_mode(request)
 
     stored = _synthetic_messages.get(attachment_id)
     if stored and stored.get("sql_query"):

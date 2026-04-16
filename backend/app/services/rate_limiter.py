@@ -11,6 +11,9 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 
+_QUERY_STATUS_MAX = 5000
+
+
 class RateLimiterService:
     """
     In-memory rate limiting service.
@@ -41,7 +44,7 @@ class RateLimiterService:
 
             current_count = sum(count for _, count in self.rate_limits[global_key])
 
-            logger.info("Rate limit check: count=%d/%d identity=%s", current_count, max_per_minute, identity)
+            logger.debug("Rate limit check: count=%d/%d identity=%s", current_count, max_per_minute, identity)
 
             if current_count >= max_per_minute:
                 logger.warning("Rate limit exceeded: %d/%d identity=%s", current_count, max_per_minute, identity)
@@ -51,7 +54,11 @@ class RateLimiterService:
             return True
 
     def save_query_status(self, query_id: str, status_data: dict):
-        """Save query status information"""
+        """Save query status information, evicting oldest entries if over cap."""
+        if len(self.query_status) >= _QUERY_STATUS_MAX:
+            keys = list(self.query_status.keys())[:len(self.query_status) - _QUERY_STATUS_MAX + 1]
+            for k in keys:
+                del self.query_status[k]
         self.query_status[query_id] = status_data
 
     def get_query_status(self, query_id: str) -> Optional[dict]:
