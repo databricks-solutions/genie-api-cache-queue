@@ -14,8 +14,7 @@ export function RoleProvider({ children }) {
   const fetchRole = useCallback(() => {
     api.getMyRole()
       .then((data) => setRole(data.role || 'use'))
-      .catch((err) => {
-        console.warn('Failed to fetch role:', err)
+      .catch(() => {
         setRole('use')
       })
       .finally(() => setLoading(false))

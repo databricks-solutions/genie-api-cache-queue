@@ -496,7 +496,9 @@ async def get_settings_endpoint(req: Request):
         "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or os.getenv("DATABRICKS_CLIENT_ID")),
         "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if os.getenv("DATABRICKS_CLIENT_ID") else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
+        "normalization_model": overrides.get("normalization_model", ""),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
+        "validation_model": overrides.get("validation_model", ""),
     }
 
 
