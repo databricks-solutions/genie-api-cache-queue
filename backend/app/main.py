@@ -32,7 +32,8 @@ async def lifespan(app: FastAPI):
 
     # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
-    if settings.storage_backend == "pgvector" and settings.lakebase_instance:
+    if settings.storage_backend == "pgvector" and settings.lakebase_instance \
+            and storage.has_pgvector_backends():
         async def _token_refresh_loop():
             while True:
                 await asyncio.sleep(30 * 60)  # Every 30 minutes
