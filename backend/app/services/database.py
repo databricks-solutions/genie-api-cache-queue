@@ -50,7 +50,7 @@ async def initialize_storage():
         connection_string=settings.postgres_connection_string,
         table_name=settings.full_table_name,
         cache_ttl_hours=settings.cache_ttl_hours,
-        lakebase_service_token=token,
+        databricks_pat=token,
         databricks_host=settings.databricks_host,
         lakebase_instance_name=settings.lakebase_instance,
     )
