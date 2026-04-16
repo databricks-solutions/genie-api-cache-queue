@@ -87,7 +87,7 @@ function PrincipalSearchDropdown({ query, searchResults, groups, loading, onSele
 
   const matchedGroups = groups.filter(g =>
     !q || matchesAll(g.displayName.toLowerCase())
-  ).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: g.displayName, detail: `${g.memberCount} members` }))
+  ).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: g.displayName, detail: 'Group' }))
 
   const matchedUsers = searchResults.map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
 

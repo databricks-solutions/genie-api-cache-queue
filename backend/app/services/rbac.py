@@ -235,8 +235,19 @@ async def get_user_groups(email: str, host: str) -> list[str]:
     return groups
 
 
+_ws_groups_cache: tuple[list[dict], float] | None = None
+_WS_GROUPS_CACHE_TTL = 300.0
+
+
 async def list_workspace_groups(host: str) -> list[dict]:
-    """List all workspace groups via SCIM using the SP token."""
+    """List all workspace groups via SCIM using the SP token. Cached 5 min."""
+    global _ws_groups_cache
+    now = time.monotonic()
+    if _ws_groups_cache is not None:
+        cached_groups, expires_at = _ws_groups_cache
+        if now < expires_at:
+            return cached_groups
+
     token = _get_sp_token()
     if not token or not host:
         return []
@@ -250,7 +261,7 @@ async def list_workspace_groups(host: str) -> list[dict]:
             resp = await _http_client.get(
                 f"{host}/api/2.0/preview/scim/v2/Groups",
                 headers={"Authorization": f"Bearer {token}"},
-                params={"count": page_size, "startIndex": start_index, "attributes": "displayName,members"},
+                params={"count": page_size, "startIndex": start_index, "attributes": "displayName"},
             )
             if resp.status_code != 200:
                 logger.warning("SCIM Groups API returned %d", resp.status_code)
@@ -260,10 +271,7 @@ async def list_workspace_groups(host: str) -> list[dict]:
             for g in resources:
                 name = g.get("displayName", "")
                 if name:
-                    all_groups.append({
-                        "displayName": name,
-                        "memberCount": len(g.get("members", [])),
-                    })
+                    all_groups.append({"displayName": name})
             total = data.get("totalResults", 0)
             if start_index + page_size > total or not resources:
                 break
@@ -271,6 +279,7 @@ async def list_workspace_groups(host: str) -> list[dict]:
     except Exception as e:
         logger.warning("Failed to list workspace groups: %s", e)
 
+    _ws_groups_cache = (all_groups, now + _WS_GROUPS_CACHE_TTL)
     return all_groups
 
 
