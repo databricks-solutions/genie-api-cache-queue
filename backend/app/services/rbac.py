@@ -22,6 +22,12 @@ _EMAIL_RE = re.compile(r'^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+$')
 
 logger = logging.getLogger(__name__)
 
+
+def _get_sp_token() -> str:
+    """Get the app's service principal token for SCIM calls."""
+    from app.auth import get_service_principal_token
+    return get_service_principal_token() or ""
+
 ROLES = ['use', 'manage', 'owner']
 ROLE_HIERARCHY = {'use': 1, 'manage': 2, 'owner': 3}
 DEFAULT_ROLE = 'use'
@@ -38,6 +44,21 @@ _ADMIN_CACHE_MAX = 500
 _ROLE_CACHE_MAX = 500
 _admin_cache: dict[str, tuple[bool, float]] = {}   # token → (is_admin, expires_at)
 _role_cache: dict[str, tuple[str, float]] = {}     # identity → (role, expires_at)
+
+_GROUP_CACHE_TTL = 60.0
+_GROUP_CACHE_MAX = 500
+_group_cache: dict[str, tuple[list[str], float]] = {}
+
+
+def _sweep_expired_group_cache():
+    now = time.monotonic()
+    expired = [k for k, (_, exp) in _group_cache.items() if now >= exp]
+    for k in expired:
+        del _group_cache[k]
+    if len(_group_cache) > _GROUP_CACHE_MAX:
+        by_expiry = sorted(_group_cache.items(), key=lambda kv: kv[1][1])
+        for k, _ in by_expiry[:len(_group_cache) - _GROUP_CACHE_MAX]:
+            del _group_cache[k]
 
 
 async def close_http_client():
@@ -81,11 +102,22 @@ def invalidate_role_cache(identity: str) -> None:
     _role_cache.pop(identity, None)
 
 
-async def is_workspace_admin(token: str, host: str) -> bool:
-    """Check if the token owner is a Databricks workspace admin via SCIM /Me.
+def invalidate_group_cache():
+    """Clear group-related caches after group role changes."""
+    _group_cache.clear()
+    _role_cache.clear()
+
+
+async def is_workspace_admin(token: str, host: str, identity: str = "") -> bool:
+    """Check if a user is a Databricks workspace admin via SCIM.
+
+    When token is provided, calls /Me with the user's token.
+    When token is empty and identity is provided, uses the SP token to look
+    up the user by email via /Users.
     Result is cached for _ADMIN_CACHE_TTL seconds to avoid per-request SCIM calls.
     """
-    if not token or not host:
+    cache_key = token or identity
+    if not cache_key or not host:
         return False
     host = ensure_https(host)
 
@@ -93,7 +125,7 @@ async def is_workspace_admin(token: str, host: str) -> bool:
     if len(_admin_cache) > _ADMIN_CACHE_MAX:
         _sweep_expired_admin_cache()
 
-    cached = _admin_cache.get(token)
+    cached = _admin_cache.get(cache_key)
     if cached is not None:
         result, expires_at = cached
         if now < expires_at:
@@ -101,17 +133,31 @@ async def is_workspace_admin(token: str, host: str) -> bool:
 
     result = False
     try:
-        resp = await _http_client.get(
-            f"{host}/api/2.0/preview/scim/v2/Me",
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        if resp.status_code == 200:
-            groups = resp.json().get("groups", [])
-            result = any(g.get("display") == "admins" for g in groups)
+        if token:
+            resp = await _http_client.get(
+                f"{host}/api/2.0/preview/scim/v2/Me",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if resp.status_code == 200:
+                groups = resp.json().get("groups", [])
+                result = any(g.get("display") == "admins" for g in groups)
+        elif identity:
+            sp_token = _get_sp_token()
+            if sp_token:
+                resp = await _http_client.get(
+                    f"{host}/api/2.0/preview/scim/v2/Users",
+                    headers={"Authorization": f"Bearer {sp_token}"},
+                    params={"filter": f'userName eq "{identity}"', "attributes": "groups"},
+                )
+                if resp.status_code == 200:
+                    resources = resp.json().get("Resources", [])
+                    if resources:
+                        groups = resources[0].get("groups", [])
+                        result = any(g.get("display") == "admins" for g in groups)
     except Exception as e:
         logger.warning("Workspace admin check failed: %s", e)
 
-    _admin_cache[token] = (result, now + _ADMIN_CACHE_TTL)
+    _admin_cache[cache_key] = (result, now + _ADMIN_CACHE_TTL)
     return result
 
 
@@ -143,21 +189,104 @@ async def is_user_workspace_admin(email: str, caller_token: str, host: str) -> b
     return False
 
 
+async def get_user_groups(email: str, host: str) -> list[str]:
+    """Return display names of groups the user belongs to via SCIM.
+    Uses the SP token to avoid OBO scope limitations.
+    """
+    if not email or not host:
+        return []
+    if not _EMAIL_RE.match(email):
+        return []
+
+    now = time.monotonic()
+    if len(_group_cache) > _GROUP_CACHE_MAX:
+        _sweep_expired_group_cache()
+
+    cached = _group_cache.get(email)
+    if cached is not None:
+        groups, expires_at = cached
+        if now < expires_at:
+            return groups
+
+    host = ensure_https(host)
+    token = _get_sp_token()
+    if not token:
+        return []
+
+    groups = []
+    try:
+        resp = await _http_client.get(
+            f"{host}/api/2.0/preview/scim/v2/Users",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"filter": f'userName eq "{email}"', "attributes": "groups"},
+        )
+        if resp.status_code == 200:
+            resources = resp.json().get("Resources", [])
+            if resources:
+                groups = [
+                    g.get("display", "")
+                    for g in resources[0].get("groups", [])
+                    if g.get("display")
+                ]
+    except Exception as e:
+        logger.warning("Failed to fetch groups for %s: %s", email, e)
+
+    _group_cache[email] = (groups, now + _GROUP_CACHE_TTL)
+    return groups
+
+
+async def list_workspace_groups(host: str) -> list[dict]:
+    """List all workspace groups via SCIM using the SP token."""
+    token = _get_sp_token()
+    if not token or not host:
+        return []
+    host = ensure_https(host)
+
+    all_groups = []
+    start_index = 1
+    page_size = 500
+    try:
+        while True:
+            resp = await _http_client.get(
+                f"{host}/api/2.0/preview/scim/v2/Groups",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"count": page_size, "startIndex": start_index, "attributes": "displayName,members"},
+            )
+            if resp.status_code != 200:
+                logger.warning("SCIM Groups API returned %d", resp.status_code)
+                break
+            data = resp.json()
+            resources = data.get("Resources", [])
+            for g in resources:
+                name = g.get("displayName", "")
+                if name:
+                    all_groups.append({
+                        "displayName": name,
+                        "memberCount": len(g.get("members", [])),
+                    })
+            total = data.get("totalResults", 0)
+            if start_index + page_size > total or not resources:
+                break
+            start_index += page_size
+    except Exception as e:
+        logger.warning("Failed to list workspace groups: %s", e)
+
+    return all_groups
+
+
 async def resolve_role(identity: str, token: str, host: str) -> str:
     """
     Resolve the effective role for a user:
     1. Workspace admins → 'owner' (checked via Databricks SCIM API, cached 60 s)
     2. Explicit assignment in user_roles table (cached 120 s, invalidated on write)
-    3. Default → 'use'
+    3. Highest group role from group_roles table
+    4. Default → 'use'
     """
     import app.services.database as _db
 
-    # Only check workspace admin with a real user token (not empty/SP)
-    if token and await is_workspace_admin(token, host):
+    if await is_workspace_admin(token, host, identity=identity):
         return 'owner'
 
-    # Skip cache for empty identity to prevent all anonymous requests sharing
-    # a single cache slot (key ""), which could leak an elevated role.
     if not identity:
         return DEFAULT_ROLE
 
@@ -168,11 +297,24 @@ async def resolve_role(identity: str, token: str, host: str) -> str:
         if now < expires_at:
             return role
 
+    # 1. Explicit user role
     assigned = None
     if _db.db_service:
         assigned = await _db.db_service.get_user_role(identity)
 
-    role = assigned or DEFAULT_ROLE
+    if assigned:
+        role = assigned
+    else:
+        # 2. Highest group role
+        role = DEFAULT_ROLE
+        if _db.db_service:
+            user_groups = await get_user_groups(identity, host)
+            if user_groups:
+                for g in user_groups:
+                    g_role = await _db.db_service.get_group_role(g)
+                    if g_role and ROLE_HIERARCHY.get(g_role, 0) > ROLE_HIERARCHY.get(role, 0):
+                        role = g_role
+
     if len(_role_cache) > _ROLE_CACHE_MAX:
         _sweep_expired_role_cache()
     _role_cache[identity] = (role, now + _ROLE_CACHE_TTL)
