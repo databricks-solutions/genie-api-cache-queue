@@ -878,7 +878,9 @@ echo -e "    ${GREEN}✓${NC} Source code synced to $WS_PATH"
 echo -e "    ${GREEN}✓${NC} App deployed"
 echo -e "    ${GREEN}✓${NC} OAuth scopes: sql, serving.serving-endpoints, dashboards.genie"
 echo -e "    ${GREEN}✓${NC} Storage backend: $STORAGE_BACKEND"
-echo -e "    ${GREEN}✓${NC} Lakebase Autoscaling project: $LAKEBASE_INSTANCE"
+if [ -n "$LAKEBASE_INSTANCE" ]; then
+    echo -e "    ${GREEN}✓${NC} Lakebase Autoscaling project: $LAKEBASE_INSTANCE"
+fi
 if [ -n "$SP_CLIENT_ID" ]; then
     echo -e "    ${GREEN}✓${NC} SP granted CAN_MANAGE on Lakebase project"
     if [ "${ROLE_CREATED:-}" = "OK" ]; then
