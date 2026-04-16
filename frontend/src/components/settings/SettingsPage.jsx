@@ -80,7 +80,7 @@ function EditableText({ value, onChange, placeholder, masked }) {
 }
 
 /* ── Principal search dropdown ── */
-function PrincipalSearchDropdown({ query, users, groups, onSelect }) {
+function PrincipalSearchDropdown({ query, users, groups, loading, onSelect }) {
   const q = (query || '').toLowerCase()
   const words = q.split(/\s+/).filter(Boolean)
   const matchesAll = (text) => words.every(w => text.includes(w))
@@ -101,8 +101,15 @@ function PrincipalSearchDropdown({ query, users, groups, onSelect }) {
   return (
     <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded-lg shadow-lg max-h-64 overflow-y-auto">
       <div className="px-3 py-2 text-[11px] text-dbx-text-secondary font-medium">{label}</div>
-      {items.length === 0 && q && (
-        <div className="px-3 py-4 text-[13px] text-dbx-text-secondary text-center">No matching users or groups</div>
+      {loading && (
+        <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-dbx-text-secondary justify-center">
+          <Loader2 size={14} className="animate-spin" /> Loading workspace principals...
+        </div>
+      )}
+      {!loading && items.length === 0 && (
+        <div className="px-3 py-4 text-[13px] text-dbx-text-secondary text-center">
+          {q ? 'No matching users or groups' : 'No workspace data available'}
+        </div>
       )}
       {items.map(item => (
         <button key={`${item.type}-${item.id}`} type="button"
@@ -659,6 +666,7 @@ export default function SettingsPage() {
                       query={searchQuery}
                       users={workspaceUsers}
                       groups={workspaceGroups}
+                      loading={principalsLoading}
                       onSelect={(item) => {
                         handleAddPrincipal(item)
                         setShowSearch(false)
