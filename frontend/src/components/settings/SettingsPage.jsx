@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Pencil, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users } from 'lucide-react'
+import { Pencil, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 import { useTheme } from '../../context/ThemeContext'
 import { useRole } from '../../context/RoleContext'
+import Modal from '../shared/Modal'
 
 const secondsToTtl = (seconds) => {
   if (!seconds || seconds === 0) return { value: '0', unit: 'hours' }
@@ -21,6 +22,11 @@ const ttlToSeconds = (value, unit) => {
 
 const systemFont = '-apple-system, "system-ui", "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif'
 const systemStyle = { fontFamily: systemFont, WebkitFontSmoothing: 'auto', MozOsxFontSmoothing: 'auto' }
+
+const GROUP_ALIASES = {
+  'account users': 'All workspace users',
+}
+const groupLabel = (displayName) => GROUP_ALIASES[displayName] || displayName
 
 /* ── Toggle ── */
 function ToggleSwitch({ checked, onChange }) {
@@ -85,9 +91,11 @@ function PrincipalSearchDropdown({ query, searchResults, groups, loading, onSele
   const words = q.split(/\s+/).filter(Boolean)
   const matchesAll = (text) => words.every(w => text.includes(w))
 
-  const matchedGroups = groups.filter(g =>
-    !q || matchesAll(g.displayName.toLowerCase())
-  ).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: g.displayName, detail: 'Group' }))
+  const matchedGroups = groups.filter(g => {
+    if (!q) return true
+    const searchable = `${g.displayName} ${GROUP_ALIASES[g.displayName] || ''}`.toLowerCase()
+    return matchesAll(searchable)
+  }).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: groupLabel(g.displayName), detail: 'Group' }))
 
   const matchedUsers = searchResults.map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
 
@@ -194,7 +202,7 @@ const SIDEBAR_MANAGE = [
 /* ── Main component ── */
 export default function SettingsPage() {
   const { themeMode, setThemeMode } = useTheme()
-  const { isOwner, isManage } = useRole()
+  const { isOwner, isManage, identity: currentIdentity } = useRole()
   const [activeSection, setActiveSection] = useState('appearance')
 
   const [principals, setPrincipals] = useState([])
@@ -207,6 +215,8 @@ export default function SettingsPage() {
   const [searchResults, setSearchResults] = useState([])
   const [searchLoading, setSearchLoading] = useState(false)
   const [workspaceGroups, setWorkspaceGroups] = useState([])
+  const [removeTarget, setRemoveTarget] = useState(null)
+  const [removing, setRemoving] = useState(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -342,18 +352,26 @@ export default function SettingsPage() {
     }
   }
 
-  const handleRemovePrincipal = async (principal) => {
-    if (!window.confirm(`Remove ${principal.type === 'group' ? 'group' : ''} "${principal.identity}"?`)) return
+  const handleRemovePrincipal = (principal) => {
+    setRemoveTarget(principal)
+  }
+
+  const confirmRemovePrincipal = async () => {
+    if (!removeTarget) return
     setPrincipalError(null)
+    setRemoving(true)
     try {
-      if (principal.type === 'user') {
-        await api.deleteUserRole(principal.identity)
+      if (removeTarget.type === 'user') {
+        await api.deleteUserRole(removeTarget.identity)
       } else {
-        await api.deleteGroupRole(principal.identity)
+        await api.deleteGroupRole(removeTarget.identity)
       }
-      setPrincipals(prev => prev.filter(p => !(p.type === principal.type && p.identity === principal.identity)))
+      setPrincipals(prev => prev.filter(p => !(p.type === removeTarget.type && p.identity === removeTarget.identity)))
+      setRemoveTarget(null)
     } catch (err) {
       setPrincipalError(err.response?.data?.detail || 'Failed to remove.')
+    } finally {
+      setRemoving(false)
     }
   }
 
@@ -714,7 +732,9 @@ export default function SettingsPage() {
                 </div>
               ) : (
                 <div className="space-y-0 border border-dbx-border rounded overflow-hidden">
-                  {principals.map((p) => (
+                  {principals.map((p) => {
+                    const isSelf = p.type === 'user' && p.identity === currentIdentity
+                    return (
                     <div key={`${p.type}-${p.identity}`}
                       className="flex items-center gap-3 px-4 py-3 border-b last:border-b-0 border-dbx-border">
                       {p.type === 'user' ? (
@@ -727,24 +747,31 @@ export default function SettingsPage() {
                         </svg>
                       )}
                       <div className="flex-1 min-w-0">
-                        <div className="text-[13px] text-dbx-text truncate">{p.displayName || p.identity}</div>
+                        <div className="text-[13px] text-dbx-text truncate">
+                          {p.type === 'group' ? groupLabel(p.identity) : (p.displayName || p.identity)}
+                          {isSelf && <span className="ml-2 text-[11px] text-dbx-text-secondary">(you)</span>}
+                        </div>
                         {p.type === 'user' && p.displayName && (
                           <div className="text-[11px] text-dbx-text-secondary truncate">{p.identity}</div>
                         )}
                       </div>
                       <select value={p.role}
                         onChange={(e) => handleChangePrincipalRole(p, e.target.value)}
-                        className="h-7 text-[12px] text-dbx-text bg-dbx-bg border border-dbx-border rounded px-2 outline-none">
+                        disabled={isSelf}
+                        title={isSelf ? "You can't change your own role" : undefined}
+                        className="h-7 text-[12px] text-dbx-text bg-dbx-bg border border-dbx-border rounded px-2 outline-none disabled:opacity-50 disabled:cursor-not-allowed">
                         <option value="use">Use</option>
                         <option value="manage">Manage</option>
                         {isOwner && <option value="owner">Owner</option>}
                       </select>
                       <button onClick={() => handleRemovePrincipal(p)}
-                        className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1" title="Remove">
+                        disabled={isSelf}
+                        title={isSelf ? "You can't remove your own access" : 'Remove'}
+                        className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-dbx-text-secondary">
                         <XCircle size={14} />
                       </button>
                     </div>
-                  ))}
+                  )})}
                 </div>
               )}
             </div>
@@ -796,6 +823,38 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <Modal isOpen={!!removeTarget} onClose={() => !removing && setRemoveTarget(null)} title="Remove Access" maxWidth="max-w-md">
+        <div className="flex flex-col items-center text-center pt-2">
+          <div className="w-12 h-12 rounded-full bg-dbx-status-red-bg flex items-center justify-center mb-4">
+            <AlertTriangle size={24} className="text-dbx-text-danger" />
+          </div>
+          <p className="text-[14px] text-dbx-text mb-1">
+            Remove {removeTarget?.type === 'group' ? 'group' : 'user'} access?
+          </p>
+          <p className="text-[13px] text-dbx-text-secondary mb-6">
+            <span className="font-medium text-dbx-text">
+              {removeTarget ? (removeTarget.type === 'group' ? groupLabel(removeTarget.identity) : (removeTarget.displayName || removeTarget.identity)) : ''}
+            </span> will lose access to this app.
+          </p>
+          <div className="flex gap-3 w-full">
+            <button
+              onClick={() => setRemoveTarget(null)}
+              disabled={removing}
+              className="flex-1 h-8 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmRemovePrincipal}
+              disabled={removing}
+              className="flex-1 h-8 text-[13px] font-medium text-white bg-[#D32F2F] rounded hover:bg-[#B71C1C] transition-colors disabled:opacity-50"
+            >
+              {removing ? 'Removing...' : 'Remove'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

@@ -370,6 +370,18 @@ class DynamicStorageService:
         backend = self._require_pgvector_backend()
         return await backend.delete_user_role(identity)
 
+    async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
+        backend = self._require_pgvector_backend()
+        return await backend.set_group_role(group_name, role, granted_by)
+
+    async def list_group_roles(self) -> list:
+        backend = self._require_pgvector_backend()
+        return await backend.list_group_roles()
+
+    async def delete_group_role(self, group_name: str):
+        backend = self._require_pgvector_backend()
+        return await backend.delete_group_role(group_name)
+
     async def count_owners(self) -> int:
         backend = self._require_pgvector_backend()
         return await backend.count_owners()

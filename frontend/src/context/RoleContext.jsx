@@ -5,17 +5,22 @@ import { api } from '../services/api'
 // isOwner:  role === 'owner'
 // isManage: role === 'manage' || role === 'owner'
 
-const RoleContext = createContext({ role: 'use', isOwner: false, isManage: false, loading: true, refreshRole: () => {} })
+const RoleContext = createContext({ role: 'use', identity: '', isOwner: false, isManage: false, loading: true, refreshRole: () => {} })
 
 export function RoleProvider({ children }) {
   const [role, setRole] = useState('use')
+  const [identity, setIdentity] = useState('')
   const [loading, setLoading] = useState(true)
 
   const fetchRole = useCallback(() => {
     api.getMyRole()
-      .then((data) => setRole(data.role || 'use'))
+      .then((data) => {
+        setRole(data.role || 'use')
+        setIdentity(data.identity || '')
+      })
       .catch(() => {
         setRole('use')
+        setIdentity('')
       })
       .finally(() => setLoading(false))
   }, [])
@@ -31,11 +36,12 @@ export function RoleProvider({ children }) {
 
   const value = useMemo(() => ({
     role,
+    identity,
     loading,
     isOwner: role === 'owner',
     isManage: role === 'manage' || role === 'owner',
     refreshRole: fetchRole,
-  }), [role, loading, fetchRole])
+  }), [role, identity, loading, fetchRole])
 
   return (
     <RoleContext.Provider value={value}>

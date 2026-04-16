@@ -28,6 +28,7 @@ export default function GatewayDetailPage() {
   const [activeTab, setActiveTab] = useState('overview')
   const [deleting, setDeleting] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleteError, setDeleteError] = useState(null)
 
   const fetchGateway = async () => {
     try {
@@ -48,12 +49,13 @@ export default function GatewayDetailPage() {
 
   const handleDelete = async () => {
     try {
+      setDeleteError(null)
       setDeleting(true)
       await api.deleteGateway(id)
       setShowDeleteConfirm(false)
       navigate('/')
     } catch (err) {
-      alert('Failed to delete gateway: ' + (err.response?.data?.detail || err.message))
+      setDeleteError(err.response?.data?.detail || err.message || 'Failed to delete gateway')
     } finally {
       setDeleting(false)
     }
@@ -211,7 +213,7 @@ export default function GatewayDetailPage() {
         </div>
       </div>
       {/* Delete confirmation modal */}
-      <Modal isOpen={showDeleteConfirm} onClose={() => setShowDeleteConfirm(false)} title="Delete Gateway" maxWidth="max-w-md">
+      <Modal isOpen={showDeleteConfirm} onClose={() => { if (!deleting) { setShowDeleteConfirm(false); setDeleteError(null) } }} title="Delete Gateway" maxWidth="max-w-md">
         <div className="flex flex-col items-center text-center pt-2">
           <div className="w-12 h-12 rounded-full bg-dbx-status-red-bg flex items-center justify-center mb-4">
             <AlertTriangle size={24} className="text-dbx-text-danger" />
@@ -222,10 +224,16 @@ export default function GatewayDetailPage() {
           <p className="text-[13px] text-dbx-text-secondary mb-6">
             <span className="font-medium text-dbx-text">{gateway?.name}</span> will be permanently deleted. This action cannot be undone.
           </p>
+          {deleteError && (
+            <div className="w-full mb-4 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[12px] text-left">
+              {deleteError}
+            </div>
+          )}
           <div className="flex gap-3 w-full">
             <button
-              onClick={() => setShowDeleteConfirm(false)}
-              className="flex-1 h-8 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors"
+              onClick={() => { setShowDeleteConfirm(false); setDeleteError(null) }}
+              disabled={deleting}
+              className="flex-1 h-8 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
             >
               Cancel
             </button>

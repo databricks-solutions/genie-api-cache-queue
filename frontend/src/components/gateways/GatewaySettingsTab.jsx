@@ -58,6 +58,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState(null)
   const [endpoints, setEndpoints] = useState([])
   const [endpointsLoading, setEndpointsLoading] = useState(true)
   const [warehouses, setWarehouses] = useState([])
@@ -89,6 +90,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
   const handleSave = async () => {
     try {
+      setSaveError(null)
       setSaving(true)
       const updates = {
         caching_enabled: form.caching_enabled,
@@ -109,7 +111,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
       onUpdate?.(updated)
       setSaved(true)
     } catch (err) {
-      alert('Failed to save settings: ' + (err.response?.data?.detail || err.message))
+      setSaveError(err.response?.data?.detail || err.message || 'Failed to save settings')
     } finally {
       setSaving(false)
     }
@@ -256,6 +258,11 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
       </SettingsField>
 
       {/* Actions */}
+      {saveError && (
+        <div className="px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[13px]">
+          {saveError}
+        </div>
+      )}
       <div className="flex items-center gap-3 pt-2">
         <button onClick={handleSave} disabled={saving}
           className="inline-flex items-center gap-1.5 h-8 px-4 text-[13px] font-medium text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors disabled:opacity-50">
