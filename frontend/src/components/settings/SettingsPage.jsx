@@ -92,7 +92,7 @@ function PrincipalSearchDropdown({ query, users, groups, onSelect }) {
     (u.displayName && u.displayName.toLowerCase().includes(q))
   ).slice(0, 6).map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
 
-  const items = q ? [...matchedUsers, ...matchedGroups] : [...matchedGroups.slice(0, 3), ...matchedUsers.slice(0, 5)]
+  const items = q ? [...matchedGroups, ...matchedUsers] : [...matchedGroups.slice(0, 5), ...matchedUsers.slice(0, 3)]
   if (items.length === 0) return null
 
   const label = q ? `Results for "${query}"` : 'Suggested choices'
