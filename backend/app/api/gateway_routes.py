@@ -5,6 +5,7 @@ Manages gateway configurations and provides workspace discovery endpoints.
 
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -354,65 +355,38 @@ async def list_serving_endpoints(req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@gateway_router.get("/workspace/users")
-async def list_workspace_users(req: Request):
-    """List workspace users via SCIM API for role assignment autocomplete.
-    Uses resolve_user_token_optional intentionally: SP fallback is acceptable
-    here because this is a discovery endpoint (user enumeration), not role
-    resolution. The require_role guard above already verified the caller's
-    identity via extract_bearer_token_optional (no SP elevation)."""
+@gateway_router.get("/workspace/search")
+async def search_workspace_principals(req: Request, q: str = ""):
+    """Search workspace users via SCIM filtered query. Fast — single SCIM call.
+    Returns up to 10 matching users for the given query string."""
     await require_role(req, "manage")
+    if not q or len(q) < 2:
+        return {"users": []}
     try:
         from app.services.rbac import _get_sp_token
         token = _get_sp_token() or resolve_user_token_optional(req)
         if not token:
-            logger.warning("No token available for workspace user discovery — enable user token passthrough or configure a service principal")
-            return {"users": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
+            return {"users": []}
         host = _get_host()
-
-        url = f"{host}/api/2.0/preview/scim/v2/Users"
-        all_resources = []
-        start_index = 1
-        page_size = 500
-        while True:
-            resp = await _discovery_client.get(
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                params={
-                    "count": page_size,
-                    "startIndex": start_index,
-                    "attributes": "userName,displayName,active",
-                },
-            )
-            if resp.status_code != 200:
-                logger.warning("SCIM Users API returned %d: %s", resp.status_code, resp.text[:200])
-                return {"users": []}
-            data = resp.json()
-            resources = data.get("Resources", [])
-            all_resources.extend(resources)
-            total = data.get("totalResults", 0)
-            if start_index + page_size > total or not resources:
-                break
-            start_index += page_size
-
+        safe_q = q.replace('"', '')
+        scim_filter = f'displayName co "{safe_q}" or userName co "{safe_q}"'
+        resp = await _discovery_client.get(
+            f"{host}/api/2.0/preview/scim/v2/Users",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"filter": scim_filter, "count": 10, "attributes": "userName,displayName,active"},
+        )
+        if resp.status_code != 200:
+            logger.warning("SCIM search returned %d: %s", resp.status_code, resp.text[:200])
+            return {"users": []}
+        resources = resp.json().get("Resources", [])
         return {
             "users": [
-                {
-                    "email": u.get("userName", ""),
-                    "displayName": u.get("displayName", u.get("userName", "")),
-                    "active": u.get("active", True),
-                }
-                for u in all_resources
-                if u.get("userName") and u.get("active", True)
+                {"email": u.get("userName", ""), "displayName": u.get("displayName", u.get("userName", "")), "active": u.get("active", True)}
+                for u in resources if u.get("userName") and u.get("active", True)
             ]
         }
-    except HTTPException:
-        raise
-    except httpx.HTTPError as e:
-        logger.exception("Failed to reach SCIM API")
-        raise HTTPException(status_code=502, detail=f"Failed to reach Databricks API: {e}")
     except Exception as e:
-        logger.exception("Error listing workspace users")
+        logger.warning("SCIM search error: %s", e)
         return {"users": []}
 
 

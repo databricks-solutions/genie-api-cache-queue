@@ -80,21 +80,18 @@ function EditableText({ value, onChange, placeholder, masked }) {
 }
 
 /* ── Principal search dropdown ── */
-function PrincipalSearchDropdown({ query, users, groups, loading, onSelect }) {
+function PrincipalSearchDropdown({ query, searchResults, groups, loading, onSelect }) {
   const q = (query || '').toLowerCase()
   const words = q.split(/\s+/).filter(Boolean)
   const matchesAll = (text) => words.every(w => text.includes(w))
 
   const matchedGroups = groups.filter(g =>
-    matchesAll(g.displayName.toLowerCase())
+    !q || matchesAll(g.displayName.toLowerCase())
   ).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: g.displayName, detail: `${g.memberCount} members` }))
 
-  const matchedUsers = users.filter(u => {
-    const hay = `${u.email} ${u.displayName || ''}`.toLowerCase()
-    return matchesAll(hay)
-  }).slice(0, 6).map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
+  const matchedUsers = searchResults.map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
 
-  const items = q ? [...matchedGroups, ...matchedUsers] : [...matchedGroups.slice(0, 5), ...matchedUsers.slice(0, 3)]
+  const items = q ? [...matchedGroups, ...matchedUsers] : matchedGroups.slice(0, 5)
 
   const label = q ? `Results for "${query}"` : 'Suggested choices'
 
@@ -207,7 +204,8 @@ export default function SettingsPage() {
   const [searchRole, setSearchRole] = useState('use')
   const [searchSaving, setSearchSaving] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
-  const [workspaceUsers, setWorkspaceUsers] = useState([])
+  const [searchResults, setSearchResults] = useState([])
+  const [searchLoading, setSearchLoading] = useState(false)
   const [workspaceGroups, setWorkspaceGroups] = useState([])
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
@@ -268,25 +266,46 @@ export default function SettingsPage() {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
+  // Preload workspace users/groups as soon as manage+ user loads Settings
+  useEffect(() => {
+    if (!isManage) return
+    api.listWorkspaceGroups().catch(() => []).then(setWorkspaceGroups)
+  }, [isManage])
+
+  // Load role assignments when navigating to access section
   useEffect(() => {
     if (isManage && activeSection === 'access') {
       setPrincipalsLoading(true)
       Promise.all([
         api.listUsers().catch(() => []),
         api.listGroups().catch(() => []),
-        api.listWorkspaceUsers().catch(() => []),
-        api.listWorkspaceGroups().catch(() => []),
-      ]).then(([roleUsers, roleGroups, wsUsers, wsGroups]) => {
+      ]).then(([roleUsers, roleGroups]) => {
         const merged = [
-          ...roleUsers.map(u => ({ type: 'user', identity: u.identity, displayName: wsUsers.find(w => w.email === u.identity)?.displayName || '', role: u.role, granted_by: u.granted_by })),
+          ...roleUsers.map(u => ({ type: 'user', identity: u.identity, displayName: '', role: u.role, granted_by: u.granted_by })),
           ...roleGroups.map(g => ({ type: 'group', identity: g.group_name, displayName: g.group_name, role: g.role, granted_by: g.granted_by })),
         ]
         setPrincipals(merged)
-        setWorkspaceUsers(wsUsers)
-        setWorkspaceGroups(wsGroups)
       }).finally(() => setPrincipalsLoading(false))
     }
   }, [isManage, activeSection])
+
+  // Debounced server-side user search
+  const searchTimerRef = useRef(null)
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    if (!searchQuery || searchQuery.length < 2) {
+      setSearchResults([])
+      return
+    }
+    setSearchLoading(true)
+    searchTimerRef.current = setTimeout(() => {
+      api.searchWorkspacePrincipals(searchQuery)
+        .then(setSearchResults)
+        .catch(() => setSearchResults([]))
+        .finally(() => setSearchLoading(false))
+    }, 300)
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
+  }, [searchQuery])
 
   const handleAddPrincipal = async (item) => {
     setSearchSaving(true)
@@ -664,9 +683,9 @@ export default function SettingsPage() {
                   {showSearch && (
                     <PrincipalSearchDropdown
                       query={searchQuery}
-                      users={workspaceUsers}
+                      searchResults={searchResults}
                       groups={workspaceGroups}
-                      loading={principalsLoading}
+                      loading={searchLoading}
                       onSelect={(item) => {
                         handleAddPrincipal(item)
                         setShowSearch(false)

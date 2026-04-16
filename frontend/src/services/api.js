@@ -284,8 +284,8 @@ export const api = {
     return response.data;
   },
 
-  listWorkspaceUsers: async () => {
-    const response = await axios.get(`${API_BASE_URL}/workspace/users`);
+  searchWorkspacePrincipals: async (query) => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/search`, { params: { q: query } });
     return response.data.users || [];
   },
 
