@@ -1,5 +1,5 @@
 """
-Database abstraction layer that supports local and PGVector (Lakebase) storage.
+Database abstraction layer for Lakebase (PGVector) storage.
 Initialization happens in FastAPI lifespan via initialize_storage().
 """
 
@@ -23,72 +23,50 @@ async def initialize_storage():
     global _storage_backend, db_service
 
     from app.services.storage_dynamic import DynamicStorageService
+    from app.services.storage_pgvector import PGVectorStorageService
 
-    pgvector_ok = False
+    # Token resolution order:
+    # 1) lakebase_service_token from Settings UI (config_store override)
+    # 2) Service principal OAuth token (Databricks Apps auto-injects
+    #    DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET)
+    from app.api.config_store import get_effective_setting
+    from app.auth import get_service_principal_token
 
-    if settings.storage_backend == "pgvector":
-        from app.services.storage_pgvector import PGVectorStorageService
-
-        # Token resolution order:
-        # 1) lakebase_service_token from Settings UI (config_store override)
-        # 2) Service principal OAuth token (Databricks Apps auto-injects
-        #    DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET)
-        from app.api.config_store import get_effective_setting
-        from app.auth import get_service_principal_token
-
-        token = get_effective_setting("lakebase_service_token")
-        if token:
-            src = "Settings override"
-        else:
-            token = get_service_principal_token()
-            src = "Service principal OAuth"
-
-        if not token:
-            logger.warning(
-                "No token available for Lakebase. Falling back to local storage. "
-                "Ensure the app's service principal credentials "
-                "(DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET) are configured, "
-                "or set Lakebase Service Token in Settings."
-            )
-        else:
-            logger.info("Lakebase token source: %s", src)
-            try:
-                default_backend = PGVectorStorageService(
-                    connection_string=settings.postgres_connection_string,
-                    table_name=settings.full_table_name,
-                    cache_ttl_hours=settings.cache_ttl_hours,
-                    databricks_pat=token,
-                    databricks_host=settings.databricks_host,
-                    lakebase_instance_name=settings.lakebase_instance,
-                )
-                await default_backend.initialize()
-                pgvector_ok = True
-
-                if settings.lakebase_instance:
-                    logger.info("Default storage: Lakebase (PGVector): %s table=%s",
-                                settings.lakebase_instance, settings.full_table_name)
-                else:
-                    logger.info("Default storage: PGVector: %s:%d/%s table=%s",
-                                settings.postgres_host, settings.postgres_port,
-                                settings.postgres_database, settings.full_table_name)
-            except Exception as e:
-                logger.error("Lakebase initialization failed: %s", e)
-                logger.warning("Falling back to local storage. Fix the Lakebase "
-                               "configuration in Settings and restart the app.")
-
-    if not pgvector_ok:
-        from app.services.storage_local import get_local_storage
-        default_backend = get_local_storage(
-            settings.local_cache_file,
-            settings.local_embeddings_file,
-            settings.cache_ttl_hours
+    token = get_effective_setting("lakebase_service_token")
+    if token:
+        src = "Settings override"
+    else:
+        token = get_service_principal_token()
+        src = "Service principal OAuth"
+    if not token:
+        raise RuntimeError(
+            "No token available for Lakebase. Ensure the app's service principal "
+            "credentials (DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET) are "
+            "configured, or set Lakebase Service Token in Settings."
         )
-        logger.info("Default storage: Local file-based (configure Lakebase in Settings for persistent storage)")
+    logger.info("Lakebase token source: %s", src)
+
+    default_backend = PGVectorStorageService(
+        connection_string=settings.postgres_connection_string,
+        table_name=settings.full_table_name,
+        cache_ttl_hours=settings.cache_ttl_hours,
+        lakebase_service_token=token,
+        databricks_host=settings.databricks_host,
+        lakebase_instance_name=settings.lakebase_instance,
+    )
+    await default_backend.initialize()
+
+    if settings.lakebase_instance:
+        logger.info("Default storage: Lakebase (PGVector): %s table=%s",
+                    settings.lakebase_instance, settings.full_table_name)
+    else:
+        logger.info("Default storage: PGVector: %s:%d/%s table=%s",
+                    settings.postgres_host, settings.postgres_port,
+                    settings.postgres_database, settings.full_table_name)
 
     _storage_backend = DynamicStorageService(default_backend)
 
-    # Register default PGVector backend for reuse by per-user lakebase requests
-    if pgvector_ok and settings.lakebase_instance:
+    if settings.lakebase_instance:
         _storage_backend._pgvector_backends[DynamicStorageService._DEFAULT_KEY] = default_backend
 
     db_service = DatabaseService()

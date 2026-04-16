@@ -28,10 +28,6 @@ class DynamicStorageService:
         self._pgvector_backends = {}
         self._creation_lock = asyncio.Lock()
 
-    def has_pgvector_backends(self) -> bool:
-        """Check if any PGVector backends were successfully initialized."""
-        return len(self._pgvector_backends) > 0
-
     def _get_cache_key(self, runtime_settings):
         """Generate cache key for backend pool reuse."""
         if not runtime_settings or not hasattr(runtime_settings, 'runtime') or not runtime_settings.runtime:

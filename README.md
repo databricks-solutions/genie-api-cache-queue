@@ -30,11 +30,32 @@ App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/)
 - Databricks workspace with **Apps** enabled
 - [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) installed and configured
 - A **Genie Space** and **SQL Warehouse** in your workspace
-- *(Optional)* A **Lakebase** instance for persistent cache
+- A **Lakebase Autoscaling** project for persistent cache (pgvector)
+- Node.js + npm (for building the frontend)
 
-### 1. Deploy the App
+### 1. Deploy with the Install Script
+
+The guided installer handles everything: frontend build, app deployment, OAuth scopes, Lakebase provisioning, and SP configuration.
 
 ```bash
+./scripts/install.sh
+```
+
+The script walks you through each step interactively. For subsequent deploys (code updates, config changes), re-run with `--update` to skip prompts and reuse your saved configuration:
+
+```bash
+./scripts/install.sh --update
+```
+
+> **Note:** The installer sets the `dashboards.genie` OAuth scope, which allows the app to call the Genie API on behalf of the logged-in user. Without it, gateway creation cannot list Genie Spaces and queries will fail with `403 Invalid scope`.
+
+<details>
+<summary><strong>Manual deployment (without the install script)</strong></summary>
+
+```bash
+# Build frontend
+cd frontend && npm install && npm run build && cd ..
+
 # Sync code to your workspace
 databricks sync . /Workspace/Users/<your-email>/genie-cache-queue
 
@@ -48,7 +69,9 @@ databricks apps update genie-cache-queue --json '{
 }'
 ```
 
-> **Note:** The `dashboards.genie` scope allows the app to call the Genie API on behalf of the logged-in user. Without it, gateway creation cannot list Genie Spaces and queries will fail with `403 Invalid scope`. This only needs to be set once per app installation — it is not configurable via `app.yaml`.
+After deploying manually, you must also complete the [Lakebase Setup](#lakebase-setup) steps below.
+
+</details>
 
 ### 2. Create a Gateway
 
@@ -154,9 +177,11 @@ Configure once in the **Settings** page. These apply as defaults for all gateway
 
 ---
 
-## Lakebase Setup (Persistent Cache)
+## Lakebase Setup
 
-For production use, Lakebase provides persistent vector-based caching with pgvector. Inside Databricks Apps, the app automatically uses its **built-in Service Principal** — no manual credential configuration required.
+Lakebase (pgvector) is the storage backend for all cached queries. Inside Databricks Apps, the app automatically uses its **built-in Service Principal** — no manual credential configuration required.
+
+> **Tip:** The install script (`./scripts/install.sh`) handles Lakebase provisioning, SP grants, and PostgreSQL role creation automatically. The steps below are only needed for manual deployments or troubleshooting.
 
 ### 1. Grant the App's SP Access to Lakebase
 
@@ -203,13 +228,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "<app-sp-cli
 
 ### 3. Configure in Settings
 
-Set **Storage Backend** to `Lakebase` and fill in the **Instance Name**. The app creates the required tables (cache, query_logs, gateways) automatically on first use.
+Set the **Lakebase Instance Name** in the Settings page. The app creates the required tables (cache, query_logs, gateways) automatically on first use.
 
 ### Local Development
 
 For local development (outside Databricks Apps), configure the **Lakebase Service Token** in Settings or `.env`:
 - **Service Principal:** `<client_id>:<client_secret>` (recommended)
-- **PAT:** `dapi...` (simpler, for development)
 
 ---
 
@@ -348,10 +372,8 @@ The notebook auto-detects your username and loads the `.env` from there.
 ## Continuous Deployment
 
 ```bash
-# After code changes
-databricks sync . /Workspace/Users/<your-email>/genie-cache-queue
-databricks apps deploy genie-cache-queue \
-  --source-code-path /Workspace/Users/<your-email>/genie-cache-queue
+# Re-deploy after code changes (reads saved config from .env.deploy)
+./scripts/install.sh --update
 
 # View logs
 databricks apps logs genie-cache-queue --follow

@@ -9,7 +9,7 @@ set -euo pipefail
 #   2. Asks for Databricks profile
 #   3. Asks for app name
 #   4. Asks for workspace path
-#   5. Asks for storage backend (local vs Lakebase)
+#   5. Asks for Lakebase configuration
 #   6. Builds the frontend
 #   7. Writes .env.deploy
 #   8. Patches app.yaml and syncs to workspace
@@ -53,7 +53,7 @@ _prompt() {
     fi
     read -r result
     result="${result:-$default}"
-    eval "$varname=\"$result\""
+    printf -v "$varname" '%s' "$result"
 }
 
 _prompt_yn() {
@@ -66,8 +66,8 @@ _prompt_yn() {
     read -r result
     result="${result:-$default}"
     case "$result" in
-        [Yy]*) eval "$varname=Y" ;;
-        *)     eval "$varname=N" ;;
+        [Yy]*) printf -v "$varname" '%s' "Y" ;;
+        *)     printf -v "$varname" '%s' "N" ;;
     esac
 }
 
@@ -159,7 +159,7 @@ if [ "$UPDATE_MODE" = true ]; then
     PROFILE="${GENIE_DEPLOY_PROFILE:?GENIE_DEPLOY_PROFILE not set in .env.deploy}"
     APP_NAME="${GENIE_APP_NAME:?GENIE_APP_NAME not set in .env.deploy}"
     WS_PATH="${GENIE_WS_PATH:?GENIE_WS_PATH not set in .env.deploy}"
-    STORAGE_BACKEND="${GENIE_STORAGE_BACKEND:-local}"
+    STORAGE_BACKEND="pgvector"
     LAKEBASE_INSTANCE="${GENIE_LAKEBASE_INSTANCE:-}"
     LAKEBASE_CATALOG="${GENIE_LAKEBASE_CATALOG:-default}"
     LAKEBASE_SCHEMA="${GENIE_LAKEBASE_SCHEMA:-genie_cache}"
@@ -222,41 +222,21 @@ echo ""
 _prompt WS_PATH "Workspace path" "/Workspace/Users/$DEPLOYER/$APP_NAME"
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 5: Storage backend
+# Step 5: Lakebase configuration
 # ══════════════════════════════════════════════════════════════════════════
-_header "Step 5: Storage backend"
+_header "Step 5: Lakebase configuration"
 
-_info "How should the app persist cached queries?"
+STORAGE_BACKEND="pgvector"
+
+_info "Lakebase Autoscaling (Serverless) is the required storage backend."
+_info "Enter the project name from Catalog Explorer > Lakebase."
+_info "A custom schema is recommended — the SP owns it automatically,"
+_info "so no manual GRANTs on the public schema are needed."
 echo ""
-echo "    1) local     In-memory (data lost on restart, good for testing)"
-echo "    2) pgvector  Lakebase / PostgreSQL (persistent, recommended)"
-echo ""
-
-_prompt STORAGE_CHOICE "Select [1/2]" "1"
-
-case "$STORAGE_CHOICE" in
-    2|pgvector)
-        STORAGE_BACKEND="pgvector"
-        echo ""
-        _info "Lakebase Autoscaling (Serverless) configuration:"
-        _info "Enter the project name from Catalog Explorer > Lakebase."
-        _info "A custom schema is recommended — the SP owns it automatically,"
-        _info "so no manual GRANTs on the public schema are needed."
-        echo ""
-        _prompt LAKEBASE_INSTANCE "Lakebase Autoscaling project name" "$APP_NAME"
-        _prompt LAKEBASE_CATALOG  "Lakebase catalog" "default"
-        _prompt LAKEBASE_SCHEMA   "Lakebase schema" "genie_cache"
-        _ok "Storage: pgvector (Lakebase Autoscaling: $LAKEBASE_INSTANCE)"
-        ;;
-    *)
-        STORAGE_BACKEND="local"
-        LAKEBASE_INSTANCE=""
-        LAKEBASE_CATALOG="default"
-        LAKEBASE_SCHEMA="public"
-        _ok "Storage: local (in-memory, data lost on restart)"
-        _info "You can switch to Lakebase later via the Settings page in the app."
-        ;;
-esac
+_prompt LAKEBASE_INSTANCE "Lakebase Autoscaling project name" "$APP_NAME"
+_prompt LAKEBASE_CATALOG  "Lakebase catalog" "default"
+_prompt LAKEBASE_SCHEMA   "Lakebase schema" "genie_cache"
+_ok "Storage: Lakebase Autoscaling ($LAKEBASE_INSTANCE, $LAKEBASE_CATALOG.$LAKEBASE_SCHEMA)"
 
 fi  # end of interactive prompts (--update skips to here)
 
@@ -283,7 +263,7 @@ if [ "$STORAGE_BACKEND" = "pgvector" ] && [ -n "$LAKEBASE_INSTANCE" ]; then
                 --json "{\"display_name\": \"$LAKEBASE_INSTANCE\"}" 2>&1; then
             _error "Failed to create Lakebase project '$LAKEBASE_INSTANCE'."
             echo "  Remediation: create it manually in Catalog Explorer > Lakebase"
-            echo "  The app will still start with local storage as a fallback."
+            echo "  The app will not start until Lakebase is properly configured."
         else
             _ok "Lakebase project creation initiated"
         fi
@@ -325,7 +305,7 @@ except:
         _ok "Lakebase endpoint is ACTIVE"
     else
         _warn "Lakebase endpoint not ready yet (state: $EP_STATE)."
-        _info "The app will fall back to local storage and retry on restart."
+        _info "The endpoint may need more time. Check status before deploying."
     fi
 fi
 
@@ -377,7 +357,7 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 7: Write .env.deploy
+# Step 8: Write .env.deploy
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 8: Writing configuration"
 
@@ -407,7 +387,7 @@ fi
 echo "  └───────────────────────────────────────────────────────────┘"
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 8: Patch app.yaml and sync to workspace
+# Step 9: Patch app.yaml and sync to workspace
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 9: Syncing files to workspace"
 
@@ -489,7 +469,7 @@ fi
 _ok "Files uploaded to workspace"
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 9: Create or deploy the app
+# Step 10: Create or deploy the app
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 10: Deploying app"
 
@@ -587,7 +567,7 @@ fi
 _ok "Deployment initiated"
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 10: Set OAuth scopes (critical)
+# Step 11: Set OAuth scopes (critical)
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 11: Configuring OAuth scopes"
 
@@ -622,7 +602,7 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 11: Wait for deployment
+# Step 12: Wait for deployment
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 12: Waiting for deployment"
 
@@ -695,7 +675,7 @@ if [ -n "$APP_URL" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 12: Resolve app service principal
+# Step 13: Resolve app service principal
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 13: Resolving app service principal"
 
@@ -898,13 +878,13 @@ echo -e "    ${GREEN}✓${NC} Source code synced to $WS_PATH"
 echo -e "    ${GREEN}✓${NC} App deployed"
 echo -e "    ${GREEN}✓${NC} OAuth scopes: sql, serving.serving-endpoints, dashboards.genie"
 echo -e "    ${GREEN}✓${NC} Storage backend: $STORAGE_BACKEND"
-if [ "$STORAGE_BACKEND" = "pgvector" ] && [ -n "$LAKEBASE_INSTANCE" ]; then
+if [ -n "$LAKEBASE_INSTANCE" ]; then
     echo -e "    ${GREEN}✓${NC} Lakebase Autoscaling project: $LAKEBASE_INSTANCE"
-    if [ -n "$SP_CLIENT_ID" ]; then
-        echo -e "    ${GREEN}✓${NC} SP granted CAN_MANAGE on Lakebase project"
-        if [ "${ROLE_CREATED:-}" = "OK" ]; then
-            echo -e "    ${GREEN}✓${NC} SP PostgreSQL role created"
-        fi
+fi
+if [ -n "$SP_CLIENT_ID" ]; then
+    echo -e "    ${GREEN}✓${NC} SP granted CAN_MANAGE on Lakebase project"
+    if [ "${ROLE_CREATED:-}" = "OK" ]; then
+        echo -e "    ${GREEN}✓${NC} SP PostgreSQL role created"
     fi
 fi
 
@@ -912,26 +892,19 @@ fi
 SP_ID_FOR_DISPLAY="${SP_CLIENT_ID:-<app-sp-client-id>}"
 HAS_MANUAL_STEPS=false
 
-if [ "$STORAGE_BACKEND" = "pgvector" ]; then
-    # Check if SP role was NOT created automatically
-    if [ "${ROLE_CREATED:-}" != "OK" ] && [ -n "$SP_CLIENT_ID" ]; then
-        HAS_MANUAL_STEPS=true
-        echo ""
-        echo -e "  ${YELLOW}${BOLD}Remaining manual step:${NC}"
-        echo ""
-        echo -e "    ${BOLD}Create the SP's PostgreSQL role${NC}"
-        echo "       Connect to Lakebase as a human user and run:"
-        echo ""
-        echo -e "       ${CYAN}CREATE EXTENSION IF NOT EXISTS databricks_auth;"
-        echo -e "       SELECT databricks_create_role('$SP_ID_FOR_DISPLAY', 'SERVICE_PRINCIPAL');${NC}"
-    fi
-elif [ "$STORAGE_BACKEND" = "local" ]; then
+if [ "${ROLE_CREATED:-}" != "OK" ] && [ -n "$SP_CLIENT_ID" ]; then
+    HAS_MANUAL_STEPS=true
     echo ""
-    echo -e "  ${BLUE}${BOLD}Note:${NC} Using in-memory storage. Data is lost on app restart."
-    echo "  Switch to Lakebase anytime via the Settings page in the app."
+    echo -e "  ${YELLOW}${BOLD}Remaining manual step:${NC}"
+    echo ""
+    echo -e "    ${BOLD}Create the SP's PostgreSQL role${NC}"
+    echo "       Connect to Lakebase as a human user and run:"
+    echo ""
+    echo -e "       ${CYAN}CREATE EXTENSION IF NOT EXISTS databricks_auth;"
+    echo -e "       SELECT databricks_create_role('$SP_ID_FOR_DISPLAY', 'SERVICE_PRINCIPAL');${NC}"
 fi
 
-if [ "$HAS_MANUAL_STEPS" = false ] && [ "$STORAGE_BACKEND" = "pgvector" ]; then
+if [ "$HAS_MANUAL_STEPS" = false ]; then
     echo ""
     echo -e "  ${GREEN}${BOLD}All Lakebase setup completed automatically!${NC}"
 fi
