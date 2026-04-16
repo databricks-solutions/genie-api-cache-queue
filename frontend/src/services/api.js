@@ -289,6 +289,26 @@ export const api = {
     return response.data.users || [];
   },
 
+  listGroups: async () => {
+    const response = await axios.get(`${API_BASE_URL}/groups`);
+    return response.data;
+  },
+
+  setGroupRole: async (groupName, role) => {
+    const response = await axios.post(`${API_BASE_URL}/groups/${encodeURIComponent(groupName)}/role`, { role });
+    return response.data;
+  },
+
+  deleteGroupRole: async (groupName) => {
+    const response = await axios.delete(`${API_BASE_URL}/groups/${encodeURIComponent(groupName)}`);
+    return response.data;
+  },
+
+  listWorkspaceGroups: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/groups`);
+    return response.data.groups || [];
+  },
+
   getWorkspaceAppearance: async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/workspace-appearance`);

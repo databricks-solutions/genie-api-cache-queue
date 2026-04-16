@@ -110,6 +110,26 @@ function UserSearchDropdown({ query, users, onSelect }) {
   )
 }
 
+/* ── Group search dropdown ── */
+function GroupSearchDropdown({ query, groups, onSelect }) {
+  const filtered = groups.filter(g =>
+    g.displayName.toLowerCase().includes((query || '').toLowerCase())
+  ).slice(0, 8)
+  if (filtered.length === 0) return null
+  return (
+    <div className="absolute top-full left-0 right-0 mt-1 bg-dbx-bg border border-dbx-border rounded shadow-lg z-50 max-h-48 overflow-y-auto">
+      {filtered.map(g => (
+        <button key={g.displayName}
+          onMouseDown={() => onSelect(g.displayName)}
+          className="w-full text-left px-3 py-2 text-[13px] hover:bg-dbx-neutral-hover transition-colors flex justify-between items-center">
+          <span className="text-dbx-text">{g.displayName}</span>
+          <span className="text-[11px] text-dbx-text-secondary">{g.memberCount} members</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /* ── Field row container ── */
 function FieldRow({ label, description, children, noBorder }) {
   return (
@@ -167,7 +187,10 @@ const SIDEBAR_BASE = [
   ]},
 ]
 const SIDEBAR_MANAGE = [
-  { category: 'Access Control', icon: Users, items: [{ id: 'users', label: 'Users' }] },
+  { category: 'Access Control', icon: Users, items: [
+    { id: 'users', label: 'Users' },
+    { id: 'groups', label: 'Groups' },
+  ]},
 ]
 
 /* ── Main component ── */
@@ -185,6 +208,14 @@ export default function SettingsPage() {
   const [userSaving, setUserSaving] = useState(false)
   const [workspaceUsers, setWorkspaceUsers] = useState([])
   const [showUserDropdown, setShowUserDropdown] = useState(false)
+  const [groups, setGroups] = useState([])
+  const [groupsLoading, setGroupsLoading] = useState(false)
+  const [groupError, setGroupError] = useState(null)
+  const [newGroupName, setNewGroupName] = useState('')
+  const [newGroupRole, setNewGroupRole] = useState('use')
+  const [groupSaving, setGroupSaving] = useState(false)
+  const [workspaceGroups, setWorkspaceGroups] = useState([])
+  const [showGroupDropdown, setShowGroupDropdown] = useState(false)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -258,6 +289,19 @@ export default function SettingsPage() {
     }
   }, [isManage, activeSection])
 
+  useEffect(() => {
+    if (isManage && activeSection === 'groups') {
+      setGroupsLoading(true)
+      Promise.all([
+        api.listGroups().catch(() => []),
+        api.listWorkspaceGroups().catch(() => []),
+      ]).then(([roleGroups, wsGroups]) => {
+        setGroups(roleGroups)
+        setWorkspaceGroups(wsGroups)
+      }).finally(() => setGroupsLoading(false))
+    }
+  }, [isManage, activeSection])
+
   const handleAddUser = async () => {
     if (!newUserEmail.trim()) return
     setUserSaving(true)
@@ -285,6 +329,34 @@ export default function SettingsPage() {
     } catch (err) {
       const msg = err.response?.data?.detail || 'Failed to remove user.'
       setUserError(msg)
+    }
+  }
+
+  const handleAddGroup = async () => {
+    if (!newGroupName.trim()) return
+    setGroupSaving(true)
+    setGroupError(null)
+    try {
+      const saved = await api.setGroupRole(newGroupName.trim(), newGroupRole)
+      setGroups(prev => {
+        const without = prev.filter(g => g.group_name !== saved.group_name)
+        return [...without, saved]
+      })
+      setNewGroupName('')
+      setNewGroupRole('use')
+    } catch (err) {
+      setGroupError(err.response?.data?.detail || 'Failed to assign group role.')
+    } finally { setGroupSaving(false) }
+  }
+
+  const handleRemoveGroup = async (groupName) => {
+    if (!window.confirm(`Remove role for group "${groupName}"?`)) return
+    setGroupError(null)
+    try {
+      await api.deleteGroupRole(groupName)
+      setGroups(prev => prev.filter(g => g.group_name !== groupName))
+    } catch (err) {
+      setGroupError(err.response?.data?.detail || 'Failed to remove group role.')
     }
   }
 
@@ -688,6 +760,93 @@ export default function SettingsPage() {
                   className="h-8 px-3 text-[13px] text-white bg-dbx-blue rounded hover:bg-dbx-blue-dark transition-colors disabled:opacity-50"
                 >
                   {userSaving ? <Loader2 size={13} className="animate-spin" /> : 'Add'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isManage && (
+            <div ref={el => sectionRefs.current['groups'] = el} className="mb-10">
+              <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Groups</h2>
+
+              <div className="py-4 text-[12px] text-dbx-text-secondary">
+                Assign roles to workspace groups. When a user belongs to multiple groups, the highest privilege wins.
+              </div>
+
+              {groupError && (
+                <div className="mb-3 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[13px]">
+                  {groupError}
+                </div>
+              )}
+
+              {groupsLoading ? (
+                <div className="flex items-center gap-2 py-4 text-[13px] text-dbx-text-secondary">
+                  <Loader2 size={14} className="animate-spin" /> Loading groups...
+                </div>
+              ) : (
+                <div className="rounded border border-dbx-border overflow-hidden mb-4 text-[13px]">
+                  {groups.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-dbx-text-secondary">
+                      No group role assignments. Add groups below.
+                    </div>
+                  ) : (
+                    <table className="w-full">
+                      <thead>
+                        <tr className="bg-dbx-sidebar text-dbx-text-secondary text-[12px]">
+                          <th className="text-left px-3 py-2 font-medium">Group</th>
+                          <th className="text-left px-3 py-2 font-medium">Role</th>
+                          <th className="text-left px-3 py-2 font-medium">Granted by</th>
+                          <th className="px-3 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {groups.map((g) => (
+                          <tr key={g.group_name} className="border-t border-dbx-border">
+                            <td className="px-3 py-2 text-dbx-text">{g.group_name}</td>
+                            <td className="px-3 py-2 capitalize text-dbx-text">{g.role}</td>
+                            <td className="px-3 py-2 text-dbx-text-secondary">{g.granted_by || '—'}</td>
+                            <td className="px-3 py-2 text-right">
+                              <button onClick={() => handleRemoveGroup(g.group_name)}
+                                className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1" title="Remove group role">
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+
+              {/* Add group */}
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1" style={{ maxWidth: '260px' }}>
+                  <input type="text" placeholder="Group name"
+                    value={newGroupName}
+                    onChange={(e) => { setNewGroupName(e.target.value); setShowGroupDropdown(true) }}
+                    onFocus={() => setShowGroupDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowGroupDropdown(false), 150)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddGroup()}
+                    className={`${inputClass} w-full`}
+                  />
+                  {showGroupDropdown && workspaceGroups.length > 0 && (
+                    <GroupSearchDropdown
+                      query={newGroupName}
+                      groups={workspaceGroups}
+                      onSelect={(name) => { setNewGroupName(name); setShowGroupDropdown(false) }}
+                    />
+                  )}
+                </div>
+                <select value={newGroupRole} onChange={(e) => setNewGroupRole(e.target.value)}
+                  className={`${inputClass} bg-dbx-bg`} style={{ width: '110px' }}>
+                  <option value="use">Use</option>
+                  <option value="manage">Manage</option>
+                  {isOwner && <option value="owner">Owner</option>}
+                </select>
+                <button onClick={handleAddGroup} disabled={groupSaving || !newGroupName.trim()}
+                  className="h-8 px-4 text-[13px] rounded bg-dbx-blue text-white hover:bg-dbx-blue-hover disabled:opacity-50 transition-colors">
+                  {groupSaving ? 'Adding...' : 'Add'}
                 </button>
               </div>
             </div>
