@@ -16,6 +16,12 @@ command:
   - "--port"
   - "8000"
 
+# OAuth scopes required for Genie API access (applied during apps deploy)
+user_api_scopes:
+  - "sql"
+  - "dashboards.genie"
+  - "serving.serving-endpoints"
+
 # Compute configuration
 compute:
   size: small  # small (2 cores, 8GB), medium (4 cores, 16GB), large (8 cores, 32GB)
@@ -34,7 +40,5 @@ env:
 
 # Static files served by FastAPI (not needed here)
 
-# Resource limits
-resources:
-  cpu: 2
-  memory: 8Gi
+# App resources (postgres resource configured at deploy time via API PATCH)
+resources: []

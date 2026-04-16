@@ -575,12 +575,18 @@ _info "Setting user_api_scopes (required for Genie API access) ..."
 
 SCOPE_PAYLOAD='{"user_api_scopes": ["sql", "serving.serving-endpoints", "dashboards.genie"]}'
 
-# Set scopes and request JSON output so we can verify
-databricks apps update "$APP_NAME" --profile "$PROFILE" --json "$SCOPE_PAYLOAD" -o json > /dev/null 2>&1 || true
+# Scopes are declared in app.yaml (applied during apps deploy), but the CLI
+# 'apps update' ignores user_api_scopes — use the REST API with update_mask
+# as a belt-and-suspenders fallback.  Retry up to 3 times since scopes may
+# take a moment to propagate on a newly-created app.
+SCOPES_SET="FAIL"
+for SCOPE_ATTEMPT in 1 2 3; do
+    databricks api patch "/api/2.0/apps/$APP_NAME?update_mask=user_api_scopes" \
+        --profile "$PROFILE" --json "$SCOPE_PAYLOAD" > /dev/null 2>&1 || true
 
-# Verify by reading back the app config
-SCOPES_SET=$(databricks apps get "$APP_NAME" --profile "$PROFILE" -o json 2>/dev/null \
-    | python3 -c "
+    # Verify by reading back
+    SCOPES_SET=$(databricks apps get "$APP_NAME" --profile "$PROFILE" -o json 2>/dev/null \
+        | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
@@ -590,15 +596,85 @@ except:
     print('FAIL')
 " 2>/dev/null || echo "FAIL")
 
+    if [ "$SCOPES_SET" = "OK" ]; then
+        break
+    fi
+    if [ "$SCOPE_ATTEMPT" -lt 3 ]; then
+        _info "Scopes not yet applied (attempt $SCOPE_ATTEMPT/3), retrying in 10s ..."
+        sleep 10
+    fi
+done
+
 if [ "$SCOPES_SET" = "OK" ]; then
     _ok "OAuth scopes configured: sql, serving.serving-endpoints, dashboards.genie"
 else
-    _warn "Could not verify OAuth scopes were set."
+    _warn "Could not verify OAuth scopes were set after 3 attempts."
     echo ""
-    echo "  Run this manually:"
-    echo "    databricks apps update $APP_NAME --profile $PROFILE --json '$SCOPE_PAYLOAD'"
+    echo "  Set scopes manually via REST API:"
+    echo "    databricks api patch \"/api/2.0/apps/$APP_NAME?update_mask=user_api_scopes\" \\"
+    echo "      --profile $PROFILE --json '$SCOPE_PAYLOAD'"
     echo ""
     _warn "Without these scopes the app will get 403 errors on Genie API calls."
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 11.5: Configure postgres resource on the app (Lakebase)
+# ══════════════════════════════════════════════════════════════════════════
+if [ "$STORAGE_BACKEND" = "pgvector" ] && [ -n "$LAKEBASE_INSTANCE" ]; then
+    _header "Step 11.5: Configuring Lakebase postgres resource on app"
+
+    # Resolve the Lakebase database ID (full resource path)
+    LAKEBASE_DB_RESOURCE=$(databricks api get \
+        "/api/2.0/postgres/projects/$LAKEBASE_INSTANCE/branches/production/databases" \
+        --profile "$PROFILE" -o json 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    dbs = data.get('databases', [])
+    if dbs:
+        print(dbs[0]['name'])
+except Exception: pass
+" 2>/dev/null || true)
+
+    if [ -n "$LAKEBASE_DB_RESOURCE" ]; then
+        _ok "Lakebase database resolved: $LAKEBASE_DB_RESOURCE"
+
+        # Build the PATCH payload with the postgres resource
+        PATCH_PAYLOAD=$(python3 -c "
+import json
+
+lakebase_db = '$LAKEBASE_DB_RESOURCE'
+# Extract branch path: projects/<name>/branches/<branch>
+branch = '/'.join(lakebase_db.split('/')[:4])
+
+resources = [{
+    'name': 'postgres',
+    'postgres': {
+        'branch': branch,
+        'database': lakebase_db,
+        'permission': 'CAN_CONNECT_AND_CREATE',
+    }
+}]
+
+print(json.dumps({'resources': resources}))
+")
+
+        if databricks api patch "/api/2.0/apps/$APP_NAME" \
+                --profile "$PROFILE" --json "$PATCH_PAYLOAD" &>/dev/null; then
+            _ok "Postgres resource configured on app (CAN_CONNECT_AND_CREATE)"
+        else
+            _warn "Could not configure postgres resource on app."
+            echo "  Add a postgres resource manually in the Databricks Apps UI:"
+            echo "    Name: postgres"
+            echo "    Branch: projects/$LAKEBASE_INSTANCE/branches/production"
+            echo "    Database: $LAKEBASE_DB_RESOURCE"
+            echo "    Permission: CAN_CONNECT_AND_CREATE"
+        fi
+    else
+        _warn "Could not resolve Lakebase database ID."
+        _info "The postgres resource must be configured manually in the Apps UI."
+    fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -760,6 +836,7 @@ except: print('')
         # then connect with asyncpg to run databricks_create_role().
         ROLE_CREATED=$(LB_PROFILE="$PROFILE" LB_ENDPOINT="$ENDPOINT_NAME" \
             LB_HOST="$LAKEBASE_HOST" LB_SP_ID="$SP_CLIENT_ID" \
+            LB_SCHEMA="$LAKEBASE_SCHEMA" \
             python3 << 'PYEOF'
 import subprocess, json, sys, os, asyncio
 
@@ -767,6 +844,7 @@ profile = os.environ['LB_PROFILE']
 endpoint = os.environ['LB_ENDPOINT']
 host = os.environ['LB_HOST']
 sp_id = os.environ['LB_SP_ID']
+schema = os.environ.get('LB_SCHEMA', 'genie_cache')
 
 # 1. Generate credential via POST /api/2.0/postgres/credentials
 try:
@@ -821,6 +899,14 @@ async def create_role():
         )
         await conn.execute('CREATE EXTENSION IF NOT EXISTS databricks_auth')
         await conn.execute(f"SELECT databricks_create_role('{sp_id}', 'SERVICE_PRINCIPAL')")
+        # Grant database-level permissions (required for CREATE SCHEMA)
+        await conn.execute(f'GRANT CONNECT ON DATABASE databricks_postgres TO "{sp_id}"')
+        await conn.execute(f'GRANT CREATE ON DATABASE databricks_postgres TO "{sp_id}"')
+        # Create the app schema and transfer ownership to the SP
+        if schema and schema != 'public':
+            safe = schema.replace('"', '""')
+            await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{safe}"')
+            await conn.execute(f'ALTER SCHEMA "{safe}" OWNER TO "{sp_id}"')
         await conn.close()
         return True
     except Exception as e:
@@ -837,12 +923,19 @@ PYEOF
         case "$ROLE_CREATED" in
             OK)
                 _ok "PostgreSQL role created for SP"
+                _ok "Schema '$LAKEBASE_SCHEMA' created and owned by SP"
                 ;;
             *)
                 _warn "Could not create PostgreSQL role automatically ($ROLE_CREATED)."
                 echo "  Connect to Lakebase as a human user and run:"
                 echo "    CREATE EXTENSION IF NOT EXISTS databricks_auth;"
                 echo "    SELECT databricks_create_role('$SP_CLIENT_ID', 'SERVICE_PRINCIPAL');"
+                echo "    GRANT CONNECT ON DATABASE databricks_postgres TO \"$SP_CLIENT_ID\";"
+                echo "    GRANT CREATE ON DATABASE databricks_postgres TO \"$SP_CLIENT_ID\";"
+                if [ "$LAKEBASE_SCHEMA" != "public" ]; then
+                    echo "    CREATE SCHEMA IF NOT EXISTS \"$LAKEBASE_SCHEMA\";"
+                    echo "    ALTER SCHEMA \"$LAKEBASE_SCHEMA\" OWNER TO \"$SP_CLIENT_ID\";"
+                fi
                 ;;
         esac
     else
@@ -885,6 +978,7 @@ if [ -n "$SP_CLIENT_ID" ]; then
     echo -e "    ${GREEN}✓${NC} SP granted CAN_MANAGE on Lakebase project"
     if [ "${ROLE_CREATED:-}" = "OK" ]; then
         echo -e "    ${GREEN}✓${NC} SP PostgreSQL role created"
+        echo -e "    ${GREEN}✓${NC} Schema '$LAKEBASE_SCHEMA' created and owned by SP"
     fi
 fi
 
@@ -897,11 +991,18 @@ if [ "${ROLE_CREATED:-}" != "OK" ] && [ -n "$SP_CLIENT_ID" ]; then
     echo ""
     echo -e "  ${YELLOW}${BOLD}Remaining manual step:${NC}"
     echo ""
-    echo -e "    ${BOLD}Create the SP's PostgreSQL role${NC}"
+    echo -e "    ${BOLD}Create the SP's PostgreSQL role and schema${NC}"
     echo "       Connect to Lakebase as a human user and run:"
     echo ""
     echo -e "       ${CYAN}CREATE EXTENSION IF NOT EXISTS databricks_auth;"
-    echo -e "       SELECT databricks_create_role('$SP_ID_FOR_DISPLAY', 'SERVICE_PRINCIPAL');${NC}"
+    echo -e "       SELECT databricks_create_role('$SP_ID_FOR_DISPLAY', 'SERVICE_PRINCIPAL');"
+    echo -e "       GRANT CONNECT ON DATABASE databricks_postgres TO \"$SP_ID_FOR_DISPLAY\";"
+    echo -e "       GRANT CREATE ON DATABASE databricks_postgres TO \"$SP_ID_FOR_DISPLAY\";"
+    if [ "$LAKEBASE_SCHEMA" != "public" ]; then
+    echo -e "       CREATE SCHEMA IF NOT EXISTS \"$LAKEBASE_SCHEMA\";"
+    echo -e "       ALTER SCHEMA \"$LAKEBASE_SCHEMA\" OWNER TO \"$SP_ID_FOR_DISPLAY\";"
+    fi
+    echo -e "${NC}"
 fi
 
 if [ "$HAS_MANUAL_STEPS" = false ]; then
