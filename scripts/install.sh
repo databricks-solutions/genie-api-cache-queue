@@ -641,7 +641,7 @@ except: print('')
         LB_HOST="$LAKEBASE_HOST" LB_SP_ID="$SP_CLIENT_ID" \
         LB_DESIRED_SCHEMA="$LAKEBASE_SCHEMA" \
         python3 << 'PYEOF'
-import subprocess, json, sys, os, asyncio
+import subprocess, json, sys, os, asyncio, re
 
 profile = os.environ['LB_PROFILE']
 endpoint = os.environ['LB_ENDPOINT']
@@ -673,8 +673,15 @@ try:
 except ImportError:
     fail('deps', 'asyncpg not installed — run: pip install asyncpg')
 
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+_IDENT_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
+
 async def run():
     import ssl as ssl_module
+    if not _UUID_RE.match(sp_id):
+        fail('input', f'sp_id is not a valid UUID: {sp_id!r}')
+    if desired_schema and not _IDENT_RE.match(desired_schema):
+        fail('input', f'schema name is not a safe identifier: {desired_schema!r}')
     ctx = ssl_module.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl_module.CERT_NONE
@@ -683,10 +690,11 @@ async def run():
     try:
         await conn.execute('CREATE EXTENSION IF NOT EXISTS databricks_auth')
         try:
-            await conn.execute(f"SELECT databricks_create_role('{sp_id}', 'SERVICE_PRINCIPAL')")
+            await conn.execute("SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')", sp_id)
         except Exception as e:
             if 'already exists' not in str(e).lower():
                 raise
+        # sp_id is UUID-validated above; safe to interpolate as a quoted identifier
         await conn.execute(f'GRANT CONNECT ON DATABASE databricks_postgres TO "{sp_id}"')
         await conn.execute(f'GRANT CREATE ON DATABASE databricks_postgres TO "{sp_id}"')
 
@@ -696,19 +704,32 @@ async def run():
                 "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
                 desired_schema)
             if row is not None and row['owner'] != sp_id:
-                sp_prefix = sp_id.split('-')[0]
+                # 16 hex chars from the SP UUID — effectively zero collision risk.
+                sp_prefix = sp_id.replace('-', '')[:16]
                 final_schema = f"{desired_schema}_{sp_prefix}"
+                if not _IDENT_RE.match(final_schema):
+                    fail('input', f'derived fallback schema is not a safe identifier: {final_schema!r}')
                 row2 = await conn.fetchrow(
                     "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
                     final_schema)
                 if row2 is not None and row2['owner'] != sp_id:
                     # Fallback is stale. If the deployer (us) owns it — e.g.
                     # leftover from a prior install attempt where the ALTER
-                    # OWNER couldn't transfer to the SP — drop it so the app
-                    # can recreate cleanly. Otherwise fail loudly.
+                    # OWNER couldn't transfer to the SP — AND it contains no
+                    # tables, drop it so the app can recreate cleanly.
+                    # Otherwise fail loudly to avoid silent data loss.
                     if row2['owner'] == username:
+                        table_count = await conn.fetchval(
+                            "SELECT COUNT(*) FROM information_schema.tables "
+                            "WHERE table_schema = $1",
+                            final_schema)
+                        if table_count and table_count > 0:
+                            print(f"REASON=fallback schema {final_schema} owned by deployer contains {table_count} tables — refusing to drop. Remove manually or rename LAKEBASE_SCHEMA.")
+                            print(f"SCHEMA={desired_schema}")
+                            print('STATUS=FAIL')
+                            return
                         await conn.execute(f'DROP SCHEMA "{final_schema}" CASCADE')
-                        print(f'NOTE=dropped stale fallback schema "{final_schema}" owned by deployer')
+                        print(f'NOTE=dropped empty stale fallback schema "{final_schema}" owned by deployer')
                     else:
                         print(f"REASON=fallback schema {final_schema} owned by {row2['owner']} (neither SP nor deployer)")
                         print(f"SCHEMA={desired_schema}")
@@ -764,6 +785,12 @@ open(p, 'w').write(s)
         echo "    SELECT databricks_create_role('$SP_CLIENT_ID', 'SERVICE_PRINCIPAL');"
         echo "    GRANT CONNECT ON DATABASE databricks_postgres TO \"$SP_CLIENT_ID\";"
         echo "    GRANT CREATE ON DATABASE databricks_postgres TO \"$SP_CLIENT_ID\";"
+        # In --update mode there's no interactive user to run the manual
+        # remediation above — bail so we don't deploy against an unusable schema.
+        if [ "$UPDATE_MODE" = true ]; then
+            _error "DB setup failed in --update mode; refusing to deploy. Fix manually and re-run."
+            exit 1
+        fi
     fi
 fi
 

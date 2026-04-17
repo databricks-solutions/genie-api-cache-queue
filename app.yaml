@@ -16,11 +16,10 @@ command:
   - "--port"
   - "8000"
 
-# OAuth scopes required for Genie API access (applied during apps deploy)
-user_api_scopes:
-  - "sql"
-  - "dashboards.genie"
-  - "serving.serving-endpoints"
+# OAuth scopes and resources are NOT read from app.yaml by Databricks Apps.
+# Both are applied at deploy time via PATCH /api/2.0/apps/{name} in install.sh.
+# Keeping them out of app.yaml avoids confusion and prevents direct
+# `databricks apps deploy` calls from clearing the configuration.
 
 # Compute configuration
 compute:
@@ -39,6 +38,3 @@ env:
     value: public
 
 # Static files served by FastAPI (not needed here)
-
-# App resources (postgres resource configured at deploy time via API PATCH)
-resources: []
