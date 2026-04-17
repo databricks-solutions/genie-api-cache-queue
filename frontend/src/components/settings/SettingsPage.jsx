@@ -225,6 +225,7 @@ export default function SettingsPage() {
     similarity_threshold: '0.92', cache_ttl_value: '24', cache_ttl_unit: 'hours',
     max_queries_per_minute: '5', question_normalization_enabled: true, normalization_model: '',
     cache_validation_enabled: true, validation_model: '',
+    intent_split_enabled: true, intent_split_model: '',
     embedding_provider: 'databricks', databricks_embedding_endpoint: 'databricks-gte-large-en',
     shared_cache: true,
   })
@@ -270,6 +271,8 @@ export default function SettingsPage() {
           normalization_model: server.normalization_model || '',
           cache_validation_enabled: server.cache_validation_enabled !== false,
           validation_model: server.validation_model || '',
+          intent_split_enabled: server.intent_split_enabled !== false,
+          intent_split_model: server.intent_split_model || '',
           embedding_provider: server.embedding_provider || 'databricks',
           databricks_embedding_endpoint: server.databricks_embedding_endpoint || 'databricks-gte-large-en',
           shared_cache: server.shared_cache !== false,
@@ -398,15 +401,20 @@ export default function SettingsPage() {
     const c = configRef.current
     setSaveStatus('saving')
     try {
+      // Preserve user-set 0 (valid "match everything" / "block all traffic");
+      // NaN (blank input) falls through to the undefined backend default.
+      const threshold = parseFloat(c.similarity_threshold)
+      const qpm = parseInt(c.max_queries_per_minute)
       const payload = {
-        storage_backend: 'pgvector',
-        similarity_threshold: parseFloat(c.similarity_threshold) || 0.92,
-        max_queries_per_minute: parseInt(c.max_queries_per_minute) || 5,
+        similarity_threshold: Number.isFinite(threshold) ? threshold : undefined,
+        max_queries_per_minute: Number.isFinite(qpm) ? qpm : undefined,
         cache_ttl_seconds: ttlToSeconds(c.cache_ttl_value, c.cache_ttl_unit),
         question_normalization_enabled: c.question_normalization_enabled,
-        normalization_model: c.normalization_model || undefined,
+        normalization_model: c.normalization_model ?? '',
         cache_validation_enabled: c.cache_validation_enabled,
-        validation_model: c.validation_model || undefined,
+        validation_model: c.validation_model ?? '',
+        intent_split_enabled: c.intent_split_enabled,
+        intent_split_model: c.intent_split_model ?? '',
         embedding_provider: c.embedding_provider,
         databricks_embedding_endpoint: c.databricks_embedding_endpoint,
         shared_cache: c.shared_cache,
@@ -616,6 +624,13 @@ export default function SettingsPage() {
             </FieldRowStacked>
           </div>
 
+          {/* ── Gateway Defaults banner ── */}
+          <div className="mb-4 px-4 py-3 rounded bg-dbx-neutral-hover border border-dbx-border text-[12px] text-dbx-text-secondary">
+            These values are the <strong className="text-dbx-text">defaults for newly created gateways</strong>, and the
+            runtime fallback when a gateway leaves a field unset. Each gateway can override any of these in its own Settings tab.
+            <span className="block mt-1">Saved to Lakebase (<code className="text-[11px]">global_settings</code>) so changes survive redeployments.</span>
+          </div>
+
           {/* ── Cache ── */}
           <div ref={el => sectionRefs.current['cache'] = el} className="mb-10">
             <h3 className="text-[18px] font-semibold text-dbx-text leading-[24px] mb-2">Cache</h3>
@@ -804,8 +819,23 @@ export default function SettingsPage() {
             {config.question_normalization_enabled && (
               <FieldRow label="Normalization Model" description="LLM endpoint used for question normalization">
                 <EndpointSelect value={config.normalization_model} onChange={(v) => handleChange('normalization_model', v)}
-                  endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat" placeholder="Default (workspace default)" />
+                  endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat" placeholder="databricks-llama-4-maverick (default)" />
               </FieldRow>
+            )}
+
+            {config.question_normalization_enabled && (
+              <>
+                <FieldRow label="Intent Split" description="Runs before Question Normalization to isolate the latest intent in multi-turn conversations. Only active while Question Normalization is on.">
+                  <ToggleSwitch checked={config.intent_split_enabled}
+                    onChange={(v) => handleChange('intent_split_enabled', v)} />
+                </FieldRow>
+                {config.intent_split_enabled && (
+                  <FieldRow label="Intent Split Model" description="LLM endpoint used for intent splitting">
+                    <EndpointSelect value={config.intent_split_model} onChange={(v) => handleChange('intent_split_model', v)}
+                      endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat" placeholder="databricks-llama-4-maverick (default)" />
+                  </FieldRow>
+                )}
+              </>
             )}
 
             <FieldRow label="Cache Validation" description="LLM validates cached results are relevant before returning">
@@ -816,7 +846,7 @@ export default function SettingsPage() {
             {config.cache_validation_enabled && (
               <FieldRow label="Validation Model" description="LLM endpoint used for cache validation">
                 <EndpointSelect value={config.validation_model} onChange={(v) => handleChange('validation_model', v)}
-                  endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat" placeholder="Default (workspace default)" />
+                  endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat" placeholder="databricks-llama-4-maverick (default)" />
               </FieldRow>
             )}
 

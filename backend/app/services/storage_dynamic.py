@@ -373,6 +373,39 @@ class DynamicStorageService:
             return await backend.get_gateway_stats(gateway_id)
         return backend.get_gateway_stats(gateway_id)
 
+    # --- Global settings CRUD (Lakebase only) ---
+
+    async def get_global_settings(self) -> dict:
+        """Return persisted global settings from the default Lakebase backend."""
+        async def _op():
+            backend = await self._resolve_backend(None)
+            if not hasattr(backend, 'get_global_settings'):
+                return {}
+            return await backend.get_global_settings()
+        return await self._with_reconnect(_op, None)
+
+    async def update_global_settings(self, updates: dict, updated_by: Optional[str] = None) -> None:
+        """Upsert a batch of global settings."""
+        async def _op():
+            backend = await self._resolve_backend(None)
+            if not hasattr(backend, 'update_global_settings'):
+                raise RuntimeError("Global settings require Lakebase backend")
+            await backend.update_global_settings(updates, updated_by)
+        await self._with_reconnect(_op, None)
+
+    async def delete_global_setting(self, key: str) -> bool:
+        """Delete a single global setting row."""
+        async def _op():
+            backend = await self._resolve_backend(None)
+            if not hasattr(backend, 'delete_global_setting'):
+                logger.warning(
+                    "Backend %s does not support delete_global_setting; treating as no-op",
+                    type(backend).__name__,
+                )
+                return False
+            return await backend.delete_global_setting(key)
+        return await self._with_reconnect(_op, None)
+
     # --- User & group roles CRUD (Lakebase only) ---
 
     async def _resolve_rbac_backend(self):

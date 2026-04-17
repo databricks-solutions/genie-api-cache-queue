@@ -123,6 +123,30 @@ async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:
     return space_id, None
 
 
+def _coalesce(*values):
+    """Return the first non-None value. Treats 0 and False as valid values
+    (unlike Python's `or`), which is critical for numeric/boolean settings
+    such as cache_ttl_hours=0 or shared_cache=False."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
+def _coalesce_model(*values):
+    """Variant of `_coalesce` for LLM endpoint fields: treats "" as unset.
+
+    Gateway rows may still hold `""` from before `storage_pgvector.update_gateway`
+    started normalizing empty strings to NULL, and `get_effective_setting` can
+    return `""` from a legacy JSONB row. In both cases we want to fall through
+    to the next source rather than send an empty endpoint name to the LLM.
+    """
+    for v in values:
+        if v is not None and v != "":
+            return v
+    return None
+
+
 def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
     """Build RuntimeSettings using server config overrides (PUT /config) + env defaults.
     If a gateway config is provided, its per-gateway settings override globals.
@@ -135,20 +159,25 @@ def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
 
     rc = RuntimeConfig(
         genie_space_id=space_id,
-        sql_warehouse_id=gw.get("sql_warehouse_id") or get_effective_setting("sql_warehouse_id") or None,
-        similarity_threshold=gw.get("similarity_threshold") or get_effective_setting("similarity_threshold"),
-        max_queries_per_minute=gw.get("max_queries_per_minute") or get_effective_setting("max_queries_per_minute"),
-        cache_ttl_hours=gw.get("cache_ttl_hours") or get_effective_setting("cache_ttl_hours"),
-        embedding_provider=gw.get("embedding_provider") or get_effective_setting("embedding_provider"),
-        databricks_embedding_endpoint=gw.get("databricks_embedding_endpoint") or get_effective_setting("databricks_embedding_endpoint"),
+        sql_warehouse_id=_coalesce(gw.get("sql_warehouse_id"), get_effective_setting("sql_warehouse_id")),
+        similarity_threshold=_coalesce(gw.get("similarity_threshold"), get_effective_setting("similarity_threshold")),
+        max_queries_per_minute=_coalesce(gw.get("max_queries_per_minute"), get_effective_setting("max_queries_per_minute")),
+        cache_ttl_hours=_coalesce(gw.get("cache_ttl_hours"), get_effective_setting("cache_ttl_hours")),
+        embedding_provider=_coalesce(gw.get("embedding_provider"), get_effective_setting("embedding_provider")),
+        databricks_embedding_endpoint=_coalesce(gw.get("databricks_embedding_endpoint"), get_effective_setting("databricks_embedding_endpoint")),
         storage_backend="lakebase",
-        lakebase_instance_name=get_effective_setting("lakebase_instance_name") or get_effective_setting("lakebase_instance") or None,
+        lakebase_instance_name=_coalesce(get_effective_setting("lakebase_instance_name"), get_effective_setting("lakebase_instance")),
         lakebase_catalog=get_effective_setting("lakebase_catalog") or None,
         lakebase_schema=get_effective_setting("lakebase_schema") or None,
-        cache_table_name=get_effective_setting("cache_table_name") or get_effective_setting("pgvector_table_name") or None,
-        shared_cache=gw.get("shared_cache") if gw.get("shared_cache") is not None else get_effective_setting("shared_cache"),
-        question_normalization_enabled=gw.get("question_normalization_enabled") if gw.get("question_normalization_enabled") is not None else get_effective_setting("question_normalization_enabled"),
-        cache_validation_enabled=gw.get("cache_validation_enabled") if gw.get("cache_validation_enabled") is not None else get_effective_setting("cache_validation_enabled"),
+        cache_table_name=_coalesce(get_effective_setting("cache_table_name"), get_effective_setting("pgvector_table_name")),
+        shared_cache=_coalesce(gw.get("shared_cache"), get_effective_setting("shared_cache")),
+        question_normalization_enabled=_coalesce(gw.get("question_normalization_enabled"), get_effective_setting("question_normalization_enabled")),
+        cache_validation_enabled=_coalesce(gw.get("cache_validation_enabled"), get_effective_setting("cache_validation_enabled")),
+        caching_enabled=_coalesce(gw.get("caching_enabled"), get_effective_setting("caching_enabled")),
+        intent_split_enabled=_coalesce(gw.get("intent_split_enabled"), get_effective_setting("intent_split_enabled")),
+        normalization_model=_coalesce_model(gw.get("normalization_model"), get_effective_setting("normalization_model")),
+        validation_model=_coalesce_model(gw.get("validation_model"), get_effective_setting("validation_model")),
+        intent_split_model=_coalesce_model(gw.get("intent_split_model"), get_effective_setting("intent_split_model")),
     )
     return RuntimeSettings(rc, user_token=token, user_email=None)
 
@@ -426,7 +455,8 @@ async def _handle_query(
     original_query_text = query_text
     space_context = await get_space_context(space_id, rs)
     if rs.question_normalization_enabled:
-        query_text = await split_by_intent(query_text, rs, space_context=space_context)
+        if rs.intent_split_enabled:
+            query_text = await split_by_intent(query_text, rs, space_context=space_context)
         query_text = await normalize_question(query_text, rs, space_context=space_context)
 
     # Generate embedding and check cache

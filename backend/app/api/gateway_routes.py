@@ -71,6 +71,63 @@ async def list_gateways(req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _unset_if_blank(body_value):
+    """Normalize blank strings to None so the DB stores NULL.
+
+    _build_runtime_settings then resolves NULL dynamically against the
+    current global setting (and then the env default). Snapshotting globals
+    at create time would silently pin each gateway to whatever global was
+    set at creation and diverge from runtime behavior after a later global
+    change — the banner promise ("runtime fallback when a gateway leaves a
+    field unset") holds only if we leave it unset here.
+    """
+    if body_value is None or body_value == "":
+        return None
+    return body_value
+
+
+def _build_gateway_config_from_body(body: GatewayCreateRequest, user_email: str | None, now: datetime) -> dict:
+    """Translate a gateway-create request body into the storage-layer dict.
+
+    Extracted so the body → config mapping can be unit-tested without
+    dragging in FastAPI, auth, and the DB layer.
+
+    Semantics:
+    - Numeric / boolean fields that are None in the body → stored as NULL
+      (dynamic resolution at runtime).
+    - Text fields: None or "" → stored as NULL, same reason.
+    - sql_warehouse_id has a NOT NULL constraint (pre-existing), so it falls
+      back to the current global at create time and then to empty string.
+      The empty-string fallback lets RuntimeSettings.sql_warehouse_id's
+      .strip() check resolve to the env default.
+    """
+    sql_warehouse_id = body.sql_warehouse_id or get_effective_setting("sql_warehouse_id") or ""
+    return {
+        "id": str(uuid.uuid4()),
+        "name": body.name,
+        "genie_space_id": body.genie_space_id,
+        "sql_warehouse_id": sql_warehouse_id,
+        "similarity_threshold": body.similarity_threshold,
+        "max_queries_per_minute": body.max_queries_per_minute,
+        "cache_ttl_hours": body.cache_ttl_hours,
+        "question_normalization_enabled": body.question_normalization_enabled,
+        "cache_validation_enabled": body.cache_validation_enabled,
+        "caching_enabled": body.caching_enabled,
+        "embedding_provider": _unset_if_blank(body.embedding_provider),
+        "databricks_embedding_endpoint": _unset_if_blank(body.databricks_embedding_endpoint),
+        "shared_cache": body.shared_cache,
+        "normalization_model": _unset_if_blank(body.normalization_model),
+        "validation_model": _unset_if_blank(body.validation_model),
+        "intent_split_model": _unset_if_blank(body.intent_split_model),
+        "intent_split_enabled": body.intent_split_enabled,
+        "status": "active",
+        "created_by": user_email,
+        "description": body.description or "",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
 @gateway_router.post("/gateways", status_code=201)
 async def create_gateway(body: GatewayCreateRequest, req: Request):
     """Create a new gateway configuration. Owner only."""
@@ -84,25 +141,7 @@ async def create_gateway(body: GatewayCreateRequest, req: Request):
         if any(g["name"].lower() == body.name.lower() for g in existing):
             raise HTTPException(status_code=409, detail=f"A gateway named '{body.name}' already exists.")
 
-        config = {
-            "id": str(uuid.uuid4()),
-            "name": body.name,
-            "genie_space_id": body.genie_space_id,
-            "sql_warehouse_id": body.sql_warehouse_id,
-            "similarity_threshold": body.similarity_threshold if body.similarity_threshold is not None else 0.92,
-            "max_queries_per_minute": body.max_queries_per_minute if body.max_queries_per_minute is not None else 5,
-            "cache_ttl_hours": body.cache_ttl_hours if body.cache_ttl_hours is not None else 24,
-            "question_normalization_enabled": body.question_normalization_enabled if body.question_normalization_enabled is not None else False,
-            "cache_validation_enabled": body.cache_validation_enabled if body.cache_validation_enabled is not None else False,
-            "embedding_provider": body.embedding_provider or "databricks",
-            "databricks_embedding_endpoint": body.databricks_embedding_endpoint or "databricks-gte-large-en",
-            "shared_cache": body.shared_cache if body.shared_cache is not None else True,
-            "status": "active",
-            "created_by": user_email,
-            "description": body.description or "",
-            "created_at": now,
-            "updated_at": now,
-        }
+        config = _build_gateway_config_from_body(body, user_email, now)
 
         result = await _db.db_service.create_gateway(config)
         logger.info("Gateway created: id=%s name=%s by=%s", config["id"], config["name"], user_email)
@@ -512,6 +551,8 @@ async def get_settings_endpoint(req: Request):
         "normalization_model": overrides.get("normalization_model", ""),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
         "validation_model": overrides.get("validation_model", ""),
+        "intent_split_enabled": overrides.get("intent_split_enabled", True),
+        "intent_split_model": overrides.get("intent_split_model", ""),
     }
 
 
@@ -550,6 +591,51 @@ async def update_settings_endpoint(body: SettingsUpdateRequest, req: Request):
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
-    update_overrides(batch)
+    user_email = req.headers.get("X-Forwarded-Email")
+    await update_overrides(batch, updated_by=user_email)
     logger.info("Settings updated via gateway API: %s", updated)
     return {"updated": updated, "message": "Settings updated successfully"}
+
+
+# Allowlist of keys accepted by DELETE /settings/{key}. Derived from the same
+# Pydantic model that governs PUT /settings so the two stay in sync. `cache_ttl_seconds`
+# is the PUT alias; the persisted key is `cache_ttl_hours`, so we swap it.
+_DELETABLE_SETTING_KEYS = (
+    set(SettingsUpdateRequest.model_fields.keys()) - {"cache_ttl_seconds"}
+) | {"cache_ttl_hours"}
+
+# Boot-time guard: a future refactor that aliases or drops one of these keys
+# would silently shrink the allowlist and make the corresponding DELETE return
+# 400. Failing at import time surfaces the drift immediately instead of on the
+# first DELETE call from the UI.
+_EXPECTED_DELETABLE_KEYS = {
+    "similarity_threshold", "max_queries_per_minute", "cache_ttl_hours",
+    "question_normalization_enabled", "cache_validation_enabled",
+    "intent_split_enabled", "normalization_model", "validation_model",
+    "intent_split_model", "embedding_provider", "databricks_embedding_endpoint",
+    "shared_cache", "lakebase_service_token",
+}
+_missing = _EXPECTED_DELETABLE_KEYS - _DELETABLE_SETTING_KEYS
+assert not _missing, (
+    f"SettingsUpdateRequest / _DELETABLE_SETTING_KEYS drift: "
+    f"missing expected keys {_missing}. Update one or the other."
+)
+
+
+@gateway_router.delete("/settings/{key}")
+async def delete_setting_endpoint(key: str, req: Request):
+    """Remove a single global setting override. Owner only."""
+    await require_role(req, "owner")
+    if key not in _DELETABLE_SETTING_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown setting key: {key}")
+    from app.api.config_store import delete_override
+    try:
+        deleted = await delete_override(key)
+    except Exception as e:
+        logger.exception("Error deleting global setting %s", key)
+        raise HTTPException(status_code=500, detail=str(e))
+    if deleted:
+        logger.info("Global setting deleted: %s", key)
+    else:
+        logger.info("Global setting delete requested but not found: %s", key)
+    return {"key": key, "deleted": deleted}

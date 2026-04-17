@@ -305,6 +305,10 @@ class UIConfigUpdate(BaseModel):
     query_log_table_name: Optional[str] = None
     question_normalization_enabled: Optional[bool] = None
     cache_validation_enabled: Optional[bool] = None
+    intent_split_enabled: Optional[bool] = None
+    normalization_model: Optional[str] = None
+    validation_model: Optional[str] = None
+    intent_split_model: Optional[str] = None
 
 
 @router.get("/config")
@@ -336,6 +340,10 @@ async def get_config(req: Request):
         "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if os.getenv("DATABRICKS_CLIENT_ID") else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
+        "intent_split_enabled": overrides.get("intent_split_enabled", True),
+        "normalization_model": overrides.get("normalization_model", ""),
+        "validation_model": overrides.get("validation_model", ""),
+        "intent_split_model": overrides.get("intent_split_model", ""),
     }
 
 
@@ -360,7 +368,8 @@ async def put_config(body: UIConfigUpdate, req: Request):
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
-    update_overrides(batch)
+    user_email = req.headers.get("X-Forwarded-Email")
+    await update_overrides(batch, updated_by=user_email)
     logger.info("Config updated via UI: %s", updated)
     return {"updated": updated, "message": "Configuration updated successfully"}
 

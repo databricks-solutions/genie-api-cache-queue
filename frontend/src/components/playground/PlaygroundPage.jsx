@@ -2,10 +2,99 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams } from 'react-router-dom'
 import axios from 'axios'
 import { api } from '../../services/api'
+import { useRole } from '../../context/RoleContext'
 import PipelineVisualizer from './PipelineVisualizer'
 import { Play, Copy, Check, Loader, ChevronDown, Database, Zap, Plus, X, Trash2 } from 'lucide-react'
 
 const POLL_INTERVAL = 2000
+// Bump whenever the persisted payload shape changes in a non-backward-compatible way.
+// The `:v1` suffix on STORAGE_KEY_PREFIX namespaces the key; `SCHEMA_VERSION` is a
+// second gate so a payload written before a shape change is rejected rather than
+// rendered with stale fields.
+const SCHEMA_VERSION = 1
+const STORAGE_KEY_PREFIX = 'playground_session_v1'
+
+// Scope localStorage by the caller's email so user A's conversation can't
+// restore under user B's login on a shared workstation. `_anon` is used
+// before the role context resolves and for the (rare) unauthenticated path.
+function _storageKeyFor(identity) {
+  const scope = identity ? encodeURIComponent(identity) : '_anon'
+  return `${STORAGE_KEY_PREFIX}:${scope}`
+}
+
+// Monotonic counter for tab ids. `Date.now()` collides when two tabs are
+// created in the same millisecond (rapid clicks, test double-invocation);
+// the counter guarantees uniqueness within a session.
+let _tabIdCounter = 0
+const _nextTabId = () => {
+  _tabIdCounter += 1
+  return `${Date.now()}-${_tabIdCounter}`
+}
+
+// Strip the `result` payload when persisting: it can hold hundreds of rows
+// and quickly blows past localStorage's ~5 MB quota. We keep a small
+// placeholder so the restored UI can hint that results were not persisted.
+function _stripHeavyFields(messages) {
+  if (!Array.isArray(messages)) return []
+  return messages.map(m => {
+    if (!m || !m.result) return m
+    const { columns, row_count, data_array } = m.result
+    const rows = Array.isArray(data_array) ? data_array.length : 0
+    return {
+      ...m,
+      result: null,
+      result_summary: {
+        columns: Array.isArray(columns) ? columns : undefined,
+        row_count: typeof row_count === 'number' ? row_count : rows,
+        dropped: true,
+      },
+    }
+  })
+}
+
+function _loadPersistedSession(identity) {
+  try {
+    const raw = localStorage.getItem(_storageKeyFor(identity))
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    // Refuse payloads from a different schema rather than render with stale fields.
+    if (!parsed || parsed.version !== SCHEMA_VERSION) return null
+    if (!Array.isArray(parsed.tabs) || parsed.tabs.length === 0) return null
+    const tabs = parsed.tabs.map(t => ({
+      id: t.id ?? _nextTabId(),
+      label: t.label || 'Conversation',
+      running: false, // always restart cold
+      messages: Array.isArray(t.messages) ? t.messages.map(m => {
+        const wasRunning = m && m.stage && m.stage !== 'completed' && m.stage !== 'failed'
+        return wasRunning
+          ? { ...m, stage: 'failed', error: m.error || 'Query interrupted — you navigated away before it finished.' }
+          : m
+      }) : [],
+    }))
+    return {
+      tabs,
+      activeTabId: tabs.some(t => t.id === parsed.activeTabId) ? parsed.activeTabId : tabs[0].id,
+      selectedGatewayId: parsed.selectedGatewayId || '',
+    }
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn('Playground: could not read persisted conversation state from localStorage', e)
+    return null
+  }
+}
+
+// Compute the next free "Conversation N" number given the current tab set.
+// Used to initialize `nextTabNumber` so restored tabs don't collide with
+// labels chosen by the unique-number search in handleNewTab.
+function _nextFreeConversationNumber(tabs) {
+  const used = new Set((tabs || []).map(t => {
+    const m = (t.label || '').match(/^Conversation (\d+)$/)
+    return m ? parseInt(m[1], 10) : 0
+  }))
+  let n = 1
+  while (used.has(n)) n++
+  return n
+}
 
 function ResultTable({ data }) {
   if (!data) return null
@@ -181,6 +270,11 @@ function ChatMessage({ item }) {
                 <ResultTable data={item.result} />
               </div>
             )}
+            {!item.result && item.result_summary?.dropped && (
+              <p className="text-[12px] text-dbx-text-secondary italic">
+                Results not restored after reload ({item.result_summary.row_count ?? 0} row{item.result_summary.row_count === 1 ? '' : 's'}). Re-run the query to see them.
+              </p>
+            )}
           </div>
         )}
 
@@ -202,19 +296,30 @@ function ChatMessage({ item }) {
 
 export default function PlaygroundPage() {
   const { id: routeGatewayId } = useParams()
+  const { identity: userIdentity, loading: roleLoading } = useRole()
 
   const [gateways, setGateways] = useState([])
-  const [selectedGatewayId, setSelectedGatewayId] = useState(routeGatewayId || '')
+  const [selectedGatewayId, setSelectedGatewayId] = useState(() => routeGatewayId || '')
   const [gatewayDropdownOpen, setGatewayDropdownOpen] = useState(false)
   const [loadingGateways, setLoadingGateways] = useState(true)
 
   const [queryText, setQueryText] = useState('')
   const [identity, setIdentity] = useState('')
 
-  // Multi-tab conversation state — ephemeral, no persistence
-  const [tabs, setTabs] = useState(() => [{ id: Date.now(), label: 'Conversation 1', messages: [], running: false }])
+  // Multi-tab conversation state. Persisted to localStorage under a user-scoped
+  // key (see `_storageKeyFor`) so user A's conversation can't restore under
+  // user B's login. Restore is deferred to a useEffect that fires once the role
+  // context resolves — we cannot read the right key synchronously since the
+  // identity isn't known at first render. In-flight queries are marked
+  // 'failed/interrupted' on restore rather than resumed.
+  const [tabs, setTabs] = useState(() => (
+    [{ id: _nextTabId(), label: 'Conversation 1', messages: [], running: false }]
+  ))
   const [activeTabId, setActiveTabId] = useState(() => tabs[0]?.id)
-  const nextTabNumber = useRef(2)
+  // Reconciled against restored tabs so a "Conversation N" label never collides
+  // after a reload. handleNewTab re-checks against live state too; this is the
+  // fallback used when all tabs are closed at once.
+  const nextTabNumber = useRef(1)
 
   // Per-tab polling: Map<tabId, { interval, queryId, stageTimestamps }>
   const pollMapRef = useRef(new Map())
@@ -222,6 +327,15 @@ export default function PlaygroundPage() {
   const messagesEndRef = useRef(null)
   const activeTabIdRef = useRef(activeTabId)
   useEffect(() => { activeTabIdRef.current = activeTabId }, [activeTabId])
+
+  // Restore from localStorage keyed by the current user's identity. Tracks which
+  // identity's data is currently loaded in memory so a same-tab user switch
+  // (A → B) flushes A's state back to A's key *before* hydrating B's — otherwise
+  // the next debounced snapshot would write A's conversation under B's key and
+  // overwrite B's own persisted state. `undefined` means "no identity loaded
+  // yet"; any other value (including empty string for anonymous) is a loaded
+  // identity and flushable.
+  const restoredForIdentityRef = useRef(undefined)
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0]
   const messages = activeTab?.messages || []
@@ -246,7 +360,7 @@ export default function PlaygroundPage() {
   }, [])
 
   const handleNewTab = () => {
-    const newId = Date.now()
+    const newId = _nextTabId()
     setTabs(prev => {
       // Find the next available number that doesn't clash with any existing tab label
       const usedNumbers = new Set(prev.map(t => {
@@ -273,7 +387,7 @@ export default function PlaygroundPage() {
       const remaining = prev.filter(t => t.id !== tabId)
       if (remaining.length === 0) {
         const num = nextTabNumber.current++
-        const newTab = { id: Date.now(), label: `Conversation ${num}`, messages: [], running: false }
+        const newTab = { id: _nextTabId(), label: `Conversation ${num}`, messages: [], running: false }
         setActiveTabId(newTab.id)
         return [newTab]
       }
@@ -297,6 +411,13 @@ export default function PlaygroundPage() {
         setGateways(list)
         if (routeGatewayId && list.some(g => g.id === routeGatewayId)) {
           setSelectedGatewayId(routeGatewayId)
+          return
+        }
+        // Drop a persisted selectedGatewayId if the gateway no longer exists
+        // (deleted while the user was away) — otherwise the dropdown shows
+        // "Select a gateway" with no explanation and submit stays disabled.
+        if (selectedGatewayId && !list.some(g => g.id === selectedGatewayId)) {
+          setSelectedGatewayId(list.length > 0 ? list[0].id : '')
         } else if (!selectedGatewayId && list.length > 0) {
           setSelectedGatewayId(list[0].id)
         }
@@ -325,6 +446,136 @@ export default function PlaygroundPage() {
       pollMapRef.current.clear()
     }
   }, [])
+
+  // Persist conversation state to localStorage so it survives navigation /
+  // reloads. running flags are not persisted — on restore they default to
+  // false and any in-flight messages are marked 'failed'.
+  //
+  // Two persistence paths:
+  //   1. Debounced write while idle (any-tab-not-running). Polling updates the
+  //      tab state every ~2s and we don't want to JSON.stringify every tab on
+  //      every poll, so we skip the debounced write while any tab is running
+  //      and rely on path #2 to capture unmount-during-poll.
+  //   2. Synchronous flush on unmount, route-navigation (visibilitychange +
+  //      pagehide). This runs even while polling, so a user who submits a
+  //      query and navigates away mid-flight still gets their messages
+  //      persisted — the restore path will then mark them 'interrupted'.
+  const anyTabRunning = tabs.some(t => t.running)
+  // Flipped to true on the first localStorage write failure (quota exceeded,
+  // storage disabled by the browser, private-mode restrictions). Surfaces a
+  // one-time dismissible banner so the user knows conversations won't survive
+  // navigation — otherwise they'd silently lose state on the next route change.
+  const [persistFailed, setPersistFailed] = useState(false)
+  const persistWarnedRef = useRef(false)
+
+  // latestSnapshotRef mirrors the current state synchronously so the
+  // lifecycle handler (which sees the closure's snapshot at registration
+  // time, not at fire time) can read the latest without re-registering on
+  // every state change.
+  const latestSnapshotRef = useRef(null)
+  latestSnapshotRef.current = { tabs, activeTabId, selectedGatewayId }
+
+  // Write the current in-memory snapshot under the key scoped to `identity`.
+  // Exposed as a parameterized helper so the identity-change handler can flush
+  // the *previous* user's state to *their* key before hydrating the new user.
+  const writeSnapshotForIdentity = useCallback((identity) => {
+    // Skip writes until we've had a chance to restore — otherwise the initial
+    // empty-tab state would clobber a user's existing persisted conversation
+    // before the restore effect runs.
+    if (restoredForIdentityRef.current === undefined) return
+    const snap = latestSnapshotRef.current
+    if (!snap) return
+    try {
+      const payload = {
+        version: SCHEMA_VERSION,
+        tabs: snap.tabs.map(t => ({
+          id: t.id,
+          label: t.label,
+          messages: _stripHeavyFields(t.messages),
+        })),
+        activeTabId: snap.activeTabId,
+        selectedGatewayId: snap.selectedGatewayId,
+      }
+      localStorage.setItem(_storageKeyFor(identity), JSON.stringify(payload))
+    } catch (e) {
+      if (!persistWarnedRef.current) {
+        persistWarnedRef.current = true
+        // eslint-disable-next-line no-console
+        console.warn(
+          'Playground: could not persist conversation state to localStorage. ' +
+          'Conversations will not survive navigation/reload in this session.',
+          e
+        )
+        setPersistFailed(true)
+      }
+    }
+  }, [])
+
+  // Default path: always write under the identity we last restored for — not
+  // `userIdentity` directly — so a transition from A → B can't re-key A's
+  // still-in-memory state under B.
+  const writeSnapshot = useCallback(() => {
+    writeSnapshotForIdentity(restoredForIdentityRef.current)
+  }, [writeSnapshotForIdentity])
+
+  // Identity-aware hydrate. Runs on first resolve of `userIdentity` and on
+  // any subsequent change (e.g. same tab, different login on a shared
+  // workstation). The first branch flushes the outgoing user's in-memory
+  // state to *their* key before loading the new user's snapshot, so user B
+  // never sees user A's conversation and A's persisted state is preserved.
+  useEffect(() => {
+    if (roleLoading) return
+    if (restoredForIdentityRef.current === userIdentity) return
+
+    // Flush outgoing identity's state before swapping. Skipped on initial
+    // hydrate (ref === undefined) because there's no prior identity to flush to.
+    if (restoredForIdentityRef.current !== undefined) {
+      writeSnapshotForIdentity(restoredForIdentityRef.current)
+    }
+
+    restoredForIdentityRef.current = userIdentity
+    const persisted = _loadPersistedSession(userIdentity)
+    if (persisted) {
+      setTabs(persisted.tabs)
+      setActiveTabId(persisted.activeTabId)
+      if (!routeGatewayId && persisted.selectedGatewayId) {
+        setSelectedGatewayId(persisted.selectedGatewayId)
+      }
+      nextTabNumber.current = _nextFreeConversationNumber(persisted.tabs)
+    } else {
+      // No snapshot for the incoming user — reset to a fresh blank conversation
+      // so user A's tabs don't linger on screen after user B logs in.
+      const freshId = _nextTabId()
+      setTabs([{ id: freshId, label: 'Conversation 1', messages: [], running: false }])
+      setActiveTabId(freshId)
+      if (!routeGatewayId) setSelectedGatewayId('')
+      nextTabNumber.current = 2
+    }
+  }, [roleLoading, userIdentity, routeGatewayId, writeSnapshotForIdentity])
+
+  useEffect(() => {
+    if (anyTabRunning) return
+    const handle = setTimeout(writeSnapshot, 1500)
+    return () => clearTimeout(handle)
+  }, [tabs, activeTabId, selectedGatewayId, anyTabRunning, writeSnapshot])
+
+  useEffect(() => {
+    // Flush on tab hide (user switches tabs / minimizes) and on pagehide
+    // (works for Safari where visibilitychange isn't always fired on unload).
+    // Also flush on unmount — covers client-side route navigation where the
+    // page itself stays alive but the component goes away.
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') writeSnapshot()
+    }
+    const onPageHide = () => writeSnapshot()
+    document.addEventListener('visibilitychange', onHide)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onHide)
+      window.removeEventListener('pagehide', onPageHide)
+      writeSnapshot()
+    }
+  }, [writeSnapshot])
 
   const selectedGateway = gateways.find(g => g.id === selectedGatewayId)
 
@@ -546,6 +797,21 @@ export default function PlaygroundPage() {
           )}
         </div>
       </div>
+
+      {persistFailed && (
+        <div className="flex items-center justify-between gap-2 px-4 py-2 bg-amber-50 border-b border-amber-200 text-[12px] text-amber-900 flex-shrink-0">
+          <span>
+            Conversation persistence is off — browser storage is full or blocked. Your active conversation won't survive navigation or reload.
+          </span>
+          <button
+            onClick={() => setPersistFailed(false)}
+            className="flex-shrink-0 w-5 h-5 rounded hover:bg-dbx-neutral-hover flex items-center justify-center"
+            title="Dismiss"
+          >
+            <X size={12} className="text-dbx-text-secondary" />
+          </button>
+        </div>
+      )}
 
       {/* Chat messages area */}
       <div className="flex-1 overflow-auto px-6 py-4 space-y-6">

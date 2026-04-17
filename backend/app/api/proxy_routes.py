@@ -215,7 +215,7 @@ async def proxy_get_config(request: Request):
 
 @proxy_router.put("/config")
 async def proxy_update_config(body: ServerConfigUpdate, request: Request):
-    """Update server configuration (in-memory, persists for app lifetime)."""
+    """Update server configuration (persisted to Lakebase; survives redeploys)."""
     extract_bearer_token(request)
     updated = {}
     batch = {}
@@ -230,7 +230,10 @@ async def proxy_update_config(body: ServerConfigUpdate, request: Request):
     if not updated:
         raise HTTPException(status_code=400, detail="No fields to update. Send at least one field.")
 
-    update_overrides(batch)
+    # Prefer the Databricks-Apps-injected caller email for audit parity with the
+    # UI / gateway endpoints; fall back to "proxy-api" for non-header callers.
+    updated_by = request.headers.get("X-Forwarded-Email") or "proxy-api"
+    await update_overrides(batch, updated_by=updated_by)
 
     logger.info("Config updated via API: %s", updated)
     return {"updated": updated, "message": "Configuration updated successfully"}

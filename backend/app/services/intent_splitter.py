@@ -20,6 +20,8 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Default Databricks Foundation Model endpoint used for intent splitting.
+# Can be overridden per-gateway or globally via RuntimeSettings.intent_split_model.
 INTENT_SPLIT_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
 _INTENT_SPLIT_PROMPT_TEMPLATE = """\
@@ -45,7 +47,14 @@ CONVERSATION:
 
 
 def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
-    """Build a WorkspaceClient respecting the current auth mode."""
+    """Build a WorkspaceClient respecting the current auth mode.
+
+    Resolves the serving endpoint from runtime_settings.intent_split_model if set,
+    else falls back to INTENT_SPLIT_LLM_ENDPOINT.
+    """
+    endpoint = INTENT_SPLIT_LLM_ENDPOINT
+    if runtime_settings is not None and getattr(runtime_settings, "intent_split_model", None):
+        endpoint = runtime_settings.intent_split_model
     if runtime_settings:
         token = runtime_settings.databricks_token
         if not token:
@@ -54,7 +63,7 @@ def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
         client = WorkspaceClient(config=config)
     else:
         client = WorkspaceClient()
-    return client, INTENT_SPLIT_LLM_ENDPOINT
+    return client, endpoint
 
 
 async def split_by_intent(context_text: str, runtime_settings=None, space_context: str = "") -> str:

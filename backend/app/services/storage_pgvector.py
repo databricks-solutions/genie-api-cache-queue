@@ -75,6 +75,7 @@ class PGVectorStorageService:
         self.query_log_table_name = f"{schema_prefix}.{log_base}"
         self.user_roles_table_name = f"{schema_prefix}.user_roles"
         self.group_roles_table_name = f"{schema_prefix}.group_roles"
+        self.global_settings_table_name = f"{schema_prefix}.global_settings"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -199,9 +200,11 @@ class PGVectorStorageService:
             await self._ensure_gateway_table(conn)
             await self._ensure_user_roles_table(conn)
             await self._ensure_group_roles_table(conn)
+            await self._ensure_global_settings_table(conn)
             await self._migrate_genie_space_id_columns(conn)
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
+            await self._migrate_gateway_llm_models(conn)
 
     async def _migrate_genie_space_id_columns(self, conn):
         """Migration: ensure both gateway_id and genie_space_id columns exist.
@@ -285,6 +288,29 @@ class PGVectorStorageService:
                 logger.info("Added caching_enabled column to %s", self.gateway_table_name)
         except Exception as e:
             logger.warning("Could not add caching_enabled to %s: %s", self.gateway_table_name, e)
+
+    async def _migrate_gateway_llm_models(self, conn):
+        """Migration: add per-gateway LLM model overrides + intent_split_enabled flag."""
+        parts = self.gateway_table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        additions = [
+            ("normalization_model", "TEXT"),
+            ("validation_model", "TEXT"),
+            ("intent_split_model", "TEXT"),
+            ("intent_split_enabled", "BOOLEAN DEFAULT true"),
+        ]
+        for column, coltype in additions:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                    schema, tbl, column
+                )
+                if not exists:
+                    await conn.execute(f'ALTER TABLE {self.gateway_table_name} ADD COLUMN {column} {coltype}')
+                    logger.info("Added %s column to %s", column, self.gateway_table_name)
+            except Exception as e:
+                logger.warning("Could not add %s to %s: %s", column, self.gateway_table_name, e)
 
     async def _build_connection_string_with_creds(self, hostname, quote_plus, uuid):
         """Generate OAuth credentials and build connection string for a Lakebase hostname."""
@@ -521,11 +547,27 @@ class PGVectorStorageService:
                 status TEXT DEFAULT 'active',
                 created_by TEXT,
                 description TEXT DEFAULT '',
+                normalization_model TEXT,
+                validation_model TEXT,
+                intent_split_model TEXT,
+                intent_split_enabled BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
         logger.info("Gateway table '%s' initialized", self.gateway_table_name)
+
+    async def _ensure_global_settings_table(self, conn):
+        """Create the global_settings table (key/value JSONB) if it does not exist."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.global_settings_table_name} (
+                key TEXT PRIMARY KEY,
+                value JSONB NOT NULL,
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_by TEXT
+            )
+        """)
+        logger.info("Global settings table '%s' initialized", self.global_settings_table_name)
 
     async def search_similar_query(
         self,
@@ -875,28 +917,47 @@ class PGVectorStorageService:
     # --- Gateway CRUD ---
 
     async def create_gateway(self, config: dict) -> dict:
-        """Create a new gateway configuration."""
+        """Create a new gateway configuration.
+
+        The (column, value) list is the single source of truth for both the
+        column list and the `$N` placeholder order, so adding a new field only
+        requires one line here instead of keeping three parallel lists in sync.
+        """
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
 
+        fields = [
+            ("id", config["id"]),
+            ("name", config["name"]),
+            ("genie_space_id", config["genie_space_id"]),
+            ("sql_warehouse_id", config["sql_warehouse_id"]),
+            ("similarity_threshold", config.get("similarity_threshold", 0.92)),
+            ("max_queries_per_minute", config.get("max_queries_per_minute", 5)),
+            ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
+            ("question_normalization_enabled", config.get("question_normalization_enabled", False)),
+            ("cache_validation_enabled", config.get("cache_validation_enabled", False)),
+            ("caching_enabled", config.get("caching_enabled", True)),
+            ("embedding_provider", config.get("embedding_provider", "databricks")),
+            ("databricks_embedding_endpoint", config.get("databricks_embedding_endpoint", "databricks-gte-large-en")),
+            ("shared_cache", config.get("shared_cache", True)),
+            ("status", config.get("status", "active")),
+            ("created_by", config.get("created_by")),
+            ("description", config.get("description", "")),
+            ("normalization_model", config.get("normalization_model")),
+            ("validation_model", config.get("validation_model")),
+            ("intent_split_model", config.get("intent_split_model")),
+            ("intent_split_enabled", config.get("intent_split_enabled", True)),
+            ("created_at", config.get("created_at")),
+            ("updated_at", config.get("updated_at")),
+        ]
+        cols = ", ".join(c for c, _ in fields)
+        placeholders = ", ".join(f"${i}" for i in range(1, len(fields) + 1))
+        values = [v for _, v in fields]
+
         async with self.pool.acquire() as conn:
-            await conn.execute(f"""
-                INSERT INTO {self.gateway_table_name}
-                (id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
-                 max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
-                 cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
-                 shared_cache, status, created_by, description, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            """,
-                config["id"], config["name"], config["genie_space_id"], config["sql_warehouse_id"],
-                config.get("similarity_threshold", 0.92), config.get("max_queries_per_minute", 5),
-                config.get("cache_ttl_hours", 24), config.get("question_normalization_enabled", False),
-                config.get("cache_validation_enabled", False), config.get("caching_enabled", True),
-                config.get("embedding_provider", "databricks"),
-                config.get("databricks_embedding_endpoint", "databricks-gte-large-en"),
-                config.get("shared_cache", True), config.get("status", "active"),
-                config.get("created_by"), config.get("description", ""),
-                config.get("created_at"), config.get("updated_at"),
+            await conn.execute(
+                f"INSERT INTO {self.gateway_table_name} ({cols}) VALUES ({placeholders})",
+                *values,
             )
             logger.info("Gateway created in DB: id=%s name=%s", config["id"], config["name"])
             return config
@@ -911,7 +972,9 @@ class PGVectorStorageService:
                 SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                        max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
                        cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
-                       shared_cache, status, created_by, description, created_at, updated_at
+                       shared_cache, status, created_by, description,
+                       normalization_model, validation_model, intent_split_model, intent_split_enabled,
+                       created_at, updated_at
                 FROM {self.gateway_table_name}
                 WHERE id = $1
             """, gateway_id)
@@ -930,16 +993,26 @@ class PGVectorStorageService:
                 SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                        max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
                        cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
-                       shared_cache, status, created_by, description, created_at, updated_at
+                       shared_cache, status, created_by, description,
+                       normalization_model, validation_model, intent_split_model, intent_split_enabled,
+                       created_at, updated_at
                 FROM {self.gateway_table_name}
                 ORDER BY created_at DESC
             """)
             return [self._row_to_gateway_dict(row) for row in rows]
 
     async def update_gateway(self, gateway_id: str, updates: dict) -> Optional[dict]:
-        """Update a gateway configuration."""
+        """Update a gateway configuration.
+
+        Nullable TEXT fields (normalization_model, validation_model, intent_split_model)
+        may be set to empty string explicitly to clear the override. Empty strings are
+        normalized to NULL so the runtime fallback (global setting) kicks in.
+        """
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        # Fields whose current value may be intentionally cleared via empty string
+        _clearable_text_fields = {"normalization_model", "validation_model", "intent_split_model"}
 
         # Build dynamic SET clause from provided updates
         allowed_fields = {
@@ -947,15 +1020,22 @@ class PGVectorStorageService:
             "question_normalization_enabled", "cache_validation_enabled", "caching_enabled",
             "embedding_provider", "databricks_embedding_endpoint", "shared_cache", "status", "description",
             "sql_warehouse_id", "genie_space_id",
+            "normalization_model", "validation_model", "intent_split_model", "intent_split_enabled",
         }
         set_parts = []
         params = []
         param_idx = 1
         for key, value in updates.items():
-            if key in allowed_fields and value is not None:
-                set_parts.append(f"{key} = ${param_idx}")
-                params.append(value)
-                param_idx += 1
+            if key not in allowed_fields:
+                continue
+            # Treat empty string as NULL for clearable text fields
+            if key in _clearable_text_fields and value == "":
+                value = None
+            elif value is None:
+                continue
+            set_parts.append(f"{key} = ${param_idx}")
+            params.append(value)
+            param_idx += 1
 
         if not set_parts:
             return await self.get_gateway(gateway_id)
@@ -1021,6 +1101,70 @@ class PGVectorStorageService:
             """, gateway_id) or 0
 
             return {"cache_count": cache_count, "query_count_7d": query_count, "cache_hits_7d": cache_hits}
+
+    # --- Global settings CRUD ---
+
+    async def get_global_settings(self) -> dict:
+        """Return all persisted global settings as a dict."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        import json as _json
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT key, value FROM {self.global_settings_table_name}"
+            )
+        result = {}
+        for r in rows:
+            raw = r["value"]
+            # asyncpg returns JSONB as str when no codec registered; parse defensively
+            if isinstance(raw, (str, bytes, bytearray)):
+                try:
+                    result[r["key"]] = _json.loads(raw)
+                    continue
+                except Exception:
+                    pass
+            result[r["key"]] = raw
+        return result
+
+    async def update_global_settings(self, updates: dict, updated_by: Optional[str] = None) -> None:
+        """Upsert a batch of global settings atomically.
+
+        The batch runs inside a transaction so a mid-batch failure doesn't
+        leave the table with a partial write (which would then diverge from
+        the in-memory cache — config_store updates the cache only after this
+        call returns).
+        """
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        if not updates:
+            return
+        import json as _json
+        rows = [(k, _json.dumps(v), updated_by) for k, v in updates.items()]
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany(
+                    f"""
+                    INSERT INTO {self.global_settings_table_name} (key, value, updated_at, updated_by)
+                    VALUES ($1, $2::jsonb, NOW(), $3)
+                    ON CONFLICT (key) DO UPDATE
+                      SET value = EXCLUDED.value,
+                          updated_at = NOW(),
+                          updated_by = EXCLUDED.updated_by
+                    """,
+                    rows,
+                )
+        logger.info("Global settings upserted: %s", list(updates.keys()))
+
+    async def delete_global_setting(self, key: str) -> bool:
+        """Remove a global setting. Returns True if a row was deleted."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"DELETE FROM {self.global_settings_table_name} WHERE key = $1",
+                key,
+            )
+        return result != "DELETE 0"
 
     # --- User roles CRUD ---
 
@@ -1136,6 +1280,7 @@ class PGVectorStorageService:
 
     def _row_to_gateway_dict(self, row) -> dict:
         """Convert a database row to a gateway dict."""
+        keys = row.keys()
         return {
             "id": row["id"],
             "name": row["name"],
@@ -1146,13 +1291,17 @@ class PGVectorStorageService:
             "cache_ttl_hours": row["cache_ttl_hours"],
             "question_normalization_enabled": row["question_normalization_enabled"],
             "cache_validation_enabled": row["cache_validation_enabled"],
-            "caching_enabled": row["caching_enabled"] if "caching_enabled" in row.keys() else True,
+            "caching_enabled": row["caching_enabled"] if "caching_enabled" in keys else True,
             "embedding_provider": row["embedding_provider"],
             "databricks_embedding_endpoint": row["databricks_embedding_endpoint"],
             "shared_cache": row["shared_cache"],
             "status": row["status"],
             "created_by": row["created_by"],
             "description": row["description"],
+            "normalization_model": row["normalization_model"] if "normalization_model" in keys else None,
+            "validation_model": row["validation_model"] if "validation_model" in keys else None,
+            "intent_split_model": row["intent_split_model"] if "intent_split_model" in keys else None,
+            "intent_split_enabled": row["intent_split_enabled"] if "intent_split_enabled" in keys else True,
             "created_at": _to_utc_iso(row["created_at"]),
             "updated_at": _to_utc_iso(row["updated_at"]),
         }
