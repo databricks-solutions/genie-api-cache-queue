@@ -119,11 +119,6 @@ async def _check_last_owner(
 async def assign_role(email: str, body: RoleAssignment, req: Request):
     """Assign a role to a user. Manage or above."""
     identity, token, caller_role = await require_role(req, "manage")
-    if identity and email.lower() == identity.lower():
-        raise HTTPException(
-            status_code=400,
-            detail="You cannot change your own role.",
-        )
     if body.role not in ROLES:
         raise HTTPException(
             status_code=400,
@@ -145,6 +140,7 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
         raise HTTPException(status_code=503, detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.")
     caller_is_admin = await is_workspace_admin(token, host) if token and host else False
     target_is_admin = await is_user_workspace_admin(email, token, host) if token and host else False
+    is_self = bool(identity) and email.lower() == identity.lower()
     try:
         async with _owner_lock:
             target_role = await _db.db_service.get_user_role(email)
@@ -154,6 +150,11 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
                     detail=f"Cannot modify a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
                 )
             await _check_last_owner(email, body.role, caller_is_admin=caller_is_admin, target_is_admin=target_is_admin, target_role=target_role)
+            if is_self:
+                raise HTTPException(
+                    status_code=400,
+                    detail="You cannot change your own role.",
+                )
             await _db.db_service.set_user_role(email, body.role, granted_by=identity)
             invalidate_role_cache(email)
     except HTTPException:
@@ -168,11 +169,6 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
 async def remove_user_role(email: str, req: Request):
     """Remove explicit role assignment (reverts to default 'use'). Manage or above."""
     identity, token, caller_role = await require_role(req, "manage")
-    if identity and email.lower() == identity.lower():
-        raise HTTPException(
-            status_code=400,
-            detail="You cannot remove your own access.",
-        )
     from app.api.config_store import get_effective_setting
     from app.auth import ensure_https
     from app.config import get_settings
@@ -184,6 +180,7 @@ async def remove_user_role(email: str, req: Request):
         raise HTTPException(status_code=503, detail="RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings.")
     caller_is_admin = await is_workspace_admin(token, host) if token and host else False
     target_is_admin = await is_user_workspace_admin(email, token, host) if token and host else False
+    is_self = bool(identity) and email.lower() == identity.lower()
     try:
         async with _owner_lock:
             target_role = await _db.db_service.get_user_role(email)
@@ -193,6 +190,11 @@ async def remove_user_role(email: str, req: Request):
                     detail=f"Cannot remove a user with role '{target_role}' — your role ('{caller_role}') is insufficient.",
                 )
             await _check_last_owner(email, caller_is_admin=caller_is_admin, target_is_admin=target_is_admin, target_role=target_role)
+            if is_self:
+                raise HTTPException(
+                    status_code=400,
+                    detail="You cannot remove your own access.",
+                )
             await _db.db_service.delete_user_role(email)
             invalidate_role_cache(email)
     except HTTPException:

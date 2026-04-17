@@ -152,22 +152,40 @@ class DynamicStorageService:
         return self.default_backend
 
     async def _with_reconnect(self, operation, runtime_settings):
-        """Run operation. On any Lakebase error, reinitialize pool and retry once."""
+        """Run operation with Lakebase recovery on transient errors.
+
+        Config-level ValueError (missing SP token, wrong backend, etc.) is re-raised
+        immediately — retry cannot fix a misconfiguration.
+
+        For other errors: _resolve_backend runs a health check that reinitializes a
+        closed pool or refreshes an expiring JWT, so we retry once before forcing
+        an explicit reinit. This avoids double-reinit when the health check already
+        rebuilt the pool.
+        """
         try:
             return await operation()
+        except ValueError:
+            raise
         except Exception as first_err:
             backend = await self._resolve_backend(runtime_settings)
             if not hasattr(backend, 'reinitialize'):
                 raise
-            logger.warning("Lakebase error: %s (%s) — reinitializing",
+            logger.warning("Lakebase error: %s (%s) — retrying after health check",
                           type(first_err).__name__, first_err)
             try:
-                async with self._creation_lock:
-                    await backend.reinitialize()
-            except Exception as reinit_err:
-                logger.error("Reinitialize failed: %s", reinit_err)
-                raise first_err
-            return await operation()
+                return await operation()
+            except ValueError:
+                raise
+            except Exception as second_err:
+                logger.warning("Lakebase still failing: %s (%s) — reinitializing",
+                              type(second_err).__name__, second_err)
+                try:
+                    async with self._creation_lock:
+                        await backend.reinitialize()
+                except Exception as reinit_err:
+                    logger.error("Reinitialize failed: %s", reinit_err)
+                    raise first_err
+                return await operation()
 
     async def search_similar_query(
         self,
