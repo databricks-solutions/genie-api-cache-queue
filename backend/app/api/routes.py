@@ -27,6 +27,7 @@ import app.services.database as _db
 from app.config import get_settings
 
 _proxy_registry: dict[str, str] = {}
+_PROXY_REGISTRY_MAX = 2000
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,7 +37,8 @@ settings = get_settings()
 @router.post("/query", response_model=QueryResponse)
 async def submit_query(request: QueryRequest, req: Request):
     try:
-        token = req.headers.get("X-Forwarded-Access-Token") or ""
+        from app.api.auth_helpers import resolve_user_token
+        token = resolve_user_token(req)
         identity = req.headers.get("X-Forwarded-Email") or ""
 
         if not identity:
@@ -84,6 +86,10 @@ async def submit_query(request: QueryRequest, req: Request):
         if not msg_id:
             raise HTTPException(status_code=500, detail="Internal error: no message_id returned")
         _proxy_registry[query_id] = msg_id
+        if len(_proxy_registry) > _PROXY_REGISTRY_MAX:
+            keys = list(_proxy_registry.keys())[:len(_proxy_registry) - _PROXY_REGISTRY_MAX]
+            for k in keys:
+                _proxy_registry.pop(k, None)
 
         return QueryResponse(query_id=query_id, stage=QueryStage.RECEIVED, message="Query submitted successfully")
     except HTTPException:
@@ -302,8 +308,10 @@ class UIConfigUpdate(BaseModel):
 
 
 @router.get("/config")
-async def get_config():
+async def get_config(req: Request):
     """Get server configuration. Used by Settings UI and external API."""
+    from app.api.auth_helpers import require_role
+    await require_role(req, "use")
     overrides = get_overrides()
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)
@@ -323,17 +331,19 @@ async def get_config():
         "lakebase_schema": settings.lakebase_schema or overrides.get("lakebase_schema"),
         "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
         "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
-        # True if any Lakebase token is available (custom override in memory OR auto-injected DATABRICKS_TOKEN)
-        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or settings.databricks_token),
-        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if settings.databricks_token else "none"),
+        # True if any Lakebase token is available (custom override or SP credentials)
+        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or os.getenv("DATABRICKS_CLIENT_ID")),
+        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if os.getenv("DATABRICKS_CLIENT_ID") else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
     }
 
 
 @router.put("/config")
-async def put_config(body: UIConfigUpdate):
-    """Update server configuration. Used by Settings UI and external API."""
+async def put_config(body: UIConfigUpdate, req: Request):
+    """Update server configuration. Owner only."""
+    from app.api.auth_helpers import require_role
+    await require_role(req, "owner")
     batch = {}
     updated = {}
     for field, value in body.model_dump(exclude_none=True).items():
@@ -361,7 +371,7 @@ async def cache_count(req: Request):
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
-            storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
+            storage_backend="lakebase",
             lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
             lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
             cache_table_name=get_effective_setting("cache_table_name") or settings.pgvector_table_name or "cached_queries",
@@ -382,7 +392,7 @@ async def clear_cache(req: Request, space_id: Optional[str] = None):
     try:
         overrides = get_overrides()
         rc = RuntimeConfig(
-            storage_backend="lakebase" if get_effective_setting("storage_backend") in ("pgvector", "lakebase") else "local",
+            storage_backend="lakebase",
             lakebase_instance_name=get_effective_setting("lakebase_instance_name") or settings.lakebase_instance or None,
             lakebase_schema=get_effective_setting("lakebase_schema") or settings.lakebase_schema or "public",
             cache_table_name=get_effective_setting("cache_table_name") or settings.pgvector_table_name or "cached_queries",

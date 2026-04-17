@@ -25,7 +25,7 @@ const _syncServerConfig = async () => {
         shared_cache: server.shared_cache ?? local.shared_cache ?? true,
         embedding_provider: server.embedding_provider || local.embedding_provider || 'databricks',
         databricks_embedding_endpoint: server.databricks_embedding_endpoint || local.databricks_embedding_endpoint || 'databricks-gte-large-en',
-        storage_backend: server.storage_backend === 'pgvector' ? 'lakebase' : (server.storage_backend || local.storage_backend || 'local'),
+        storage_backend: 'lakebase',
         lakebase_instance_name: server.lakebase_instance_name || local.lakebase_instance_name || '',
         lakebase_catalog: server.lakebase_catalog || local.lakebase_catalog || '',
         lakebase_schema: server.lakebase_schema || local.lakebase_schema || 'public',
@@ -90,7 +90,7 @@ const withConfig = (data = {}) => {
     return {
       ...data,
       config: {
-        storage_backend: config.storage_backend || 'local',
+        storage_backend: 'lakebase',
         genie_space_id: activeSpaceId,
         sql_warehouse_id: config.sql_warehouse_id,
         similarity_threshold: parseFloat(config.similarity_threshold) || 0.92,
@@ -257,6 +257,56 @@ export const api = {
   updateSettings: async (settings) => {
     const response = await axios.put(`${API_BASE_URL}/settings`, settings);
     return response.data;
+  },
+
+  checkAuthMode: async () => {
+    const response = await axios.get(`${API_BASE_URL}/auth/mode`);
+    return response.data; // { auth_mode: 'user' | 'service_principal', message }
+  },
+
+  getMyRole: async () => {
+    const response = await axios.get(`${API_BASE_URL}/users/me`);
+    return response.data; // { identity, role }
+  },
+
+  listUsers: async () => {
+    const response = await axios.get(`${API_BASE_URL}/users`);
+    return response.data; // [{ identity, role, granted_by, granted_at }]
+  },
+
+  setUserRole: async (email, role) => {
+    const response = await axios.post(`${API_BASE_URL}/users/${encodeURIComponent(email)}/role`, { role });
+    return response.data;
+  },
+
+  deleteUserRole: async (email) => {
+    const response = await axios.delete(`${API_BASE_URL}/users/${encodeURIComponent(email)}`);
+    return response.data;
+  },
+
+  searchWorkspacePrincipals: async (query) => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/search`, { params: { q: query } });
+    return response.data.users || [];
+  },
+
+  listGroups: async () => {
+    const response = await axios.get(`${API_BASE_URL}/groups`);
+    return response.data;
+  },
+
+  setGroupRole: async (groupName, role) => {
+    const response = await axios.post(`${API_BASE_URL}/groups/${encodeURIComponent(groupName)}/role`, { role });
+    return response.data;
+  },
+
+  deleteGroupRole: async (groupName) => {
+    const response = await axios.delete(`${API_BASE_URL}/groups/${encodeURIComponent(groupName)}`);
+    return response.data;
+  },
+
+  listWorkspaceGroups: async () => {
+    const response = await axios.get(`${API_BASE_URL}/workspace/groups`);
+    return response.data.groups || [];
   },
 
   getWorkspaceAppearance: async () => {

@@ -28,10 +28,10 @@ from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
 from app.services.prompt_enricher import get_space_context
-from app.services.storage_local import get_local_queue as _get_local_queue
+from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
 import app.services.database as _db
 
-_rate_limiter = _get_local_queue()
+_rate_limiter = _get_rate_limiter()
 _poll_locks: dict[str, asyncio.Lock] = {}
 
 logger = logging.getLogger(__name__)

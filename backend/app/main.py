@@ -18,6 +18,7 @@ from app.api.routes import router
 from app.api.genie_clone_routes import genie_clone_router
 from app.api.gateway_routes import gateway_router
 from app.api.mcp_routes import mcp_router
+from app.api.rbac_routes import rbac_router
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ async def lifespan(app: FastAPI):
 
     # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
-    if settings.storage_backend == "pgvector" and settings.lakebase_instance:
+    if settings.storage_backend in ("lakebase", "pgvector") and settings.lakebase_instance:
         async def _token_refresh_loop():
             while True:
                 await asyncio.sleep(30 * 60)  # Every 30 minutes
@@ -54,6 +55,11 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
         pass
+    finally:
+        from app.services.rbac import close_http_client
+        from app.api.gateway_routes import close_discovery_client
+        await close_http_client()
+        await close_discovery_client()
 
 
 app = FastAPI(
@@ -78,6 +84,7 @@ app.add_middleware(
 
 app.include_router(router, prefix="/api")
 app.include_router(gateway_router, prefix="/api")
+app.include_router(rbac_router, prefix="/api")
 app.include_router(genie_clone_router, prefix="/api/2.0/genie")
 app.include_router(mcp_router, prefix="/api/2.0/mcp")
 

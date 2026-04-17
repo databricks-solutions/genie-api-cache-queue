@@ -36,14 +36,8 @@ class Settings(BaseSettings):
     databricks_embedding_endpoint: str = os.getenv("DATABRICKS_EMBEDDING_ENDPOINT", "databricks-gte-large-en")
     local_embedding_model: str = os.getenv("LOCAL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     
-    # Storage backend selection
-    # For local development: uses in-memory/file-based storage
-    # For production: uses Databricks-managed services or PostgreSQL+PGVector
-    storage_backend: str = os.getenv("STORAGE_BACKEND", "local")  # local, databricks, pgvector
-    
-    # Local storage paths (for development)
-    local_cache_file: str = os.getenv("LOCAL_CACHE_FILE", "data/query_cache.json")
-    local_embeddings_file: str = os.getenv("LOCAL_EMBEDDINGS_FILE", "data/embeddings.npy")
+    # Storage backend — Lakebase (pgvector) only
+    storage_backend: str = os.getenv("STORAGE_BACKEND", "pgvector")
     
     # Databricks Unity Catalog configuration (for production)
     catalog_name: str = os.getenv("CATALOG_NAME", "main")

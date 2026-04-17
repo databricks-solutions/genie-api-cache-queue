@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
-import { Settings, PanelLeft } from 'lucide-react'
+import { Settings, PanelLeft, AlertTriangle } from 'lucide-react'
+import { api } from './services/api'
 import Sidebar from './components/layout/Sidebar'
 import GatewayListPage from './components/gateways/GatewayListPage'
 import GatewayDetailPage from './components/gateways/GatewayDetailPage'
@@ -36,12 +37,38 @@ function TopBar({ onToggleSidebar }) {
   )
 }
 
+function SpModeWarning({ message }) {
+  if (!message) return null
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 border-b border-amber-200 text-amber-800 text-[13px]">
+      <AlertTriangle size={14} className="flex-shrink-0" />
+      <span>{message}</span>
+    </div>
+  )
+}
+
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [spWarning, setSpWarning] = useState(null)
+
+  useEffect(() => {
+    const checkAuth = () => {
+      api.checkAuthMode()
+        .then(data => {
+          setSpWarning(data.auth_mode !== 'user' ? data.message : null)
+        })
+        .catch(() => {})
+    }
+    checkAuth()
+    const onVisibility = () => { if (document.visibilityState === 'visible') checkAuth() }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
 
   return (
     <div className="flex flex-col h-screen bg-dbx-sidebar">
       <TopBar onToggleSidebar={() => setSidebarOpen(v => !v)} />
+      <SpModeWarning message={spWarning} />
       <div className="flex flex-1 min-h-0">
         <div
           className="flex-shrink-0 overflow-hidden transition-all duration-200"

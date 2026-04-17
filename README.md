@@ -233,7 +233,7 @@ Set the **Lakebase Instance Name** in the Settings page. The app creates the req
 ### Local Development
 
 For local development (outside Databricks Apps), configure the **Lakebase Service Token** in Settings or `.env`:
-- **Service Principal:** `<client_id>:<client_secret>` (recommended)
+- **Service Principal:** `<client_id>:<client_secret>` (always use SP credentials — never PATs)
 
 ---
 

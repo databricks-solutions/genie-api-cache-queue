@@ -16,13 +16,13 @@ import logging
 import uuid
 import asyncio
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from app.auth import ensure_https
 from app.config import get_settings
 from app.api.config_store import get_effective_setting
-from app.api.auth_helpers import extract_bearer_token
+from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token
 from app.services.embedding_service import embedding_service
 from app.services.genie_service import genie_service, GenieRateLimitError, GenieConfigError
 from app.utils import exponential_backoff
@@ -30,10 +30,10 @@ from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
 from app.services.prompt_enricher import get_space_context
-from app.services.storage_local import get_local_queue as _get_local_queue
+from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
 import app.services.database as _db
 
-_rate_limiter = _get_local_queue()
+_rate_limiter = _get_rate_limiter()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -45,10 +45,37 @@ genie_clone_router = APIRouter()
 # ---------------------------------------------------------------------------
 _synthetic_messages: dict[str, dict] = {}
 _message_locks: dict[str, asyncio.Lock] = {}
+_sweep_lock = asyncio.Lock()
+_SYNTHETIC_MAX = 2000
 
 CONV_PREFIX = "ccache_"
 MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
+
+
+async def _sweep_synthetic_messages():
+    """Evict oldest entries when the store exceeds _SYNTHETIC_MAX.
+    Acquires _sweep_lock to serialize access. Skips locked entries.
+    """
+    overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
+    if overflow <= 0:
+        return
+    async with _sweep_lock:
+        overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
+        if overflow <= 0:
+            return
+        evicted = 0
+        skipped_locked = []
+        for k in list(_synthetic_messages.keys()):
+            if evicted >= overflow:
+                break
+            lock = _message_locks.get(k)
+            if lock is not None and lock.locked():
+                skipped_locked.append(k)
+                continue
+            _synthetic_messages.pop(k, None)
+            _message_locks.pop(k, None)
+            evicted += 1
 
 
 # ---------------------------------------------------------------------------
@@ -62,12 +89,25 @@ def _get_message_lock(msg_id: str) -> asyncio.Lock:
 
 
 def _release_message_lock(msg_id: str) -> None:
+    """Remove a message's lock entry from the registry.
+
+    Only safe to call from a synchronous done-callback (task finished,
+    so no coroutine can race on the same key).  NEVER call inside an
+    ``async with _get_message_lock(…)`` block — popping while the lock
+    is held lets a concurrent coroutine create a *new* lock for the
+    same key, breaking mutual exclusion.
+    """
     _message_locks.pop(msg_id, None)
 
 
 def _extract_token(request: Request) -> str:
-    """Extract auth token from request headers."""
-    return extract_bearer_token(request)
+    """Extract auth token: passthrough → Bearer → SP fallback."""
+    return resolve_user_token(request)
+
+
+def _detect_auth_mode(request: Request) -> str:
+    """Return 'user' if a real user token is present, 'service_principal' otherwise."""
+    return "user" if extract_bearer_token_optional(request) else "service_principal"
 
 
 async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:
@@ -86,19 +126,14 @@ async def _resolve_gateway_space_id(space_id: str) -> tuple[str, dict | None]:
 def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
     """Build RuntimeSettings using server config overrides (PUT /config) + env defaults.
     If a gateway config is provided, its per-gateway settings override globals.
-    Uses server PAT for Lakebase cache, caller OAuth for Genie/SQL."""
+    Uses app SP OAuth for Lakebase cache, caller OAuth for Genie/SQL."""
     from app.models import RuntimeConfig
     from app.runtime_config import RuntimeSettings
-
-    # For Lakebase: use service token from server config (set via Settings UI), fallback to caller token
-    lakebase_pat = get_effective_setting("lakebase_service_token") or token
 
     # Per-gateway overrides take priority over global settings
     gw = gateway or {}
 
     rc = RuntimeConfig(
-        auth_mode="user",
-        user_pat=lakebase_pat,
         genie_space_id=space_id,
         sql_warehouse_id=gw.get("sql_warehouse_id") or get_effective_setting("sql_warehouse_id") or None,
         similarity_threshold=gw.get("similarity_threshold") or get_effective_setting("similarity_threshold"),
@@ -193,6 +228,7 @@ async def _process_genie_background(
     delay: float = 0,
     max_retries: int = 3,
     gateway_id: str = None,
+    auth_mode: str = "user",
 ):
     """Call Genie in the background. Updates _synthetic_messages when done."""
     logger.info(
@@ -269,6 +305,7 @@ async def _process_genie_background(
                     "from_cache": False,
                     "sql_query": sql_query,
                     "result": None,
+                    "auth_mode": auth_mode,
                 }
                 async with _get_message_lock(msg_id):
                     _synthetic_messages[msg_id] = completed
@@ -294,8 +331,8 @@ async def _process_genie_background(
                         "from_cache": False,
                         "sql_query": sql_query,
                         "result": actual_result,
+                        "auth_mode": auth_mode,
                     }
-                    _release_message_lock(msg_id)
 
                 # Save query log
                 try:
@@ -320,9 +357,8 @@ async def _process_genie_background(
                     "status": result.get("status", "FAILED"),
                     "attachments": [],
                     "error": result.get("error"),
-                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
                 }
-            _release_message_lock(msg_id)
             return
 
         except GenieRateLimitError as e:
@@ -340,9 +376,8 @@ async def _process_genie_background(
                     "status": "FAILED",
                     "attachments": [],
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
-                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                    "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
                 }
-            _release_message_lock(msg_id)
             return
         except Exception as e:
             last_error = str(e)
@@ -363,9 +398,8 @@ async def _process_genie_background(
             "status": "FAILED",
             "attachments": [],
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
-            "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+            "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
         }
-    _release_message_lock(msg_id)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +413,7 @@ async def _handle_query(
     identity: str,
     conversation_id: str = None,
     gateway: dict = None,
+    auth_mode: str = "user",
 ):
     """
     Shared handler for start-conversation and create-message.
@@ -464,11 +499,12 @@ async def _handle_query(
             "from_cache": True,
             "sql_query": sql_query,
             "result": actual_result,
+            "auth_mode": auth_mode,
         }
+        await _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
-            _release_message_lock(msg_id)
 
         # Save query log
         try:
@@ -489,7 +525,8 @@ async def _handle_query(
     # --- Cache MISS → non-blocking background processing ---
     conv_id, msg_id, att_id = _make_synthetic_ids()
     response = _format_executing_response(conv_id, msg_id)
-    response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None}
+    response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode}
+    await _sweep_synthetic_messages()
     async with _get_message_lock(msg_id):
         _synthetic_messages[msg_id] = response
 
@@ -505,6 +542,7 @@ async def _handle_query(
         att_id=att_id,
         conversation_id=conversation_id,
         gateway_id=gateway.get("id") if gateway else None,
+        auth_mode=auth_mode,
     ))
 
     def _on_task_done(t):
@@ -517,11 +555,9 @@ async def _handle_query(
                 "status": "FAILED",
                 "attachments": [],
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
-                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None},
+                "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
             }
-            _release_message_lock(msg_id)
-        elif t.cancelled():
-            _release_message_lock(msg_id)
+        _release_message_lock(msg_id)
 
     task.add_done_callback(_on_task_done)
 
@@ -534,7 +570,7 @@ async def _handle_query(
 # ---------------------------------------------------------------------------
 
 @genie_clone_router.get("/spaces/{space_id}")
-async def clone_get_space(space_id: str, request: Request):
+async def clone_get_space(space_id: str, request: Request, response: Response):
     """Proxy GET space metadata to real Genie API. Resolves gateway_id if needed."""
     token = _extract_token(request)
     real_space_id, _ = await _resolve_gateway_space_id(space_id)
@@ -542,28 +578,30 @@ async def clone_get_space(space_id: str, request: Request):
 
 
 @genie_clone_router.post("/spaces/{space_id}/start-conversation")
-async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request):
+async def clone_start_conversation(space_id: str, body: GenieContentBody, request: Request, response: Response):
     """Clone of POST /api/2.0/genie/spaces/{space_id}/start-conversation.
     Accepts gateway_id (our UUID) or real Genie space_id. Returns immediately."""
     token = _extract_token(request)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
     real_space_id, gateway = await _resolve_gateway_space_id(space_id)
-    return await _handle_query(real_space_id, body.content, token, identity, gateway=gateway)
+    auth_mode = _detect_auth_mode(request)
+    return await _handle_query(real_space_id, body.content, token, identity, gateway=gateway, auth_mode=auth_mode)
 
 
 @genie_clone_router.post("/spaces/{space_id}/conversations/{conversation_id}/messages")
-async def clone_create_message(space_id: str, conversation_id: str, body: GenieContentBody, request: Request):
+async def clone_create_message(space_id: str, conversation_id: str, body: GenieContentBody, request: Request, response: Response):
     """Clone of POST create-message. Resolves gateway_id if needed."""
     token = _extract_token(request)
     identity = request.headers.get("X-Forwarded-Email", "api-user")
     real_space_id, gateway = await _resolve_gateway_space_id(space_id)
-    return await _handle_query(real_space_id, body.content, token, identity, conversation_id=conversation_id, gateway=gateway)
+    auth_mode = _detect_auth_mode(request)
+    return await _handle_query(real_space_id, body.content, token, identity, conversation_id=conversation_id, gateway=gateway, auth_mode=auth_mode)
 
 
 @genie_clone_router.get(
     "/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}"
 )
-async def clone_get_message(space_id: str, conversation_id: str, message_id: str, request: Request):
+async def clone_get_message(space_id: str, conversation_id: str, message_id: str, request: Request, response: Response):
     """Clone of GET get-message. Returns synthetic result or proxies to real Genie."""
     token = _extract_token(request)
 
@@ -571,6 +609,7 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
         stored = _synthetic_messages.get(message_id)
         if not stored:
             raise HTTPException(status_code=404, detail="Message not found")
+        proxy = stored.get("_proxy", {})
         return {k: v for k, v in stored.items() if not k.startswith("_")}
 
     # Real message — proxy to Genie
@@ -582,7 +621,7 @@ async def clone_get_message(space_id: str, conversation_id: str, message_id: str
     "/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}/query-result"
 )
 async def clone_get_query_result(
-    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request
+    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request, response: Response
 ):
     """Clone of GET query-result. Executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)
@@ -610,7 +649,7 @@ async def clone_get_query_result(
     "/spaces/{space_id}/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}/execute-query"
 )
 async def clone_execute_query(
-    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request
+    space_id: str, conversation_id: str, message_id: str, attachment_id: str, request: Request, response: Response
 ):
     """Clone of POST execute-query. Re-executes cached SQL or proxies to real Genie."""
     token = _extract_token(request)

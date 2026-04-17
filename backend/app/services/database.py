@@ -146,3 +146,34 @@ class DatabaseService:
 
     async def get_gateway_stats(self, gateway_id: str) -> dict:
         return await self.backend.get_gateway_stats(gateway_id)
+
+    # --- User roles ---
+
+    async def get_user_role(self, identity: str):
+        return await self.backend.get_user_role(identity)
+
+    async def set_user_role(self, identity: str, role: str, granted_by: str = None):
+        return await self.backend.set_user_role(identity, role, granted_by)
+
+    async def list_user_roles(self) -> list:
+        return await self.backend.list_user_roles()
+
+    async def delete_user_role(self, identity: str):
+        return await self.backend.delete_user_role(identity)
+
+    async def count_owners(self) -> int:
+        return await self.backend.count_owners()
+
+    # --- Group roles ---
+
+    async def get_group_role(self, group_name: str):
+        return await self.backend.get_group_role(group_name)
+
+    async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
+        return await self.backend.set_group_role(group_name, role, granted_by)
+
+    async def list_group_roles(self) -> list:
+        return await self.backend.list_group_roles()
+
+    async def delete_group_role(self, group_name: str):
+        return await self.backend.delete_group_role(group_name)
