@@ -3,8 +3,11 @@ Dynamic storage service that can switch backends at runtime.
 Useful for Databricks Apps where Lakebase config comes from frontend.
 All public methods are async — PGVector operations are awaited directly.
 
-On connection errors, the cached backend is invalidated and recreated from
-scratch (new JWT, new pool) before retrying the operation.
+On transient Lakebase errors, the operation is retried once after a health
+check that reinitializes a closed pool or refreshes an expiring JWT. If the
+retry also fails, the backend is explicitly reinitialized (new pool) before
+a final attempt. Config-level ValueError is re-raised immediately — retries
+cannot fix misconfiguration.
 """
 
 import asyncio
@@ -167,11 +170,11 @@ class DynamicStorageService:
         except ValueError:
             raise
         except Exception as first_err:
+            logger.warning("Lakebase error: %s (%s) — retrying after health check",
+                          type(first_err).__name__, first_err)
             backend = await self._resolve_backend(runtime_settings)
             if not hasattr(backend, 'reinitialize'):
                 raise
-            logger.warning("Lakebase error: %s (%s) — retrying after health check",
-                          type(first_err).__name__, first_err)
             try:
                 return await operation()
             except ValueError:
