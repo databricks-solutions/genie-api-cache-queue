@@ -23,7 +23,6 @@ async def initialize_storage():
     global _storage_backend, db_service
 
     from app.services.storage_dynamic import DynamicStorageService
-
     from app.services.storage_pgvector import PGVectorStorageService
 
     # Token resolution order:

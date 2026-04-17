@@ -1,0 +1,47 @@
+# Databricks workspace sync ignore file
+# Controls what gets uploaded by 'databricks sync' and 'databricks workspace import-dir'
+
+# Version control
+.git/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Databricks metadata
+.databricks/
+
+# Documentation (not needed at runtime)
+docs/
+notebooks/
+scripts/
+
+# Development files
+docker-compose.pgvector.yml
+.env
+.env.*
+!.env.example
+CLAUDE.md
+*.md
+
+# Build artifacts (frontend/dist/ uploaded separately)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test-evidence/
