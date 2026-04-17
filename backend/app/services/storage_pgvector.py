@@ -50,14 +50,14 @@ class PGVectorStorageService:
         connection_string: str,
         table_name: str = "cached_queries",
         query_log_table_name: str = "query_logs",
-        databricks_pat: str = None,
+        lakebase_service_token: str = None,
         databricks_host: str = None,
         lakebase_instance_name: str = None,
         cache_ttl_hours: float = 24
     ):
         self.connection_string = connection_string
         self.table_name = self._normalize_table_name(table_name)
-        self.databricks_pat = databricks_pat
+        self.lakebase_service_token = lakebase_service_token
         # Ensure host has https:// prefix
         self.databricks_host = databricks_host
         if self.databricks_host and not self.databricks_host.startswith("http"):
@@ -107,7 +107,7 @@ class PGVectorStorageService:
         """Initialize connection pool and ensure table exists"""
         _ensure_imports()
 
-        if self.databricks_pat and self.databricks_host and self.lakebase_instance_name:
+        if self.lakebase_service_token and self.databricks_host and self.lakebase_instance_name:
             logger.info("Lakebase mode: getting instance details for %s", self.lakebase_instance_name)
 
             try:
@@ -293,7 +293,7 @@ class PGVectorStorageService:
                 cred_url = f"{self.databricks_host}/api/2.0/database/credentials/generate"
                 response = await http_client.post(
                     cred_url,
-                    headers={"Authorization": f"Bearer {self.databricks_pat}"},
+                    headers={"Authorization": f"Bearer {self.lakebase_service_token}"},
                     json={"request_id": str(uuid.uuid4())}
                 )
                 response.raise_for_status()
@@ -304,14 +304,14 @@ class PGVectorStorageService:
                 # Credential generation failed (e.g. token lacks database scope).
                 # Use the provided token directly — works with Autoscaling Lakebase.
                 logger.info("Credential generation failed (%s), using token directly as password", e)
-                oauth_token = self.databricks_pat
+                oauth_token = self.lakebase_service_token
 
             # Get current username
             try:
                 user_url = f"{self.databricks_host}/api/2.0/preview/scim/v2/Me"
                 response = await http_client.get(
                     user_url,
-                    headers={"Authorization": f"Bearer {self.databricks_pat}"}
+                    headers={"Authorization": f"Bearer {self.lakebase_service_token}"}
                 )
                 response.raise_for_status()
                 username = response.json().get("userName")
@@ -351,7 +351,7 @@ class PGVectorStorageService:
             return WorkspaceClient()
 
         # Local dev: use the configured lakebase_service_token
-        token = self.databricks_pat or ""
+        token = self.lakebase_service_token or ""
         if ":" in token and not token.startswith("dapi") and not token.startswith("eyJ"):
             client_id, client_secret = token.split(":", 1)
             logger.info("Lakebase auth: SP OAuth (client_id=%s...)", client_id[:12])
@@ -410,7 +410,7 @@ class PGVectorStorageService:
             url = f"{self.databricks_host}/api/2.0/database/instances/{instance_name}"
             response = await http_client.get(
                 url,
-                headers={"Authorization": f"Bearer {self.databricks_pat}"}
+                headers={"Authorization": f"Bearer {self.lakebase_service_token}"}
             )
             response.raise_for_status()
             data = response.json()
