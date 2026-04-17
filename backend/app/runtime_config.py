@@ -63,12 +63,16 @@ class RuntimeSettings:
 
     @property
     def similarity_threshold(self) -> float:
-        return (self.runtime.similarity_threshold if self.runtime and self.runtime.similarity_threshold
+        # `is not None` — a user-set threshold of 0 is a valid "match everything"
+        # value and must not fall through to the base default.
+        return (self.runtime.similarity_threshold if self.runtime and self.runtime.similarity_threshold is not None
                 else self.base.similarity_threshold)
 
     @property
     def max_queries_per_minute(self) -> int:
-        return (self.runtime.max_queries_per_minute if self.runtime and self.runtime.max_queries_per_minute
+        # `is not None` — 0 is a valid "block all traffic" value for rate limits;
+        # a truthy check would silently replace it with the base default.
+        return (self.runtime.max_queries_per_minute if self.runtime and self.runtime.max_queries_per_minute is not None
                 else self.base.max_queries_per_minute)
 
     @property
@@ -123,6 +127,44 @@ class RuntimeSettings:
             return self.runtime.cache_validation_enabled
         val = get_effective_setting("cache_validation_enabled")
         return val if val is not None else True
+
+    @property
+    def intent_split_enabled(self) -> bool:
+        from app.api.config_store import get_effective_setting
+        if self.runtime and self.runtime.intent_split_enabled is not None:
+            return self.runtime.intent_split_enabled
+        val = get_effective_setting("intent_split_enabled")
+        return val if val is not None else True
+
+    @property
+    def normalization_model(self) -> Optional[str]:
+        return self._resolve_model_field("normalization_model")
+
+    @property
+    def validation_model(self) -> Optional[str]:
+        return self._resolve_model_field("validation_model")
+
+    @property
+    def intent_split_model(self) -> Optional[str]:
+        return self._resolve_model_field("intent_split_model")
+
+    def _resolve_model_field(self, name: str) -> Optional[str]:
+        """Resolve a per-service LLM endpoint override.
+
+        `is not None` + empty-string guard — an empty string is treated as
+        'unset' so the gateway falls through to the global setting. This
+        matches the normalization done at write time in
+        storage_pgvector.update_gateway, and keeps the semantics robust if
+        a legacy row ever holds '' instead of NULL.
+        """
+        from app.api.config_store import get_effective_setting
+        runtime_value = getattr(self.runtime, name, None) if self.runtime else None
+        if runtime_value is not None and runtime_value != "":
+            return runtime_value
+        global_value = get_effective_setting(name)
+        if global_value is not None and global_value != "":
+            return global_value
+        return None
 
     @property
     def full_table_name(self) -> str:

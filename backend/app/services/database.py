@@ -147,6 +147,17 @@ class DatabaseService:
     async def get_gateway_stats(self, gateway_id: str) -> dict:
         return await self.backend.get_gateway_stats(gateway_id)
 
+    # --- Global settings ---
+
+    async def get_global_settings(self) -> dict:
+        return await self.backend.get_global_settings()
+
+    async def update_global_settings(self, updates: dict, updated_by: Optional[str] = None) -> None:
+        await self.backend.update_global_settings(updates, updated_by)
+
+    async def delete_global_setting(self, key: str) -> bool:
+        return await self.backend.delete_global_setting(key)
+
     # --- User roles ---
 
     async def get_user_role(self, identity: str):

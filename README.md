@@ -175,7 +175,9 @@ Each gateway has a detail page with five tabs.
 
 ## Global Settings
 
-Configure once in the **Settings** page. These apply as defaults for all gateways:
+Configure once in the **Settings** page. These are the **defaults for new gateways** and the **runtime fallback** when a gateway leaves a field unset. Each gateway can override any of these in its own Settings tab.
+
+Global settings are persisted to Lakebase (the `global_settings` table in the app's configured schema), so changes survive redeploys, container restarts, and rollbacks. Only the `lakebase_service_token` is session-scoped (kept in memory) since Databricks Apps inject SP credentials at runtime.
 
 ![Settings](docs/screenshots/09-settings.png)
 
@@ -186,7 +188,9 @@ Configure once in the **Settings** page. These apply as defaults for all gateway
 | **Lakebase Service Token** | The app's built-in SP handles authentication automatically — only set this to override |
 | **Embedding Provider** | `databricks` (Foundation Model API) or `local` |
 | **Question Normalization** | LLM rewrites questions before embedding to improve cache hit rate |
+| **Intent Split** | LLM isolates the latest intent in multi-turn conversations |
 | **Cache Validation** | LLM validates cached results are relevant before returning them |
+| **Normalization / Intent Split / Validation Model** | Serving endpoint override for each LLM stage. Leave blank to use `databricks-llama-4-maverick` |
 
 ---
 

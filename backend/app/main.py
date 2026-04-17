@@ -31,6 +31,13 @@ async def lifespan(app: FastAPI):
     from app.services.database import initialize_storage
     storage = await initialize_storage()
 
+    # Hydrate global settings from Lakebase so they survive redeploys
+    try:
+        from app.api.config_store import load_global_settings_from_db
+        await load_global_settings_from_db()
+    except Exception as e:
+        logger.warning("Global settings hydrate failed (continuing with env defaults): %s", e)
+
     # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
     if settings.storage_backend in ("lakebase", "pgvector") and settings.lakebase_instance:

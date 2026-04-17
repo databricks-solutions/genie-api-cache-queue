@@ -50,11 +50,14 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
     normalization_model: gateway.normalization_model || '',
     cache_validation_enabled: gateway.cache_validation_enabled !== false,
     validation_model: gateway.validation_model || '',
+    intent_split_enabled: gateway.intent_split_enabled !== false,
+    intent_split_model: gateway.intent_split_model || '',
     embedding_provider: gateway.embedding_provider || 'databricks',
     databricks_embedding_endpoint: gateway.databricks_embedding_endpoint || 'databricks-gte-large-en',
     shared_cache: gateway.shared_cache !== false,
     sql_warehouse_id: gateway.sql_warehouse_id || '',
   })
+  const [globalDefaults, setGlobalDefaults] = useState(null)
 
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -74,6 +77,9 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
       .then((data) => setWarehouses(data.warehouses || []))
       .catch(() => setWarehouses([]))
       .finally(() => setWarehousesLoading(false))
+
+    // Fetch global defaults so the UI can hint what an "empty" field falls back to
+    api.getSettings().then(setGlobalDefaults).catch(() => setGlobalDefaults(null))
   }, [])
 
   useEffect(() => {
@@ -92,16 +98,22 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
     try {
       setSaveError(null)
       setSaving(true)
+      // Preserve user-set 0 (valid "match everything" / "block all traffic");
+      // NaN (empty input) falls through to the undefined backend default.
+      const threshold = parseFloat(form.similarity_threshold)
+      const qpm = parseInt(form.max_queries_per_minute)
       const updates = {
         caching_enabled: form.caching_enabled,
-        similarity_threshold: parseFloat(form.similarity_threshold) || 0.92,
+        similarity_threshold: Number.isFinite(threshold) ? threshold : undefined,
         cache_ttl_seconds: ttlToSeconds(form.cache_ttl_value, form.cache_ttl_unit),
-        max_qpm: parseInt(form.max_queries_per_minute) || 5,
-        max_queries_per_minute: parseInt(form.max_queries_per_minute) || 5,
+        max_qpm: Number.isFinite(qpm) ? qpm : undefined,
+        max_queries_per_minute: Number.isFinite(qpm) ? qpm : undefined,
         question_normalization_enabled: form.question_normalization_enabled,
-        normalization_model: form.normalization_model || undefined,
+        normalization_model: form.normalization_model ?? '',
         cache_validation_enabled: form.cache_validation_enabled,
-        validation_model: form.validation_model || undefined,
+        validation_model: form.validation_model ?? '',
+        intent_split_enabled: form.intent_split_enabled,
+        intent_split_model: form.intent_split_model ?? '',
         embedding_provider: form.embedding_provider,
         databricks_embedding_endpoint: form.databricks_embedding_endpoint,
         shared_cache: form.shared_cache,
@@ -120,24 +132,28 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
   const handleResetDefaults = async () => {
     try {
       const defaults = await api.getSettings().catch(() => null)
-      setForm({
+      setForm((prev) => ({
+        ...prev,
+        caching_enabled: defaults?.caching_enabled ?? true,
         similarity_threshold: String(defaults?.similarity_threshold ?? 0.92),
         cache_ttl_value: '24',
         cache_ttl_unit: 'hours',
         max_queries_per_minute: String(defaults?.max_queries_per_minute ?? 5),
         question_normalization_enabled: defaults?.question_normalization_enabled ?? true,
-        normalization_model: defaults?.normalization_model || '',
+        normalization_model: '',
         cache_validation_enabled: defaults?.cache_validation_enabled ?? true,
-        validation_model: defaults?.validation_model || '',
+        validation_model: '',
+        intent_split_enabled: defaults?.intent_split_enabled ?? true,
+        intent_split_model: '',
         embedding_provider: defaults?.embedding_provider ?? 'databricks',
         databricks_embedding_endpoint: defaults?.databricks_embedding_endpoint ?? 'databricks-gte-large-en',
         shared_cache: defaults?.shared_cache ?? true,
-        sql_warehouse_id: form.sql_warehouse_id,
-      })
+      }))
       setSaved(false)
     } catch {
       setForm(prev => ({
         ...prev,
+        caching_enabled: true,
         similarity_threshold: '0.92',
         cache_ttl_value: '24',
         cache_ttl_unit: 'hours',
@@ -146,6 +162,8 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
         normalization_model: '',
         cache_validation_enabled: true,
         validation_model: '',
+        intent_split_enabled: true,
+        intent_split_model: '',
         embedding_provider: 'databricks',
         databricks_embedding_endpoint: 'databricks-gte-large-en',
         shared_cache: true,
@@ -155,8 +173,19 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
 
   const inputClass = 'h-8 w-full border border-dbx-border-input rounded px-3 text-[13px] text-dbx-text bg-dbx-bg outline-none focus:border-dbx-blue transition-colors'
 
+  const globalHint = (key, formatter = (v) => v) => {
+    if (!globalDefaults) return null
+    const v = globalDefaults[key]
+    if (v === undefined || v === null || v === '') return null
+    return <span className="text-[12px] text-dbx-text-secondary ml-2">global: {formatter(v)}</span>
+  }
+
   return (
     <div className="max-w-xl space-y-6">
+      <div className="px-3 py-2 rounded bg-dbx-neutral-hover border border-dbx-border text-[12px] text-dbx-text-secondary">
+        Per-gateway settings override the global defaults (Settings page). Leave a model field blank to inherit from global.
+      </div>
+
       {/* ── Semantic Cache (top-level toggle) ── */}
       <SettingsField label="Semantic Cache" description="Enable cache lookup and storage for this gateway. When disabled, every query goes directly to Genie.">
         <ToggleSwitch checked={form.caching_enabled} onChange={(v) => handleChange('caching_enabled', v)} />
@@ -190,11 +219,24 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
                 onChange={(v) => handleChange('question_normalization_enabled', v)} />
             </SettingsField>
             {form.question_normalization_enabled && (
-              <SettingsField label="Normalization Model" description="LLM endpoint for normalization">
-                <EndpointSelect value={form.normalization_model} onChange={(v) => handleChange('normalization_model', v)}
-                  endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat"
-                  placeholder="Default (from global settings)" />
-              </SettingsField>
+              <>
+                <SettingsField label={<>Normalization Model {globalHint('normalization_model')}</>} description="LLM endpoint for normalization. Empty = use global.">
+                  <EndpointSelect value={form.normalization_model} onChange={(v) => handleChange('normalization_model', v)}
+                    endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat"
+                    placeholder="Inherit from global settings" />
+                </SettingsField>
+                <SettingsField label="Intent Split" description="Runs before Question Normalization to isolate the latest intent when a conversation switches topics. Only active while Question Normalization is on.">
+                  <ToggleSwitch checked={form.intent_split_enabled}
+                    onChange={(v) => handleChange('intent_split_enabled', v)} />
+                </SettingsField>
+                {form.intent_split_enabled && (
+                  <SettingsField label={<>Intent Split Model {globalHint('intent_split_model')}</>} description="LLM endpoint for intent split. Empty = use global.">
+                    <EndpointSelect value={form.intent_split_model} onChange={(v) => handleChange('intent_split_model', v)}
+                      endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat"
+                      placeholder="Inherit from global settings" />
+                  </SettingsField>
+                )}
+              </>
             )}
           </div>
 
@@ -204,10 +246,10 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
                 onChange={(v) => handleChange('cache_validation_enabled', v)} />
             </SettingsField>
             {form.cache_validation_enabled && (
-              <SettingsField label="Validation Model" description="LLM endpoint for cache validation">
+              <SettingsField label={<>Validation Model {globalHint('validation_model')}</>} description="LLM endpoint for cache validation. Empty = use global.">
                 <EndpointSelect value={form.validation_model} onChange={(v) => handleChange('validation_model', v)}
                   endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat"
-                  placeholder="Default (from global settings)" />
+                  placeholder="Inherit from global settings" />
               </SettingsField>
             )}
           </div>
