@@ -3,12 +3,19 @@
 
 # Version control
 .git/
+.claude/
 
 # IDE / editor
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Python virtual envs (runtime-provided on Databricks Apps)
+venv/
+.venv/
+backend/venv/
+backend/.venv/
 
 # Databricks metadata
 .databricks/

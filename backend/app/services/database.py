@@ -127,6 +127,9 @@ class DatabaseService:
     async def clear_cache(self, runtime_settings=None, gateway_id=None) -> int:
         return await self.backend.clear_cache(runtime_settings, gateway_id=gateway_id)
 
+    async def delete_cache_entries(self, entry_ids, gateway_id, runtime_settings=None) -> int:
+        return await self.backend.delete_cache_entries(entry_ids, gateway_id, runtime_settings=runtime_settings)
+
     # --- Gateway CRUD ---
 
     async def create_gateway(self, config: dict) -> dict:

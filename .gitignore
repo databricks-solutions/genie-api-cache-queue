@@ -62,3 +62,6 @@ test-evidence/
 
 # Claude Code
 CLAUDE.md
+
+# Auto-generated version file (written by install.sh at deploy time)
+backend/app/_version.py
