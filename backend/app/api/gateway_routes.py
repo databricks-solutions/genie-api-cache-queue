@@ -5,7 +5,6 @@ Manages gateway configurations and provides workspace discovery endpoints.
 
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -228,24 +227,6 @@ async def get_gateway_cache(gateway_id: str, req: Request):
         logger.exception("Error listing gateway cache")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
-@gateway_router.delete("/gateways/{gateway_id}/cache")
-async def clear_gateway_cache(gateway_id: str, req: Request):
-    """Clear all cached entries for a specific gateway. Manage or above."""
-    await require_role(req, "manage")
-    try:
-        gw = await _db.db_service.get_gateway(gateway_id)
-        if not gw:
-            raise HTTPException(status_code=404, detail="Gateway not found")
-        count = await _db.db_service.clear_cache(runtime_settings=None, gateway_id=gateway_id)
-        logger.info("Cache cleared for gateway %s: %d entries removed", gateway_id, count)
-        return {"deleted": count, "gateway_id": gateway_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Error clearing gateway cache")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 class CacheDeleteRequest(BaseModel):

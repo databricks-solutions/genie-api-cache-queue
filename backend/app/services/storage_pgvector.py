@@ -1115,7 +1115,15 @@ class PGVectorStorageService:
             rows = await conn.fetch(
                 f"SELECT group_name, role, granted_by, granted_at FROM {self.group_roles_table_name} ORDER BY granted_at DESC"
             )
-            return [dict(r) for r in rows]
+            return [
+                {
+                    "group_name": r["group_name"],
+                    "role": r["role"],
+                    "granted_by": r["granted_by"],
+                    "granted_at": _to_utc_iso(r["granted_at"]),
+                }
+                for r in rows
+            ]
 
     async def delete_group_role(self, group_name: str):
         if not self.pool:
