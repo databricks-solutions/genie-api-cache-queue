@@ -343,11 +343,11 @@ class DynamicStorageService:
             return await backend.get_gateway_stats(gateway_id)
         return backend.get_gateway_stats(gateway_id)
 
-    # --- User roles CRUD (Lakebase only) ---
+    # --- User & group roles CRUD (Lakebase only) ---
 
-    def _require_pgvector_backend(self):
-        """Return the default backend if it supports pgvector, else raise."""
-        backend = self.default_backend
+    async def _resolve_rbac_backend(self):
+        """Resolve default backend with health check; require pgvector for RBAC."""
+        backend = await self._resolve_backend(None)
         if not hasattr(backend, 'pool'):
             raise ValueError(
                 "RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings."
@@ -355,33 +355,55 @@ class DynamicStorageService:
         return backend
 
     async def get_user_role(self, identity: str):
-        backend = self._require_pgvector_backend()
-        return await backend.get_user_role(identity)
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.get_user_role(identity)
+        return await self._with_reconnect(_op, None)
 
     async def set_user_role(self, identity: str, role: str, granted_by: str = None):
-        backend = self._require_pgvector_backend()
-        return await backend.set_user_role(identity, role, granted_by)
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.set_user_role(identity, role, granted_by)
+        return await self._with_reconnect(_op, None)
 
     async def list_user_roles(self) -> list:
-        backend = self._require_pgvector_backend()
-        return await backend.list_user_roles()
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.list_user_roles()
+        return await self._with_reconnect(_op, None)
 
     async def delete_user_role(self, identity: str):
-        backend = self._require_pgvector_backend()
-        return await backend.delete_user_role(identity)
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.delete_user_role(identity)
+        return await self._with_reconnect(_op, None)
+
+    async def get_group_role(self, group_name: str):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.get_group_role(group_name)
+        return await self._with_reconnect(_op, None)
 
     async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
-        backend = self._require_pgvector_backend()
-        return await backend.set_group_role(group_name, role, granted_by)
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.set_group_role(group_name, role, granted_by)
+        return await self._with_reconnect(_op, None)
 
     async def list_group_roles(self) -> list:
-        backend = self._require_pgvector_backend()
-        return await backend.list_group_roles()
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.list_group_roles()
+        return await self._with_reconnect(_op, None)
 
     async def delete_group_role(self, group_name: str):
-        backend = self._require_pgvector_backend()
-        return await backend.delete_group_role(group_name)
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.delete_group_role(group_name)
+        return await self._with_reconnect(_op, None)
 
     async def count_owners(self) -> int:
-        backend = self._require_pgvector_backend()
-        return await backend.count_owners()
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.count_owners()
+        return await self._with_reconnect(_op, None)

@@ -119,6 +119,11 @@ async def _check_last_owner(
 async def assign_role(email: str, body: RoleAssignment, req: Request):
     """Assign a role to a user. Manage or above."""
     identity, token, caller_role = await require_role(req, "manage")
+    if identity and email.lower() == identity.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot change your own role.",
+        )
     if body.role not in ROLES:
         raise HTTPException(
             status_code=400,
@@ -163,6 +168,11 @@ async def assign_role(email: str, body: RoleAssignment, req: Request):
 async def remove_user_role(email: str, req: Request):
     """Remove explicit role assignment (reverts to default 'use'). Manage or above."""
     identity, token, caller_role = await require_role(req, "manage")
+    if identity and email.lower() == identity.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot remove your own access.",
+        )
     from app.api.config_store import get_effective_setting
     from app.auth import ensure_https
     from app.config import get_settings

@@ -217,6 +217,7 @@ export default function SettingsPage() {
   const [workspaceGroups, setWorkspaceGroups] = useState([])
   const [removeTarget, setRemoveTarget] = useState(null)
   const [removing, setRemoving] = useState(false)
+  const [removeError, setRemoveError] = useState(null)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -353,12 +354,18 @@ export default function SettingsPage() {
   }
 
   const handleRemovePrincipal = (principal) => {
+    setRemoveError(null)
     setRemoveTarget(principal)
+  }
+
+  const cancelRemovePrincipal = () => {
+    setRemoveTarget(null)
+    setRemoveError(null)
   }
 
   const confirmRemovePrincipal = async () => {
     if (!removeTarget) return
-    setPrincipalError(null)
+    setRemoveError(null)
     setRemoving(true)
     try {
       if (removeTarget.type === 'user') {
@@ -369,7 +376,7 @@ export default function SettingsPage() {
       setPrincipals(prev => prev.filter(p => !(p.type === removeTarget.type && p.identity === removeTarget.identity)))
       setRemoveTarget(null)
     } catch (err) {
-      setPrincipalError(err.response?.data?.detail || 'Failed to remove.')
+      setRemoveError(err.response?.data?.detail || 'Failed to remove.')
     } finally {
       setRemoving(false)
     }
@@ -733,7 +740,8 @@ export default function SettingsPage() {
               ) : (
                 <div className="space-y-0 border border-dbx-border rounded overflow-hidden">
                   {principals.map((p) => {
-                    const isSelf = p.type === 'user' && p.identity === currentIdentity
+                    const isSelf = p.type === 'user' && !!currentIdentity &&
+                      (p.identity || '').toLowerCase() === currentIdentity.toLowerCase()
                     return (
                     <div key={`${p.type}-${p.identity}`}
                       className="flex items-center gap-3 px-4 py-3 border-b last:border-b-0 border-dbx-border">
@@ -824,7 +832,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      <Modal isOpen={!!removeTarget} onClose={() => !removing && setRemoveTarget(null)} title="Remove Access" maxWidth="max-w-md">
+      <Modal isOpen={!!removeTarget} onClose={() => !removing && cancelRemovePrincipal()} title="Remove Access" maxWidth="max-w-md">
         <div className="flex flex-col items-center text-center pt-2">
           <div className="w-12 h-12 rounded-full bg-dbx-status-red-bg flex items-center justify-center mb-4">
             <AlertTriangle size={24} className="text-dbx-text-danger" />
@@ -837,9 +845,14 @@ export default function SettingsPage() {
               {removeTarget ? (removeTarget.type === 'group' ? groupLabel(removeTarget.identity) : (removeTarget.displayName || removeTarget.identity)) : ''}
             </span> will lose access to this app.
           </p>
+          {removeError && (
+            <div className="w-full mb-4 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[12px] text-left">
+              {removeError}
+            </div>
+          )}
           <div className="flex gap-3 w-full">
             <button
-              onClick={() => setRemoveTarget(null)}
+              onClick={cancelRemovePrincipal}
               disabled={removing}
               className="flex-1 h-8 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
             >
