@@ -355,6 +355,7 @@ class PGVectorStorageService:
             logger.info("Lakebase auth: app built-in SP (DATABRICKS_CLIENT_ID)")
             return WorkspaceClient()
 
+        # Local dev: use the configured lakebase_service_token
         token = self.lakebase_service_token or ""
         if ":" in token and not token.startswith("dapi") and not token.startswith("eyJ"):
             client_id, client_secret = token.split(":", 1)

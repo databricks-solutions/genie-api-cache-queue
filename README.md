@@ -32,22 +32,36 @@ App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/)
 - A **Genie Space** and **SQL Warehouse** in your workspace
 - A **Lakebase Autoscaling** project for persistent cache (pgvector)
 - Node.js + npm (for building the frontend)
+- Python 3
 
 ### 1. Deploy with the Install Script
 
-The guided installer handles everything: frontend build, app deployment, OAuth scopes, Lakebase provisioning, and SP configuration.
+The guided installer handles the full deployment end-to-end:
 
 ```bash
 ./scripts/install.sh
 ```
 
-The script walks you through each step interactively. For subsequent deploys (code updates, config changes), re-run with `--update` to skip prompts and reuse your saved configuration:
+The script walks you through each step interactively:
+
+1. Checks prerequisites (Databricks CLI, Node.js, npm, Python 3)
+2. Prompts for Databricks profile, app name, and workspace path
+3. Provisions a Lakebase Autoscaling project (or reuses an existing one)
+4. Builds the frontend and syncs all files to your workspace
+5. Creates and deploys the Databricks App
+6. Sets OAuth scopes (`sql`, `serving.serving-endpoints`, `dashboards.genie`)
+7. Grants the app's service principal `CAN_MANAGE` on the Lakebase project
+8. Creates the SP's PostgreSQL role via `databricks_create_role()`
+
+For subsequent deploys (code updates, config changes), re-run with `--update` to skip prompts and reuse your saved configuration (stored in `.env.deploy`):
 
 ```bash
 ./scripts/install.sh --update
 ```
 
 > **Note:** The installer sets the `dashboards.genie` OAuth scope, which allows the app to call the Genie API on behalf of the logged-in user. Without it, gateway creation cannot list Genie Spaces and queries will fail with `403 Invalid scope`.
+>
+> **If you update scopes on an existing app, sign out and sign back in.** OAuth tokens already issued to your browser session do not retroactively gain new scopes. Open the app URL in a new incognito window (or clear cookies for `*.databricksapps.com`) to trigger a fresh consent flow.
 
 <details>
 <summary><strong>Manual deployment (without the install script)</strong></summary>
@@ -64,9 +78,8 @@ databricks apps deploy genie-cache-queue \
   --source-code-path /Workspace/Users/<your-email>/genie-cache-queue
 
 # Configure OAuth scopes (required once after first deploy)
-databricks apps update genie-cache-queue --json '{
-  "user_api_scopes": ["sql", "serving.serving-endpoints", "dashboards.genie"]
-}'
+databricks api patch "/api/2.0/apps/genie-cache-queue?update_mask=user_api_scopes" \
+  --json '{"user_api_scopes": ["sql", "serving.serving-endpoints", "dashboards.genie"]}'
 ```
 
 After deploying manually, you must also complete the [Lakebase Setup](#lakebase-setup) steps below.
@@ -181,7 +194,7 @@ Configure once in the **Settings** page. These apply as defaults for all gateway
 
 Lakebase (pgvector) is the storage backend for all cached queries. Inside Databricks Apps, the app automatically uses its **built-in Service Principal** — no manual credential configuration required.
 
-> **Tip:** The install script (`./scripts/install.sh`) handles Lakebase provisioning, SP grants, and PostgreSQL role creation automatically. The steps below are only needed for manual deployments or troubleshooting.
+> **Tip:** If you deployed with `./scripts/install.sh`, Lakebase provisioning, SP grants, and PostgreSQL role creation are handled automatically. The steps below are only needed for manual deployments or troubleshooting.
 
 ### 1. Grant the App's SP Access to Lakebase
 

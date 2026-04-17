@@ -16,6 +16,11 @@ command:
   - "--port"
   - "8000"
 
+# OAuth scopes and resources are NOT read from app.yaml by Databricks Apps.
+# Both are applied at deploy time via PATCH /api/2.0/apps/{name} in install.sh.
+# Keeping them out of app.yaml avoids confusion and prevents direct
+# `databricks apps deploy` calls from clearing the configuration.
+
 # Compute configuration
 compute:
   size: small  # small (2 cores, 8GB), medium (4 cores, 16GB), large (8 cores, 32GB)
@@ -33,8 +38,3 @@ env:
     value: public
 
 # Static files served by FastAPI (not needed here)
-
-# Resource limits
-resources:
-  cpu: 2
-  memory: 8Gi

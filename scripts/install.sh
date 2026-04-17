@@ -4,22 +4,25 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # install.sh — Guided installer for Genie Gateway
 #
-# Interactive script that:
-#   1. Checks prerequisites (databricks CLI, node, npm, python3)
-#   2. Asks for Databricks profile
-#   3. Asks for app name
-#   4. Asks for workspace path
-#   5. Asks for Lakebase configuration
-#   6. Builds the frontend
-#   7. Writes .env.deploy
-#   8. Patches app.yaml and syncs to workspace
-#   9. Deploys the Databricks App
-#  10. Sets OAuth scopes (critical)
-#  11. Waits for deployment
-#  12. Resolves app service principal
-#  13. Prints summary with automated/manual sections
+# Ordering is load-bearing: the app's Postgres role + grants must exist
+# BEFORE the container boots, or FastAPI's lifespan crashes on password
+# auth. Steps:
+#   1-6. Prereqs + prompts (profile, app name, workspace path, Lakebase)
+#   7.   Build frontend
+#   8.   Write .env.deploy
+#   9.   Stage project files locally (no upload yet)
+#  10.   apps create + wait for compute ACTIVE (no deploy)
+#  11.   Resolve SP, grant CAN_MANAGE, create Postgres role + grants,
+#        resolve schema name (fallback to "<name>_<sp-prefix>" if the
+#        desired schema is owned by a different SP)
+#  12.   Patch app.yaml with resolved values, upload to workspace
+#  13.   Combined PATCH for user_api_scopes + resources
+#  14.   apps deploy (blocking — safe now that DB is ready)
+#  15.   Wait for RUNNING + health check
 #
-# Re-run with --update to skip interactive prompts (reads .env.deploy)
+# Re-run with --update to skip interactive prompts (reads .env.deploy).
+# Idempotent: safe to re-run after delete + recreate (the SP rotates, and
+# Step 11 auto-picks a fresh schema name when the old one is orphan-owned).
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -257,15 +260,34 @@ if [ "$STORAGE_BACKEND" = "pgvector" ] && [ -n "$LAKEBASE_INSTANCE" ]; then
             --profile "$PROFILE" &>/dev/null; then
         _ok "Lakebase project '$LAKEBASE_INSTANCE' already exists"
     else
+        # Retry create to tolerate soft-delete reservation windows (the
+        # control plane may still hold the name for ~minutes after a prior
+        # delete, returning "already exists" even though GET says missing).
         _info "Creating Lakebase Autoscaling project '$LAKEBASE_INSTANCE' ..."
-        if ! databricks api post "/api/2.0/postgres/projects?project_id=$LAKEBASE_INSTANCE" \
-                --profile "$PROFILE" \
-                --json "{\"display_name\": \"$LAKEBASE_INSTANCE\"}" 2>&1; then
-            _error "Failed to create Lakebase project '$LAKEBASE_INSTANCE'."
-            echo "  Remediation: create it manually in Catalog Explorer > Lakebase"
-            echo "  The app will not start until Lakebase is properly configured."
-        else
+        CREATE_OK=false
+        for i in 1 2 3 4 5 6; do  # up to ~3 min, 30s between attempts
+            CREATE_ERR=$(databricks api post "/api/2.0/postgres/projects?project_id=$LAKEBASE_INSTANCE" \
+                    --profile "$PROFILE" \
+                    --json "{\"display_name\": \"$LAKEBASE_INSTANCE\"}" 2>&1 >/dev/null || true)
+            if [ -z "$CREATE_ERR" ]; then
+                CREATE_OK=true
+                break
+            fi
+            if echo "$CREATE_ERR" | grep -qi 'already exists'; then
+                _info "Name not yet released after prior delete (attempt $i/6), retrying in 30s ..."
+                sleep 30
+            else
+                _error "Lakebase create failed: $CREATE_ERR"
+                break
+            fi
+        done
+        if [ "$CREATE_OK" = true ]; then
             _ok "Lakebase project creation initiated"
+        else
+            _error "Failed to create Lakebase project '$LAKEBASE_INSTANCE'."
+            echo "  Remediation: create it manually in Catalog Explorer > Lakebase,"
+            echo "  or try again in a few minutes (soft-delete reservation ~5 min)."
+            exit 1
         fi
     fi
 
@@ -304,8 +326,9 @@ except:
     if [ "$LAKEBASE_READY" = true ]; then
         _ok "Lakebase endpoint is ACTIVE"
     else
-        _warn "Lakebase endpoint not ready yet (state: $EP_STATE)."
-        _info "The endpoint may need more time. Check status before deploying."
+        _error "Lakebase endpoint did not become ACTIVE (state: $EP_STATE)."
+        echo "  Cannot proceed without a ready Lakebase. Try again in a few minutes."
+        exit 1
     fi
 fi
 
@@ -387,45 +410,16 @@ fi
 echo "  └───────────────────────────────────────────────────────────┘"
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 9: Patch app.yaml and sync to workspace
+# Step 9: Stage project files (local only — sync happens after SP resolution)
 # ══════════════════════════════════════════════════════════════════════════
-_header "Step 9: Syncing files to workspace"
+# We defer the workspace upload until Step 12 because app.yaml's
+# LAKEBASE_SCHEMA may be auto-adjusted in Step 11 (see the schema-ownership
+# fallback). Staging a clean copy locally now lets us patch once and sync
+# the final version.
+_header "Step 9: Staging project files"
 
-# Create patched app.yaml in a temp file (local file stays untouched)
-PATCHED_APP_YAML=$(mktemp)
-trap 'rm -f "$PATCHED_APP_YAML"' EXIT  # updated later to also clean staging dir
-
-python3 -c "
-import re, sys
-
-content = open('$PROJECT_DIR/app.yaml').read()
-
-# Patch the app name
-content = re.sub(r'^(name:).*$', r'\1 $APP_NAME', content, flags=re.MULTILINE)
-
-# Patch env var values
-replacements = {
-    'STORAGE_BACKEND': '$STORAGE_BACKEND',
-    'LAKEBASE_INSTANCE': '$LAKEBASE_INSTANCE',
-    'LAKEBASE_CATALOG': '$LAKEBASE_CATALOG',
-    'LAKEBASE_SCHEMA': '$LAKEBASE_SCHEMA',
-}
-for key, val in replacements.items():
-    content = re.sub(
-        rf'(- name: {key}\n\s+value:).*',
-        rf'\1 {val}',
-        content
-    )
-
-sys.stdout.write(content)
-" > "$PATCHED_APP_YAML"
-
-_ok "Patched app.yaml with deployment settings"
-
-# Stage files in a temp directory (clean copy without dev artifacts)
-_info "Staging project files ..."
 STAGING_DIR=$(mktemp -d)
-trap 'rm -rf "$PATCHED_APP_YAML" "$STAGING_DIR"' EXIT
+trap 'rm -rf "$STAGING_DIR"' EXIT
 
 rsync -a \
     --exclude='.git' \
@@ -451,27 +445,15 @@ rsync -a \
 # Copy the built frontend into the staging dir
 cp -r "$FRONTEND_DIR/dist" "$STAGING_DIR/frontend/dist"
 
-# Replace app.yaml with the patched version
-cp "$PATCHED_APP_YAML" "$STAGING_DIR/app.yaml"
-
 _ok "Files staged ($(du -sh "$STAGING_DIR" | cut -f1) total)"
 
-# Upload to workspace
-_info "Uploading to $WS_PATH ..."
-if ! databricks workspace import-dir "$STAGING_DIR" "$WS_PATH" \
-        --profile "$PROFILE" --overwrite 2>&1; then
-    _error "Failed to upload files to workspace."
-    echo "  Remediation:"
-    echo "    1. Check workspace permissions for $WS_PATH"
-    echo "    2. Try: databricks workspace import-dir . $WS_PATH --profile $PROFILE --overwrite"
-    exit 1
-fi
-_ok "Files uploaded to workspace"
-
 # ══════════════════════════════════════════════════════════════════════════
-# Step 10: Create or deploy the app
+# Step 10: Create or resume the app (no deploy yet)
 # ══════════════════════════════════════════════════════════════════════════
-_header "Step 10: Deploying app"
+# We split create vs. deploy so the DB role and schema (Step 11) can be
+# provisioned BEFORE the container boots. A fresh deploy would otherwise
+# race the `initialize_storage()` lifespan and crash on password auth.
+_header "Step 10: Creating / waking the app"
 
 APP_EXISTS=false
 if databricks apps get "$APP_NAME" --profile "$PROFILE" &>/dev/null; then
@@ -555,56 +537,415 @@ fi
 
 _ok "Compute is ACTIVE (app=$APP_STATE)"
 
-_info "Deploying source code ..."
-if ! databricks apps deploy "$APP_NAME" \
-        --source-code-path "$WS_PATH" \
-        --profile "$PROFILE" --no-wait 2>&1; then
-    _error "Deployment failed."
-    echo "  Remediation:"
-    echo "    databricks apps deploy $APP_NAME --source-code-path $WS_PATH --profile $PROFILE"
-    exit 1
-fi
-_ok "Deployment initiated"
-
 # ══════════════════════════════════════════════════════════════════════════
-# Step 11: Set OAuth scopes (critical)
+# Step 11: Resolve SP and configure Lakebase (role, grants, schema name)
 # ══════════════════════════════════════════════════════════════════════════
-_header "Step 11: Configuring OAuth scopes"
+# Critical: this runs BEFORE `apps deploy` so the app's SP can authenticate
+# against Postgres on its very first boot. If the schema already exists
+# under a different SP (e.g. after delete + reinstall, which rotates the
+# SP), fall back to "${schema}_${sp-prefix}" instead of fighting for
+# ownership.
+_header "Step 11: Resolving SP and configuring Lakebase"
 
-_info "Setting user_api_scopes (required for Genie API access) ..."
-
-SCOPE_PAYLOAD='{"user_api_scopes": ["sql", "serving.serving-endpoints", "dashboards.genie"]}'
-
-# Set scopes and request JSON output so we can verify
-databricks apps update "$APP_NAME" --profile "$PROFILE" --json "$SCOPE_PAYLOAD" -o json > /dev/null 2>&1 || true
-
-# Verify by reading back the app config
-SCOPES_SET=$(databricks apps get "$APP_NAME" --profile "$PROFILE" -o json 2>/dev/null \
-    | python3 -c "
+APP_JSON=$(databricks apps get "$APP_NAME" --profile "$PROFILE" -o json 2>/dev/null || echo "{}")
+SP_CLIENT_ID=$(echo "$APP_JSON" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
-    scopes = d.get('user_api_scopes', [])
+    print(d.get('service_principal_client_id', ''))
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+if [ -z "$SP_CLIENT_ID" ]; then
+    _error "Could not resolve app service principal."
+    echo "  Check: databricks apps get $APP_NAME --profile $PROFILE"
+    exit 1
+fi
+
+SP_DISPLAY_NAME=$(echo "$APP_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('service_principal_name', '') or '')
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+_ok "App SP: ${SP_DISPLAY_NAME:-$SP_CLIENT_ID} ($SP_CLIENT_ID)"
+
+ROLE_CREATED="SKIP"
+LAKEBASE_DB_RESOURCE=""
+
+if [ "$STORAGE_BACKEND" = "pgvector" ] && [ -n "$LAKEBASE_INSTANCE" ]; then
+    # Grant CAN_MANAGE to the SP on the Lakebase project (idempotent)
+    _info "Granting CAN_MANAGE to SP on Lakebase project '$LAKEBASE_INSTANCE' ..."
+    PERM_PAYLOAD="{\"access_control_list\": [{\"service_principal_name\": \"${SP_DISPLAY_NAME:-$SP_CLIENT_ID}\", \"permission_level\": \"CAN_MANAGE\"}]}"
+    if databricks api patch "/api/2.0/permissions/database-projects/$LAKEBASE_INSTANCE" \
+            --profile "$PROFILE" --json "$PERM_PAYLOAD" &>/dev/null; then
+        _ok "SP granted CAN_MANAGE on Lakebase project"
+    else
+        _warn "Could not grant SP permissions. Continuing — may need manual grant."
+    fi
+
+    # Resolve the Lakebase database + endpoint
+    LAKEBASE_DB_RESOURCE=$(databricks api get \
+        "/api/2.0/postgres/projects/$LAKEBASE_INSTANCE/branches/production/databases" \
+        --profile "$PROFILE" -o json 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    dbs = data.get('databases', [])
+    if dbs: print(dbs[0]['name'])
+except Exception: pass
+" 2>/dev/null || true)
+
+    ENDPOINT_INFO=$(databricks api get \
+        "/api/2.0/postgres/projects/$LAKEBASE_INSTANCE/branches/production/endpoints" \
+        --profile "$PROFILE" -o json 2>/dev/null || echo "{}")
+    ENDPOINT_NAME=$(echo "$ENDPOINT_INFO" | python3 -c "
+import sys, json
+try:
+    eps = json.load(sys.stdin).get('endpoints', [])
+    print(eps[0]['name'] if eps else '')
+except: print('')
+" 2>/dev/null)
+    LAKEBASE_HOST=$(echo "$ENDPOINT_INFO" | python3 -c "
+import sys, json
+try:
+    eps = json.load(sys.stdin).get('endpoints', [])
+    print(eps[0]['status']['hosts']['host'] if eps else '')
+except: print('')
+" 2>/dev/null)
+
+    if [ -z "$LAKEBASE_DB_RESOURCE" ] || [ -z "$ENDPOINT_NAME" ] || [ -z "$LAKEBASE_HOST" ]; then
+        _error "Could not resolve Lakebase database/endpoint info."
+        echo "  LAKEBASE_DB_RESOURCE='$LAKEBASE_DB_RESOURCE'"
+        echo "  ENDPOINT_NAME='$ENDPOINT_NAME'"
+        echo "  LAKEBASE_HOST='$LAKEBASE_HOST'"
+        exit 1
+    fi
+
+    _ok "Lakebase endpoint: $LAKEBASE_HOST"
+
+    # Create SP's Postgres role + grants, and resolve the final schema name.
+    # We deliberately DO NOT create the schema here — the app's
+    # storage_pgvector.initialize() does `CREATE SCHEMA IF NOT EXISTS` as
+    # the SP, which makes the SP the owner automatically. (If we created it
+    # as the deployer and tried ALTER OWNER, Postgres requires membership
+    # in the target role, which we don't have.)
+    _info "Configuring Postgres role and resolving schema name ..."
+
+    DB_SETUP_OUTPUT=$(LB_PROFILE="$PROFILE" LB_ENDPOINT="$ENDPOINT_NAME" \
+        LB_HOST="$LAKEBASE_HOST" LB_SP_ID="$SP_CLIENT_ID" \
+        LB_DESIRED_SCHEMA="$LAKEBASE_SCHEMA" \
+        python3 << 'PYEOF'
+import subprocess, json, sys, os, asyncio, re
+
+profile = os.environ['LB_PROFILE']
+endpoint = os.environ['LB_ENDPOINT']
+host = os.environ['LB_HOST']
+sp_id = os.environ['LB_SP_ID']
+desired_schema = os.environ['LB_DESIRED_SCHEMA']
+
+def fail(tag, msg):
+    print(f'REASON={tag}: {msg}')
+    print(f'SCHEMA={desired_schema}')
+    print('STATUS=FAIL')
+    sys.exit(0)
+
+try:
+    r = subprocess.run(
+        ['databricks', 'api', 'post', '/api/2.0/postgres/credentials',
+         '--profile', profile, '--json', json.dumps({'endpoint': endpoint}), '-o', 'json'],
+        capture_output=True, text=True, check=True)
+    token = json.loads(r.stdout)['token']
+    r = subprocess.run(
+        ['databricks', 'current-user', 'me', '--profile', profile, '-o', 'json'],
+        capture_output=True, text=True, check=True)
+    username = json.loads(r.stdout)['userName']
+except Exception as e:
+    fail('creds', str(e))
+
+try:
+    import asyncpg
+except ImportError:
+    fail('deps', 'asyncpg not installed — run: pip install asyncpg')
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+_IDENT_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
+
+async def run():
+    import ssl as ssl_module
+    if not _UUID_RE.match(sp_id):
+        fail('input', f'sp_id is not a valid UUID: {sp_id!r}')
+    if desired_schema and not _IDENT_RE.match(desired_schema):
+        fail('input', f'schema name is not a safe identifier: {desired_schema!r}')
+    ctx = ssl_module.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl_module.CERT_NONE
+    conn = await asyncpg.connect(host=host, port=5432, database='databricks_postgres',
+                                 user=username, password=token, ssl=ctx)
+    try:
+        await conn.execute('CREATE EXTENSION IF NOT EXISTS databricks_auth')
+        try:
+            await conn.execute("SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')", sp_id)
+        except Exception as e:
+            if 'already exists' not in str(e).lower():
+                raise
+        # sp_id is UUID-validated above; safe to interpolate as a quoted identifier
+        await conn.execute(f'GRANT CONNECT ON DATABASE databricks_postgres TO "{sp_id}"')
+        await conn.execute(f'GRANT CREATE ON DATABASE databricks_postgres TO "{sp_id}"')
+
+        final_schema = desired_schema
+        if desired_schema and desired_schema != 'public':
+            row = await conn.fetchrow(
+                "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
+                desired_schema)
+            if row is not None and row['owner'] != sp_id:
+                # 16 hex chars from the SP UUID — effectively zero collision risk.
+                sp_prefix = sp_id.replace('-', '')[:16]
+                final_schema = f"{desired_schema}_{sp_prefix}"
+                if not _IDENT_RE.match(final_schema):
+                    fail('input', f'derived fallback schema is not a safe identifier: {final_schema!r}')
+                row2 = await conn.fetchrow(
+                    "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
+                    final_schema)
+                if row2 is not None and row2['owner'] != sp_id:
+                    # Fallback is stale. If the deployer (us) owns it — e.g.
+                    # leftover from a prior install attempt where the ALTER
+                    # OWNER couldn't transfer to the SP — AND it contains no
+                    # tables, drop it so the app can recreate cleanly.
+                    # Otherwise fail loudly to avoid silent data loss.
+                    if row2['owner'] == username:
+                        table_count = await conn.fetchval(
+                            "SELECT COUNT(*) FROM information_schema.tables "
+                            "WHERE table_schema = $1",
+                            final_schema)
+                        if table_count and table_count > 0:
+                            print(f"REASON=fallback schema {final_schema} owned by deployer contains {table_count} tables — refusing to drop. Remove manually or rename LAKEBASE_SCHEMA.")
+                            print(f"SCHEMA={desired_schema}")
+                            print('STATUS=FAIL')
+                            return
+                        await conn.execute(f'DROP SCHEMA "{final_schema}" CASCADE')
+                        print(f'NOTE=dropped empty stale fallback schema "{final_schema}" owned by deployer')
+                    else:
+                        print(f"REASON=fallback schema {final_schema} owned by {row2['owner']} (neither SP nor deployer)")
+                        print(f"SCHEMA={desired_schema}")
+                        print('STATUS=FAIL')
+                        return
+                print(f'NOTE=desired schema "{desired_schema}" owned by {row["owner"]}, using "{final_schema}"')
+        print(f'SCHEMA={final_schema}')
+        print('STATUS=OK')
+    finally:
+        await conn.close()
+
+try:
+    asyncio.run(run())
+except Exception as e:
+    fail('sql', str(e))
+PYEOF
+)
+
+    # Parse the structured output — use `|| true` so a missing line (e.g. no
+    # NOTE when nothing unusual happened) doesn't trip `set -e`.
+    FINAL_SCHEMA=$(echo "$DB_SETUP_OUTPUT" | { grep '^SCHEMA=' || true; } | head -1 | sed 's/^SCHEMA=//')
+    STATUS=$(echo "$DB_SETUP_OUTPUT" | { grep '^STATUS=' || true; } | head -1 | sed 's/^STATUS=//')
+    NOTE=$(echo "$DB_SETUP_OUTPUT" | { grep '^NOTE=' || true; } | head -1 | sed 's/^NOTE=//')
+    REASON=$(echo "$DB_SETUP_OUTPUT" | { grep '^REASON=' || true; } | head -1 | sed 's/^REASON=//')
+
+    if [ "$STATUS" = "OK" ] && [ -n "$FINAL_SCHEMA" ]; then
+        ROLE_CREATED="OK"
+        if [ -n "$NOTE" ]; then
+            _warn "$NOTE"
+        fi
+        if [ "$FINAL_SCHEMA" != "$LAKEBASE_SCHEMA" ]; then
+            LAKEBASE_SCHEMA="$FINAL_SCHEMA"
+            # Persist for future --update runs
+            python3 -c "
+import re
+p = '$ENV_DEPLOY_FILE'
+s = open(p).read()
+if re.search(r'^GENIE_LAKEBASE_SCHEMA=', s, flags=re.MULTILINE):
+    s = re.sub(r'^GENIE_LAKEBASE_SCHEMA=.*\$', 'GENIE_LAKEBASE_SCHEMA=$LAKEBASE_SCHEMA', s, flags=re.MULTILINE)
+else:
+    s += '\nGENIE_LAKEBASE_SCHEMA=$LAKEBASE_SCHEMA\n'
+open(p, 'w').write(s)
+"
+        fi
+        _ok "Postgres role + grants configured for SP"
+        _ok "Schema: $LAKEBASE_SCHEMA (app will create it on first boot, owned by SP)"
+    else
+        ROLE_CREATED="FAIL"
+        _warn "DB setup failed: ${REASON:-unknown}"
+        echo ""
+        echo "  Connect to Lakebase as a human user with CAN_MANAGE and run:"
+        echo "    CREATE EXTENSION IF NOT EXISTS databricks_auth;"
+        echo "    SELECT databricks_create_role('$SP_CLIENT_ID', 'SERVICE_PRINCIPAL');"
+        echo "    GRANT CONNECT ON DATABASE databricks_postgres TO \"$SP_CLIENT_ID\";"
+        echo "    GRANT CREATE ON DATABASE databricks_postgres TO \"$SP_CLIENT_ID\";"
+        # In --update mode there's no interactive user to run the manual
+        # remediation above — bail so we don't deploy against an unusable schema.
+        if [ "$UPDATE_MODE" = true ]; then
+            _error "DB setup failed in --update mode; refusing to deploy. Fix manually and re-run."
+            exit 1
+        fi
+    fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 12: Patch app.yaml with resolved values and sync to workspace
+# ══════════════════════════════════════════════════════════════════════════
+_header "Step 12: Syncing files to workspace"
+
+PATCHED_APP_YAML=$(mktemp)
+trap 'rm -rf "$STAGING_DIR" "$PATCHED_APP_YAML"' EXIT
+
+python3 -c "
+import re, sys
+content = open('$PROJECT_DIR/app.yaml').read()
+content = re.sub(r'^(name:).*\$', r'\1 $APP_NAME', content, flags=re.MULTILINE)
+replacements = {
+    'STORAGE_BACKEND': '$STORAGE_BACKEND',
+    'LAKEBASE_INSTANCE': '$LAKEBASE_INSTANCE',
+    'LAKEBASE_CATALOG': '$LAKEBASE_CATALOG',
+    'LAKEBASE_SCHEMA': '$LAKEBASE_SCHEMA',
+}
+for key, val in replacements.items():
+    content = re.sub(
+        rf'(- name: {key}\n\s+value:).*',
+        rf'\1 {val}',
+        content
+    )
+sys.stdout.write(content)
+" > "$PATCHED_APP_YAML"
+
+cp "$PATCHED_APP_YAML" "$STAGING_DIR/app.yaml"
+_ok "Patched app.yaml (LAKEBASE_SCHEMA=$LAKEBASE_SCHEMA)"
+
+_info "Uploading to $WS_PATH ..."
+if ! databricks workspace import-dir "$STAGING_DIR" "$WS_PATH" \
+        --profile "$PROFILE" --overwrite 2>&1; then
+    _error "Failed to upload files to workspace."
+    echo "  Remediation:"
+    echo "    1. Check workspace permissions for $WS_PATH"
+    echo "    2. Try: databricks workspace import-dir . $WS_PATH --profile $PROFILE --overwrite"
+    exit 1
+fi
+_ok "Files uploaded to workspace"
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 13: Configure OAuth scopes and Lakebase resource (combined PATCH)
+# ══════════════════════════════════════════════════════════════════════════
+# The apps PATCH endpoint ignores the `update_mask` query param — any PATCH
+# replaces the whole record for the fields in the body and clears fields not
+# present. So we must send `user_api_scopes` and `resources` in the SAME
+# payload, or the second PATCH wipes whatever the first one set.
+_header "Step 13: Configuring OAuth scopes and app resources"
+
+# LAKEBASE_DB_RESOURCE was resolved in Step 11 if pgvector + instance set.
+_info "Setting user_api_scopes and resources in a single PATCH ..."
+
+# Build the combined payload.  Resources are included only if we resolved a
+# Lakebase database in Step 11.
+PATCH_PAYLOAD=$(LAKEBASE_DB_RESOURCE="$LAKEBASE_DB_RESOURCE" python3 -c "
+import json, os
+
+payload = {
+    'user_api_scopes': ['sql', 'serving.serving-endpoints', 'dashboards.genie'],
+}
+
+db = os.environ.get('LAKEBASE_DB_RESOURCE', '')
+if db:
+    branch = '/'.join(db.split('/')[:4])
+    payload['resources'] = [{
+        'name': 'postgres',
+        'postgres': {
+            'branch': branch,
+            'database': db,
+            'permission': 'CAN_CONNECT_AND_CREATE',
+        }
+    }]
+
+print(json.dumps(payload))
+")
+
+# Retry up to 3 times to tolerate transient errors.  Surface the API
+# response on the final attempt so failures are diagnosable.
+SCOPES_SET="FAIL"
+PATCH_STDERR="$(mktemp)"
+trap 'rm -rf "$STAGING_DIR" "$PATCHED_APP_YAML" "$PATCH_STDERR"' EXIT
+for SCOPE_ATTEMPT in 1 2 3; do
+    databricks api patch "/api/2.0/apps/$APP_NAME" \
+        --profile "$PROFILE" --json "$PATCH_PAYLOAD" > /dev/null 2>"$PATCH_STDERR" || true
+
+    # Verify by reading back `effective_user_api_scopes` (the actually-applied
+    # scope list; `user_api_scopes` is the requested list).
+    SCOPES_SET=$(databricks apps get "$APP_NAME" --profile "$PROFILE" -o json 2>/dev/null \
+        | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    scopes = d.get('effective_user_api_scopes', []) or []
     print('OK' if 'dashboards.genie' in scopes else 'FAIL')
 except:
     print('FAIL')
 " 2>/dev/null || echo "FAIL")
 
+    if [ "$SCOPES_SET" = "OK" ]; then
+        break
+    fi
+    if [ "$SCOPE_ATTEMPT" -lt 3 ]; then
+        _info "Scopes not yet applied (attempt $SCOPE_ATTEMPT/3), retrying in 10s ..."
+        sleep 10
+    fi
+done
+
 if [ "$SCOPES_SET" = "OK" ]; then
     _ok "OAuth scopes configured: sql, serving.serving-endpoints, dashboards.genie"
+    if [ -n "$LAKEBASE_DB_RESOURCE" ]; then
+        _ok "Postgres resource configured on app (CAN_CONNECT_AND_CREATE)"
+    fi
 else
-    _warn "Could not verify OAuth scopes were set."
+    _warn "Could not verify OAuth scopes were set after 3 attempts."
+    if [ -s "$PATCH_STDERR" ]; then
+        echo ""
+        echo "  Last PATCH response:"
+        sed 's/^/    /' "$PATCH_STDERR"
+    fi
     echo ""
-    echo "  Run this manually:"
-    echo "    databricks apps update $APP_NAME --profile $PROFILE --json '$SCOPE_PAYLOAD'"
+    echo "  Set scopes manually via REST API:"
+    echo "    databricks api patch \"/api/2.0/apps/$APP_NAME\" \\"
+    echo "      --profile $PROFILE --json '$PATCH_PAYLOAD'"
     echo ""
     _warn "Without these scopes the app will get 403 errors on Genie API calls."
+    _warn "After setting scopes, users must sign out and sign back into the app to get a fresh OAuth token."
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 12: Wait for deployment
+# Step 14: Deploy source code
 # ══════════════════════════════════════════════════════════════════════════
-_header "Step 12: Waiting for deployment"
+# DB role, grants, schema name and app resources are all in place — the
+# container's lifespan() can safely connect on boot.
+_header "Step 14: Deploying source code"
+
+_info "Deploying (blocks until the container is up) ..."
+if ! databricks apps deploy "$APP_NAME" \
+        --source-code-path "$WS_PATH" \
+        --profile "$PROFILE" 2>&1; then
+    _error "Deployment failed."
+    echo "  Remediation:"
+    echo "    databricks apps deploy $APP_NAME --source-code-path $WS_PATH --profile $PROFILE"
+    echo "    databricks apps logs $APP_NAME --profile $PROFILE --follow"
+    exit 1
+fi
+_ok "Deployment complete"
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 15: Wait for app to reach RUNNING + health check
+# ══════════════════════════════════════════════════════════════════════════
+_header "Step 15: Waiting for app to reach RUNNING"
 
 APP_URL=""
 DEPLOY_OK=false
@@ -675,182 +1016,6 @@ if [ -n "$APP_URL" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 13: Resolve app service principal
-# ══════════════════════════════════════════════════════════════════════════
-_header "Step 13: Resolving app service principal"
-
-SP_CLIENT_ID=""
-SP_DISPLAY_NAME=""
-
-APP_JSON=$(databricks apps get "$APP_NAME" --profile "$PROFILE" -o json 2>/dev/null || echo "{}")
-
-SP_CLIENT_ID=$(echo "$APP_JSON" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(d.get('service_principal_client_id', '') or d.get('service_principal_name', ''))
-except:
-    print('')
-" 2>/dev/null || echo "")
-
-if [ -n "$SP_CLIENT_ID" ]; then
-    SP_DISPLAY_NAME=$(
-        databricks service-principals list --profile "$PROFILE" -o json 2>/dev/null \
-        | python3 -c "
-import sys, json
-sp_id = '$SP_CLIENT_ID'
-try:
-    data = json.load(sys.stdin)
-    sps = data if isinstance(data, list) else data.get('Resources', data.get('service_principals', []))
-    for sp in sps:
-        if sp.get('applicationId','') == sp_id or sp.get('application_id','') == sp_id:
-            print(sp.get('displayName','') or sp.get('display_name',''))
-            break
-except: pass
-" 2>/dev/null || true
-    )
-    _ok "SP: ${SP_DISPLAY_NAME:-$SP_CLIENT_ID} (${SP_CLIENT_ID})"
-else
-    _warn "Could not resolve app service principal."
-    _info "The SP info will be available once the app finishes starting."
-fi
-
-# ══════════════════════════════════════════════════════════════════════════
-# Step 14: Grant SP access to Lakebase (if pgvector + SP resolved)
-# ══════════════════════════════════════════════════════════════════════════
-if [ "$STORAGE_BACKEND" = "pgvector" ] && [ -n "$LAKEBASE_INSTANCE" ] && [ -n "$SP_CLIENT_ID" ]; then
-    _header "Step 14: Granting SP access to Lakebase"
-
-    # Grant CAN_MANAGE on the Lakebase project
-    _info "Granting CAN_MANAGE on project '$LAKEBASE_INSTANCE' to SP ..."
-    PERM_PAYLOAD="{\"access_control_list\": [{\"service_principal_name\": \"${SP_DISPLAY_NAME:-$SP_CLIENT_ID}\", \"permission_level\": \"CAN_MANAGE\"}]}"
-    if databricks api patch "/api/2.0/permissions/database-projects/$LAKEBASE_INSTANCE" \
-            --profile "$PROFILE" --json "$PERM_PAYLOAD" &>/dev/null; then
-        _ok "SP granted CAN_MANAGE on Lakebase project"
-    else
-        _warn "Could not grant SP permissions. You may need to do this manually."
-    fi
-
-    # Create the SP's PostgreSQL role via databricks_create_role()
-    _info "Creating PostgreSQL role for SP ($SP_CLIENT_ID) ..."
-
-    # Resolve endpoint name and hostname from the Lakebase project
-    ENDPOINT_INFO=$(databricks api get \
-        "/api/2.0/postgres/projects/$LAKEBASE_INSTANCE/branches/production/endpoints" \
-        --profile "$PROFILE" -o json 2>/dev/null || echo "{}")
-
-    ENDPOINT_NAME=$(echo "$ENDPOINT_INFO" | python3 -c "
-import sys, json
-try:
-    eps = json.load(sys.stdin).get('endpoints', [])
-    print(eps[0]['name'] if eps else '')
-except: print('')
-" 2>/dev/null)
-
-    LAKEBASE_HOST=$(echo "$ENDPOINT_INFO" | python3 -c "
-import sys, json
-try:
-    eps = json.load(sys.stdin).get('endpoints', [])
-    print(eps[0]['status']['hosts']['host'] if eps else '')
-except: print('')
-" 2>/dev/null)
-
-    if [ -n "$ENDPOINT_NAME" ] && [ -n "$LAKEBASE_HOST" ]; then
-        # Generate a JWT credential for the deployer (human user) via REST API,
-        # then connect with asyncpg to run databricks_create_role().
-        ROLE_CREATED=$(LB_PROFILE="$PROFILE" LB_ENDPOINT="$ENDPOINT_NAME" \
-            LB_HOST="$LAKEBASE_HOST" LB_SP_ID="$SP_CLIENT_ID" \
-            python3 << 'PYEOF'
-import subprocess, json, sys, os, asyncio
-
-profile = os.environ['LB_PROFILE']
-endpoint = os.environ['LB_ENDPOINT']
-host = os.environ['LB_HOST']
-sp_id = os.environ['LB_SP_ID']
-
-# 1. Generate credential via POST /api/2.0/postgres/credentials
-try:
-    result = subprocess.run(
-        ['databricks', 'api', 'post', '/api/2.0/postgres/credentials',
-         '--profile', profile,
-         '--json', json.dumps({'endpoint': endpoint}),
-         '-o', 'json'],
-        capture_output=True, text=True, check=True,
-    )
-    cred = json.loads(result.stdout)
-except Exception as e:
-    print(f'FAIL:credential:{e}', file=sys.stderr)
-    print('FAIL')
-    sys.exit(0)
-
-token = cred.get('token', '')
-if not token:
-    print('FAIL:empty_token', file=sys.stderr)
-    print('FAIL')
-    sys.exit(0)
-
-# 2. Get deployer username
-try:
-    result = subprocess.run(
-        ['databricks', 'current-user', 'me', '--profile', profile, '-o', 'json'],
-        capture_output=True, text=True, check=True,
-    )
-    username = json.loads(result.stdout)['userName']
-except Exception as e:
-    print(f'FAIL:username:{e}', file=sys.stderr)
-    print('FAIL')
-    sys.exit(0)
-
-# 3. Connect and create the SP role
-async def create_role():
-    try:
-        import asyncpg
-    except ImportError:
-        print('FAIL:no_asyncpg — run: pip install asyncpg', file=sys.stderr)
-        return False
-
-    import ssl as ssl_module
-    ssl_ctx = ssl_module.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl_module.CERT_NONE
-
-    try:
-        conn = await asyncpg.connect(
-            host=host, port=5432, database='databricks_postgres',
-            user=username, password=token, ssl=ssl_ctx,
-        )
-        await conn.execute('CREATE EXTENSION IF NOT EXISTS databricks_auth')
-        await conn.execute(f"SELECT databricks_create_role('{sp_id}', 'SERVICE_PRINCIPAL')")
-        await conn.close()
-        return True
-    except Exception as e:
-        if 'already exists' in str(e).lower():
-            return True
-        print(f'FAIL:sql:{e}', file=sys.stderr)
-        return False
-
-ok = asyncio.run(create_role())
-print('OK' if ok else 'FAIL')
-PYEOF
-)
-
-        case "$ROLE_CREATED" in
-            OK)
-                _ok "PostgreSQL role created for SP"
-                ;;
-            *)
-                _warn "Could not create PostgreSQL role automatically ($ROLE_CREATED)."
-                echo "  Connect to Lakebase as a human user and run:"
-                echo "    CREATE EXTENSION IF NOT EXISTS databricks_auth;"
-                echo "    SELECT databricks_create_role('$SP_CLIENT_ID', 'SERVICE_PRINCIPAL');"
-                ;;
-        esac
-    else
-        _warn "Could not resolve Lakebase endpoint. SP role must be created manually."
-    fi
-fi
-
-# ══════════════════════════════════════════════════════════════════════════
 # Summary
 # ══════════════════════════════════════════════════════════════════════════
 echo ""
@@ -882,9 +1047,10 @@ if [ -n "$LAKEBASE_INSTANCE" ]; then
     echo -e "    ${GREEN}✓${NC} Lakebase Autoscaling project: $LAKEBASE_INSTANCE"
 fi
 if [ -n "$SP_CLIENT_ID" ]; then
-    echo -e "    ${GREEN}✓${NC} SP granted CAN_MANAGE on Lakebase project"
     if [ "${ROLE_CREATED:-}" = "OK" ]; then
-        echo -e "    ${GREEN}✓${NC} SP PostgreSQL role created"
+        echo -e "    ${GREEN}✓${NC} SP granted CAN_MANAGE on Lakebase project"
+        echo -e "    ${GREEN}✓${NC} SP Postgres role + CONNECT/CREATE grants"
+        echo -e "    ${GREEN}✓${NC} Schema: $LAKEBASE_SCHEMA (created by app on first boot, owned by SP)"
     fi
 fi
 
@@ -897,11 +1063,18 @@ if [ "${ROLE_CREATED:-}" != "OK" ] && [ -n "$SP_CLIENT_ID" ]; then
     echo ""
     echo -e "  ${YELLOW}${BOLD}Remaining manual step:${NC}"
     echo ""
-    echo -e "    ${BOLD}Create the SP's PostgreSQL role${NC}"
+    echo -e "    ${BOLD}Create the SP's PostgreSQL role and schema${NC}"
     echo "       Connect to Lakebase as a human user and run:"
     echo ""
     echo -e "       ${CYAN}CREATE EXTENSION IF NOT EXISTS databricks_auth;"
-    echo -e "       SELECT databricks_create_role('$SP_ID_FOR_DISPLAY', 'SERVICE_PRINCIPAL');${NC}"
+    echo -e "       SELECT databricks_create_role('$SP_ID_FOR_DISPLAY', 'SERVICE_PRINCIPAL');"
+    echo -e "       GRANT CONNECT ON DATABASE databricks_postgres TO \"$SP_ID_FOR_DISPLAY\";"
+    echo -e "       GRANT CREATE ON DATABASE databricks_postgres TO \"$SP_ID_FOR_DISPLAY\";"
+    if [ "$LAKEBASE_SCHEMA" != "public" ]; then
+    echo -e "       CREATE SCHEMA IF NOT EXISTS \"$LAKEBASE_SCHEMA\";"
+    echo -e "       ALTER SCHEMA \"$LAKEBASE_SCHEMA\" OWNER TO \"$SP_ID_FOR_DISPLAY\";"
+    fi
+    echo -e "${NC}"
 fi
 
 if [ "$HAS_MANUAL_STEPS" = false ]; then
