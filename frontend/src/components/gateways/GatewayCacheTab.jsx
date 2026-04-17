@@ -9,9 +9,8 @@ export default function GatewayCacheTab({ gateway }) {
   const [loading, setLoading] = useState(true)
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [error, setError] = useState(null)
-  const [clearing, setClearing] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [confirmAction, setConfirmAction] = useState(null) // 'clear' | 'delete' | null
+  const [showConfirm, setShowConfirm] = useState(false)
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const headerCheckboxRef = useRef(null)
 
@@ -75,22 +74,8 @@ export default function GatewayCacheTab({ gateway }) {
     })
   }
 
-  const handleClearCache = async () => {
-    setConfirmAction(null)
-    try {
-      setClearing(true)
-      await api.clearGatewayCache(gateway.id)
-      setSelectedIds(new Set())
-      await fetchCachedQueries()
-    } catch (err) {
-      setError('Failed to clear cache: ' + err.message)
-    } finally {
-      setClearing(false)
-    }
-  }
-
   const handleDeleteSelected = async () => {
-    setConfirmAction(null)
+    setShowConfirm(false)
     const ids = [...selectedIds]
     if (ids.length === 0) return
     try {
@@ -210,9 +195,7 @@ export default function GatewayCacheTab({ gateway }) {
   ], [allSelected, cachedQueries.length, selectedIds, gateway.cache_ttl_seconds])
 
   const selectedCount = selectedIds.size
-  const isDeleteAll = confirmAction === 'clear'
-  const confirmCount = isDeleteAll ? cachedQueries.length : selectedCount
-  const confirmLabel = confirmCount === 1 ? 'entry' : 'entries'
+  const confirmLabel = selectedCount === 1 ? 'entry' : 'entries'
 
   return (
     <div className="space-y-4">
@@ -250,7 +233,7 @@ export default function GatewayCacheTab({ gateway }) {
                 Clear selection
               </button>
               <button
-                onClick={() => setConfirmAction('delete')}
+                onClick={() => setShowConfirm(true)}
                 disabled={deleting}
                 className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text-danger border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
               >
@@ -259,14 +242,6 @@ export default function GatewayCacheTab({ gateway }) {
               </button>
             </>
           )}
-          <button
-            onClick={() => setConfirmAction('clear')}
-            disabled={clearing || cachedQueries.length === 0}
-            className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text-danger border border-dbx-border-input rounded hover:bg-dbx-status-red-bg transition-colors disabled:opacity-50"
-          >
-            <Trash2 size={14} />
-            {clearing ? 'Clearing...' : 'Clear Cache'}
-          </button>
         </div>
       </div>
 
@@ -313,11 +288,10 @@ export default function GatewayCacheTab({ gateway }) {
         </div>
       )}
 
-      {/* Confirmation modal (shared between clear-all and delete-selected) */}
       <Modal
-        isOpen={confirmAction !== null}
-        onClose={() => setConfirmAction(null)}
-        title={isDeleteAll ? 'Clear Cache' : 'Delete Selected Entries'}
+        isOpen={showConfirm}
+        onClose={() => setShowConfirm(false)}
+        title="Delete Selected Entries"
         maxWidth="max-w-md"
       >
         <div className="flex flex-col items-center text-center pt-2">
@@ -325,26 +299,24 @@ export default function GatewayCacheTab({ gateway }) {
             <AlertTriangle size={24} className="text-dbx-text-danger" />
           </div>
           <p className="text-[14px] text-dbx-text mb-1">
-            {isDeleteAll
-              ? 'Are you sure you want to clear the cache?'
-              : `Delete ${confirmCount} selected ${confirmLabel}?`}
+            Delete {selectedCount} selected {confirmLabel}?
           </p>
           <p className="text-[13px] text-dbx-text-secondary mb-6">
-            <span className="font-medium text-dbx-text">{confirmCount} {confirmLabel}</span> will be permanently deleted.
+            <span className="font-medium text-dbx-text">{selectedCount} {confirmLabel}</span> will be permanently deleted.
             Future queries will need to go through the Genie API again.
           </p>
           <div className="flex gap-3 w-full">
             <button
-              onClick={() => setConfirmAction(null)}
+              onClick={() => setShowConfirm(false)}
               className="flex-1 h-9 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors"
             >
               Cancel
             </button>
             <button
-              onClick={isDeleteAll ? handleClearCache : handleDeleteSelected}
+              onClick={handleDeleteSelected}
               className="flex-1 h-9 text-[13px] font-medium text-white bg-dbx-text-danger rounded hover:opacity-90 transition-colors"
             >
-              {isDeleteAll ? 'Clear' : 'Delete'} {confirmCount} {confirmLabel}
+              Delete {selectedCount} {confirmLabel}
             </button>
           </div>
         </div>
