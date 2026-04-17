@@ -62,10 +62,12 @@ async def lifespan(app: FastAPI):
         await close_discovery_client()
 
 
+from app.version import __version__ as APP_VERSION
+
 app = FastAPI(
     title="Genie API with Cache & Queue",
     description="Full-stack application for Databricks Genie API with intelligent caching and queueing",
-    version="1.0.0",
+    version=APP_VERSION,
     lifespan=lifespan
 )
 

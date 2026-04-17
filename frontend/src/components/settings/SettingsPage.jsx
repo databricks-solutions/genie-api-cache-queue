@@ -235,11 +235,18 @@ export default function SettingsPage() {
   const [saveStatus, setSaveStatus] = useState(null)
   const [endpoints, setEndpoints] = useState([])
   const [endpointsLoading, setEndpointsLoading] = useState(true)
+  const [appVersion, setAppVersion] = useState(null)
 
   const sectionRefs = useRef({})
   const saveTimerRef = useRef(null)
   const configRef = useRef(config)
   configRef.current = config
+
+  useEffect(() => {
+    api.getVersion()
+      .then((v) => setAppVersion(v?.version || null))
+      .catch(() => setAppVersion(null))
+  }, [])
 
   useEffect(() => {
     (async () => {
@@ -829,6 +836,12 @@ export default function SettingsPage() {
               </FieldRow>
             )}
           </div>
+
+          {appVersion && (
+            <div className="pt-6 mt-6 border-t border-dbx-border text-[12px] text-dbx-text-secondary text-center">
+              Genie Gateway <span className="font-mono">{appVersion}</span>
+            </div>
+          )}
         </div>
       </div>
 

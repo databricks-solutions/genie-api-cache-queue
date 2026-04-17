@@ -317,6 +317,15 @@ class DynamicStorageService:
             return 0
         return await self._with_reconnect(_op, runtime_settings)
 
+    async def delete_cache_entries(self, entry_ids: List[int], gateway_id: str, runtime_settings=None) -> int:
+        """Delete specific cache entries for a gateway."""
+        async def _op():
+            backend = await self._resolve_backend(runtime_settings)
+            if hasattr(backend, 'delete_cache_entries'):
+                return await backend.delete_cache_entries(entry_ids, gateway_id)
+            return 0
+        return await self._with_reconnect(_op, runtime_settings)
+
     # --- Gateway CRUD (delegates to default backend) ---
 
     async def create_gateway(self, config: dict) -> dict:

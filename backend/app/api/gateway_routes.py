@@ -12,12 +12,14 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from app.auth import ensure_https
 from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
 from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token_optional, require_role
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
+from app.version import __version__ as APP_VERSION
 import app.services.database as _db
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,12 @@ _discovery_client = httpx.AsyncClient(timeout=15.0)
 async def close_discovery_client():
     """Close the shared HTTP client. Call during app shutdown."""
     await _discovery_client.aclose()
+
+
+@gateway_router.get("/version")
+async def get_version():
+    """Return the installed app version. Public (no auth)."""
+    return {"version": APP_VERSION}
 
 
 
@@ -240,6 +248,30 @@ async def clear_gateway_cache(gateway_id: str, req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class CacheDeleteRequest(BaseModel):
+    entry_ids: list[int]
+
+
+@gateway_router.post("/gateways/{gateway_id}/cache/delete")
+async def delete_gateway_cache_entries(gateway_id: str, body: CacheDeleteRequest, req: Request):
+    """Delete selected cache entries for a specific gateway. Manage or above."""
+    await require_role(req, "manage")
+    try:
+        gw = await _db.db_service.get_gateway(gateway_id)
+        if not gw:
+            raise HTTPException(status_code=404, detail="Gateway not found")
+        if not body.entry_ids:
+            return {"deleted": 0, "gateway_id": gateway_id}
+        count = await _db.db_service.delete_cache_entries(body.entry_ids, gateway_id)
+        logger.info("Deleted %d cache entries from gateway %s", count, gateway_id)
+        return {"deleted": count, "gateway_id": gateway_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error deleting cache entries")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @gateway_router.get("/gateways/{gateway_id}/logs")
 async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
     """List query logs for a specific gateway. Manage or above."""
@@ -261,7 +293,7 @@ async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
 
 @gateway_router.get("/workspace/genie-spaces")
 async def list_genie_spaces(req: Request):
-    """List available Genie Spaces from the workspace.
+    """List available Genie Spaces from the workspace (paginated).
     Uses the user's token when passthrough is enabled, SP token otherwise.
     """
     try:
@@ -270,13 +302,23 @@ async def list_genie_spaces(req: Request):
             logger.warning("No token available for Genie Spaces discovery — enable user token passthrough or configure a service principal")
             return {"spaces": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
+        headers = {"Authorization": f"Bearer {token}"}
 
-        url = f"{host}/api/2.0/genie/spaces"
-        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
-        if resp.status_code != 200:
-            logger.warning("Genie spaces API returned %d: %s", resp.status_code, resp.text[:200])
-            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-        return resp.json()
+        all_spaces: list = []
+        page_token: Optional[str] = None
+        for _ in range(50):  # hard cap to avoid infinite loops
+            url = f"{host}/api/2.0/genie/spaces"
+            params = {"page_token": page_token} if page_token else None
+            resp = await _discovery_client.get(url, headers=headers, params=params)
+            if resp.status_code != 200:
+                logger.warning("Genie spaces API returned %d: %s", resp.status_code, resp.text[:200])
+                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+            payload = resp.json()
+            all_spaces.extend(payload.get("spaces", []))
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+        return {"spaces": all_spaces}
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -467,6 +509,7 @@ async def get_settings_endpoint(req: Request):
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)
     return {
+        "app_version": APP_VERSION,
         "genie_space_id": get_effective_setting("genie_space_id"),
         "genie_spaces": get_effective_setting("genie_spaces") or [],
         "sql_warehouse_id": get_effective_setting("sql_warehouse_id"),

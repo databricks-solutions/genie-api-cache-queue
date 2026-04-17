@@ -751,6 +751,24 @@ class PGVectorStorageService:
             by_space = {r['space_id']: r['count'] for r in rows}
             return {"total": total, "by_space": by_space}
 
+    async def delete_cache_entries(self, entry_ids: List[int], gateway_id: str) -> int:
+        """Delete specific cache entries scoped to a gateway. Returns count deleted."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized.")
+        if not entry_ids:
+            return 0
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {self.table_name} WHERE id = ANY($1::int[]) AND gateway_id = $2",
+                entry_ids, gateway_id,
+            )
+            await conn.execute(
+                f"DELETE FROM {self.table_name} WHERE id = ANY($1::int[]) AND gateway_id = $2",
+                entry_ids, gateway_id,
+            )
+            logger.info("Deleted %d cache entries for gateway %s from %s", count, gateway_id, self.table_name)
+            return count
+
     async def clear_cache(self, gateway_id=None):
         """Delete cached queries, optionally filtered by gateway_id."""
         if not self.pool:
