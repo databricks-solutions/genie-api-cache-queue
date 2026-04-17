@@ -73,6 +73,8 @@ class PGVectorStorageService:
         log_base = self._normalize_table_name(query_log_table_name).rsplit('.', 1)[-1]
         self.gateway_table_name = f"{schema_prefix}.gateway_configs"
         self.query_log_table_name = f"{schema_prefix}.{log_base}"
+        self.user_roles_table_name = f"{schema_prefix}.user_roles"
+        self.group_roles_table_name = f"{schema_prefix}.group_roles"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -93,7 +95,9 @@ class PGVectorStorageService:
 
     async def reinitialize(self):
         """Generate a fresh JWT and create a new connection pool.
-        Atomic swap: new pool is created before old pool is closed."""
+        Atomic swap: new pool is created before old pool is closed.
+        _schema_ensured stays True: schema is persistent and only needs
+        to be verified once per process lifetime."""
         old_pool = self.pool
         logger.info("Reinitializing Lakebase pool (JWT expiring soon)")
         await self.initialize()
@@ -193,6 +197,8 @@ class PGVectorStorageService:
             await self._ensure_table(conn)
             await self._ensure_query_log_table(conn)
             await self._ensure_gateway_table(conn)
+            await self._ensure_user_roles_table(conn)
+            await self._ensure_group_roles_table(conn)
             await self._migrate_genie_space_id_columns(conn)
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
@@ -336,7 +342,7 @@ class PGVectorStorageService:
         (X-Forwarded-Access-Token) is NOT used for Lakebase.
 
         Local development: uses the lakebase_service_token from Settings
-        (either SP client_id:client_secret or PAT).
+        (SP client_id:client_secret format).
 
         The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
         role created via databricks_create_role().
@@ -345,7 +351,6 @@ class PGVectorStorageService:
         from databricks.sdk.core import Config
         import os
 
-        # Inside Databricks Apps: use the app's built-in SP (env vars auto-detected)
         if os.getenv("DATABRICKS_CLIENT_ID"):
             logger.info("Lakebase auth: app built-in SP (DATABRICKS_CLIENT_ID)")
             return WorkspaceClient()
@@ -362,19 +367,11 @@ class PGVectorStorageService:
                 auth_type="oauth-m2m",
             )
             return WorkspaceClient(config=config)
-        elif token:
-            logger.info("Lakebase auth: PAT")
-            config = Config(
-                host=self.databricks_host,
-                token=token,
-                auth_type="pat",
-            )
-            return WorkspaceClient(config=config)
-        else:
-            raise ValueError(
-                "No Lakebase credentials available. "
-                "Ensure the app's SP has CAN_MANAGE on the Lakebase project."
-            )
+
+        raise ValueError(
+            "No Lakebase credentials available. "
+            "Set DATABRICKS_CLIENT_ID/SECRET or provide SP client_id:client_secret."
+        )
 
     def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
         """Resolve Lakebase Autoscaling project to (hostname, endpoint_name)."""
@@ -479,6 +476,30 @@ class PGVectorStorageService:
                 logger.warning("Index creation skipped: %s", e)
 
         logger.info("Query log table '%s' initialized", self.query_log_table_name)
+
+    async def _ensure_user_roles_table(self, conn):
+        """Create the user_roles table if it does not exist."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.user_roles_table_name} (
+                identity TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                granted_by TEXT,
+                granted_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("User roles table '%s' initialized", self.user_roles_table_name)
+
+    async def _ensure_group_roles_table(self, conn):
+        """Create the group_roles table if it does not exist."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.group_roles_table_name} (
+                group_name TEXT PRIMARY KEY,
+                role TEXT NOT NULL,
+                granted_by TEXT,
+                granted_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("Group roles table '%s' initialized", self.group_roles_table_name)
 
     async def _ensure_gateway_table(self, conn):
         """Create the gateway_configs table if it does not exist."""
@@ -982,6 +1003,110 @@ class PGVectorStorageService:
             """, gateway_id) or 0
 
             return {"cache_count": cache_count, "query_count_7d": query_count, "cache_hits_7d": cache_hits}
+
+    # --- User roles CRUD ---
+
+    async def get_user_role(self, identity: str) -> Optional[str]:
+        """Return the explicit role for a user, or None if not assigned."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT role FROM {self.user_roles_table_name} WHERE identity = $1",
+                identity
+            )
+            return row["role"] if row else None
+
+    async def set_user_role(self, identity: str, role: str, granted_by: str = None):
+        """Insert or update a user's role assignment."""
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"""
+                INSERT INTO {self.user_roles_table_name} (identity, role, granted_by, granted_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (identity) DO UPDATE
+                  SET role = EXCLUDED.role,
+                      granted_by = EXCLUDED.granted_by,
+                      granted_at = NOW()
+            """, identity, role, granted_by)
+
+    async def list_user_roles(self) -> list:
+        """Return all explicit role assignments."""
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT identity, role, granted_by, granted_at FROM {self.user_roles_table_name} ORDER BY granted_at DESC"
+            )
+            return [
+                {
+                    "identity": r["identity"],
+                    "role": r["role"],
+                    "granted_by": r["granted_by"],
+                    "granted_at": _to_utc_iso(r["granted_at"]),
+                }
+                for r in rows
+            ]
+
+    async def delete_user_role(self, identity: str):
+        """Remove an explicit role assignment."""
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM {self.user_roles_table_name} WHERE identity = $1",
+                identity
+            )
+
+    async def count_owners(self) -> int:
+        """Return the number of users with the 'owner' role."""
+        if not self.pool:
+            return 0
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT COUNT(*) AS cnt FROM {self.user_roles_table_name} WHERE role = $1",
+                "owner",
+            )
+            return row["cnt"] if row else 0
+
+    async def get_group_role(self, group_name: str) -> str | None:
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT role FROM {self.group_roles_table_name} WHERE group_name = $1",
+                group_name
+            )
+            return row["role"] if row else None
+
+    async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
+        if not self.pool:
+            raise ValueError("RBAC requires Lakebase (pgvector).")
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"""
+                INSERT INTO {self.group_roles_table_name} (group_name, role, granted_by, granted_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (group_name) DO UPDATE SET role = $2, granted_by = $3, granted_at = NOW()
+            """, group_name, role, granted_by)
+
+    async def list_group_roles(self) -> list:
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT group_name, role, granted_by, granted_at FROM {self.group_roles_table_name} ORDER BY granted_at DESC"
+            )
+            return [dict(r) for r in rows]
+
+    async def delete_group_role(self, group_name: str):
+        if not self.pool:
+            raise ValueError("RBAC requires Lakebase (pgvector).")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM {self.group_roles_table_name} WHERE group_name = $1",
+                group_name
+            )
 
     def _row_to_gateway_dict(self, row) -> dict:
         """Convert a database row to a gateway dict."""

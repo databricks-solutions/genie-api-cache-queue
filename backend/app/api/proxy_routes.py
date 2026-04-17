@@ -14,13 +14,11 @@ from app.models import (
     ProxyQueryRequest,
     ProxyQueryResponse,
     ProxyQueryStatusResponse,
-    RuntimeConfig,
 )
 import app.services.database as _db
 from app.config import get_settings
 from app.api.config_store import (
     get_effective_setting as _get_effective_setting,
-    _server_config_overrides,
     update_overrides,
     get_overrides,
 )
@@ -35,27 +33,6 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 proxy_router = APIRouter()
-
-
-def _build_runtime_config(token: str, body: ProxyQueryRequest) -> RuntimeConfig:
-    """Build a RuntimeConfig from caller token + request params + server config."""
-    return RuntimeConfig(
-        auth_mode="user",
-        user_pat=token,
-        genie_space_id=body.space_id or _get_effective_setting("genie_space_id") or None,
-        sql_warehouse_id=body.warehouse_id or _get_effective_setting("sql_warehouse_id") or None,
-        similarity_threshold=_get_effective_setting("similarity_threshold"),
-        max_queries_per_minute=_get_effective_setting("max_queries_per_minute"),
-        cache_ttl_hours=_get_effective_setting("cache_ttl_hours"),
-        embedding_provider=_get_effective_setting("embedding_provider"),
-        databricks_embedding_endpoint=settings.databricks_embedding_endpoint,
-        storage_backend="lakebase" if settings.storage_backend == "pgvector" else settings.storage_backend,
-        lakebase_instance_name=settings.lakebase_instance or None,
-        lakebase_catalog=settings.lakebase_catalog or None,
-        lakebase_schema=settings.lakebase_schema or None,
-        cache_table_name=settings.pgvector_table_name or None,
-        shared_cache=_server_config_overrides.get("shared_cache", True),
-    )
 
 
 def _map_status(raw_status: dict) -> ProxyQueryStatusResponse:
@@ -84,19 +61,6 @@ def _map_status(raw_status: dict) -> ProxyQueryStatusResponse:
         conversation_id=raw_status.get("conversation_id"),
     )
 
-
-def _validate_required_ids(runtime_config: RuntimeConfig):
-    """Validate that space_id and warehouse_id are present."""
-    if not runtime_config.genie_space_id:
-        raise HTTPException(
-            status_code=400,
-            detail="space_id is required (either in the request body or configured as server default)",
-        )
-    if not runtime_config.sql_warehouse_id:
-        raise HTTPException(
-            status_code=400,
-            detail="warehouse_id is required (either in the request body or configured as server default)",
-        )
 
 
 @proxy_router.post("/query", response_model=ProxyQueryResponse)

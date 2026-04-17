@@ -4,6 +4,8 @@ Manages gateway configurations and provides workspace discovery endpoints.
 """
 
 import logging
+import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -11,7 +13,9 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 
+from app.auth import ensure_https
 from app.models import GatewayConfig, GatewayCreateRequest, GatewayUpdateRequest
+from app.api.auth_helpers import extract_bearer_token_optional, resolve_user_token_optional, require_role
 from app.api.config_store import get_effective_setting, get_overrides, update_overrides
 from app.config import get_settings
 import app.services.database as _db
@@ -20,19 +24,13 @@ logger = logging.getLogger(__name__)
 gateway_router = APIRouter()
 settings = get_settings()
 
+_discovery_client = httpx.AsyncClient(timeout=15.0)
 
-def _get_token(req: Request) -> str:
-    """Extract bearer token from request headers."""
-    token = req.headers.get("X-Forwarded-Access-Token")
-    if not token:
-        auth = req.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:]
-    if not token:
-        token = get_effective_setting("lakebase_service_token") or settings.databricks_token
-    if not token:
-        raise HTTPException(status_code=401, detail="No authentication token available")
-    return token
+
+async def close_discovery_client():
+    """Close the shared HTTP client. Call during app shutdown."""
+    await _discovery_client.aclose()
+
 
 
 def _get_host() -> str:
@@ -40,16 +38,15 @@ def _get_host() -> str:
     host = get_effective_setting("databricks_host") or settings.databricks_host
     if not host:
         raise HTTPException(status_code=500, detail="DATABRICKS_HOST not configured")
-    if not host.startswith("http"):
-        host = f"https://{host}"
-    return host
+    return ensure_https(host)
 
 
 # --- Gateway CRUD ---
 
 @gateway_router.get("/gateways")
-async def list_gateways():
-    """List all gateways with stats."""
+async def list_gateways(req: Request):
+    """List all gateways with stats. Requires authentication."""
+    await require_role(req, "use")
     try:
         gateways = await _db.db_service.list_gateways()
         # Attach stats to each gateway
@@ -69,7 +66,8 @@ async def list_gateways():
 
 @gateway_router.post("/gateways", status_code=201)
 async def create_gateway(body: GatewayCreateRequest, req: Request):
-    """Create a new gateway configuration."""
+    """Create a new gateway configuration. Owner only."""
+    await require_role(req, "owner")
     try:
         now = datetime.now(timezone.utc)
         user_email = req.headers.get("X-Forwarded-Email")
@@ -102,14 +100,17 @@ async def create_gateway(body: GatewayCreateRequest, req: Request):
         result = await _db.db_service.create_gateway(config)
         logger.info("Gateway created: id=%s name=%s by=%s", config["id"], config["name"], user_email)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Error creating gateway")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @gateway_router.get("/gateways/{gateway_id}")
-async def get_gateway(gateway_id: str):
-    """Get a single gateway with stats."""
+async def get_gateway(gateway_id: str, req: Request):
+    """Get a single gateway with stats. Requires authentication."""
+    await require_role(req, "use")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -132,8 +133,9 @@ async def get_gateway(gateway_id: str):
 
 
 @gateway_router.put("/gateways/{gateway_id}")
-async def update_gateway(gateway_id: str, body: GatewayUpdateRequest):
-    """Update gateway fields."""
+async def update_gateway(gateway_id: str, body: GatewayUpdateRequest, req: Request):
+    """Update gateway fields. Manage or above."""
+    await require_role(req, "manage")
     try:
         updates = body.model_dump(exclude_none=True)
         if not updates:
@@ -153,8 +155,9 @@ async def update_gateway(gateway_id: str, body: GatewayUpdateRequest):
 
 
 @gateway_router.delete("/gateways/{gateway_id}")
-async def delete_gateway(gateway_id: str):
-    """Delete a gateway."""
+async def delete_gateway(gateway_id: str, req: Request):
+    """Delete a gateway. Owner only."""
+    await require_role(req, "owner")
     try:
         deleted = await _db.db_service.delete_gateway(gateway_id)
         if not deleted:
@@ -170,8 +173,9 @@ async def delete_gateway(gateway_id: str):
 
 
 @gateway_router.get("/gateways/{gateway_id}/metrics")
-async def get_gateway_metrics(gateway_id: str):
-    """Get cache entries and query stats for a gateway."""
+async def get_gateway_metrics(gateway_id: str, req: Request):
+    """Get cache entries and query stats for a gateway. Requires authentication."""
+    await require_role(req, "use")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -201,8 +205,9 @@ async def get_gateway_metrics(gateway_id: str):
 # --- Gateway-scoped cache & logs ---
 
 @gateway_router.get("/gateways/{gateway_id}/cache")
-async def get_gateway_cache(gateway_id: str):
-    """List all cached entries for a specific gateway."""
+async def get_gateway_cache(gateway_id: str, req: Request):
+    """List all cached entries for a specific gateway. Manage or above."""
+    await require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -218,8 +223,9 @@ async def get_gateway_cache(gateway_id: str):
 
 
 @gateway_router.delete("/gateways/{gateway_id}/cache")
-async def clear_gateway_cache(gateway_id: str):
-    """Clear all cached entries for a specific gateway."""
+async def clear_gateway_cache(gateway_id: str, req: Request):
+    """Clear all cached entries for a specific gateway. Manage or above."""
+    await require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -235,8 +241,9 @@ async def clear_gateway_cache(gateway_id: str):
 
 
 @gateway_router.get("/gateways/{gateway_id}/logs")
-async def get_gateway_logs(gateway_id: str, limit: int = 50):
-    """List query logs for a specific gateway."""
+async def get_gateway_logs(gateway_id: str, req: Request, limit: int = 50):
+    """List query logs for a specific gateway. Manage or above."""
+    await require_role(req, "manage")
     try:
         gw = await _db.db_service.get_gateway(gateway_id)
         if not gw:
@@ -254,18 +261,22 @@ async def get_gateway_logs(gateway_id: str, limit: int = 50):
 
 @gateway_router.get("/workspace/genie-spaces")
 async def list_genie_spaces(req: Request):
-    """List available Genie Spaces from the workspace."""
+    """List available Genie Spaces from the workspace.
+    Uses the user's token when passthrough is enabled, SP token otherwise.
+    """
     try:
-        token = _get_token(req)
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.warning("No token available for Genie Spaces discovery — enable user token passthrough or configure a service principal")
+            return {"spaces": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/genie/spaces"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code != 200:
-                logger.warning("Genie spaces API returned %d: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-            return resp.json()
+        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logger.warning("Genie spaces API returned %d: %s", resp.status_code, resp.text[:200])
+            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+        return resp.json()
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -278,18 +289,22 @@ async def list_genie_spaces(req: Request):
 
 @gateway_router.get("/workspace/warehouses")
 async def list_warehouses(req: Request):
-    """List available SQL warehouses from the workspace."""
+    """List available SQL warehouses from the workspace.
+    Uses the user's token when passthrough is enabled, SP token otherwise.
+    """
     try:
-        token = _get_token(req)
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.warning("No token available for warehouse discovery — enable user token passthrough or configure a service principal")
+            return {"warehouses": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/sql/warehouses"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code != 200:
-                logger.warning("Warehouses API returned %d: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-            return resp.json()
+        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logger.warning("Warehouses API returned %d: %s", resp.status_code, resp.text[:200])
+            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+        return resp.json()
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -302,31 +317,34 @@ async def list_warehouses(req: Request):
 
 @gateway_router.get("/workspace/serving-endpoints")
 async def list_serving_endpoints(req: Request):
-    """List available serving endpoints from the workspace."""
+    """List available serving endpoints from the workspace.
+    Uses the user's token when passthrough is enabled, SP token otherwise.
+    """
     try:
-        token = _get_token(req)
+        token = resolve_user_token_optional(req)
+        if not token:
+            logger.warning("No token available for serving endpoints discovery — enable user token passthrough or configure a service principal")
+            return {"endpoints": [], "warning": "No authentication token available. Configure token passthrough or a service principal."}
         host = _get_host()
 
         url = f"{host}/api/2.0/serving-endpoints"
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            if resp.status_code != 200:
-                logger.warning("Serving endpoints API returned %d: %s", resp.status_code, resp.text[:200])
-                raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
-            data = resp.json()
-            endpoints = data.get("endpoints", [])
-            # Return simplified list with name, task, state
-            return {
-                "endpoints": [
-                    {
-                        "name": ep.get("name", ""),
-                        "task": ep.get("task", ""),
-                        "state": ep.get("state", {}).get("ready", "UNKNOWN"),
-                    }
-                    for ep in endpoints
-                    if ep.get("state", {}).get("ready") == "READY"
-                ]
-            }
+        resp = await _discovery_client.get(url, headers={"Authorization": f"Bearer {token}"})
+        if resp.status_code != 200:
+            logger.warning("Serving endpoints API returned %d: %s", resp.status_code, resp.text[:200])
+            raise HTTPException(status_code=resp.status_code, detail=f"Databricks API error: {resp.text}")
+        data = resp.json()
+        endpoints = data.get("endpoints", [])
+        return {
+            "endpoints": [
+                {
+                    "name": ep.get("name", ""),
+                    "task": ep.get("task", ""),
+                    "state": ep.get("state", {}).get("ready", "UNKNOWN"),
+                }
+                for ep in endpoints
+                if ep.get("state", {}).get("ready") == "READY"
+            ]
+        }
     except HTTPException:
         raise
     except httpx.HTTPError as e:
@@ -337,9 +355,55 @@ async def list_serving_endpoints(req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@gateway_router.get("/workspace/search")
+async def search_workspace_principals(req: Request, q: str = ""):
+    """Search workspace users via SCIM filtered query. Fast — single SCIM call.
+    Returns up to 10 matching users for the given query string."""
+    await require_role(req, "manage")
+    if not q or len(q) < 2:
+        return {"users": []}
+    try:
+        from app.services.rbac import _get_sp_token
+        token = _get_sp_token() or resolve_user_token_optional(req)
+        if not token:
+            return {"users": []}
+        host = _get_host()
+        safe_q = q.replace('"', '')
+        scim_filter = f'displayName co "{safe_q}" or userName co "{safe_q}"'
+        resp = await _discovery_client.get(
+            f"{host}/api/2.0/preview/scim/v2/Users",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"filter": scim_filter, "count": 10, "attributes": "userName,displayName,active"},
+        )
+        if resp.status_code != 200:
+            logger.warning("SCIM search returned %d: %s", resp.status_code, resp.text[:200])
+            return {"users": []}
+        resources = resp.json().get("Resources", [])
+        return {
+            "users": [
+                {"email": u.get("userName", ""), "displayName": u.get("displayName", u.get("userName", "")), "active": u.get("active", True)}
+                for u in resources if u.get("userName") and u.get("active", True)
+            ]
+        }
+    except Exception as e:
+        logger.warning("SCIM search error: %s", e)
+        return {"users": []}
+
+
+@gateway_router.get("/workspace/groups")
+async def list_workspace_groups_endpoint(req: Request):
+    """List workspace groups via SCIM for group role assignment autocomplete."""
+    await require_role(req, "manage")
+    from app.services.rbac import list_workspace_groups
+    host = _get_host()
+    groups = await list_workspace_groups(host)
+    return {"groups": groups}
+
+
 @gateway_router.post("/settings/test-connection")
-async def test_lakebase_connection():
-    """Test Lakebase connection and check if required tables exist."""
+async def test_lakebase_connection(req: Request):
+    """Test Lakebase connection and check if required tables exist. Owner only."""
+    await require_role(req, "owner")
     results = {
         "connected": False,
         "cache_table_exists": False,
@@ -396,8 +460,9 @@ async def test_lakebase_connection():
 # --- Settings endpoints (reuse existing config_store) ---
 
 @gateway_router.get("/settings")
-async def get_settings_endpoint():
-    """Return current server configuration."""
+async def get_settings_endpoint(req: Request):
+    """Return current server configuration. Owner only."""
+    await require_role(req, "owner")
     overrides = get_overrides()
     ttl_hours = get_effective_setting("cache_ttl_hours") or 0
     ttl_seconds = int(ttl_hours * 3600)
@@ -417,9 +482,12 @@ async def get_settings_endpoint():
         "lakebase_schema": settings.lakebase_schema or overrides.get("lakebase_schema"),
         "cache_table_name": settings.pgvector_table_name or overrides.get("cache_table_name"),
         "query_log_table_name": overrides.get("query_log_table_name", "query_logs"),
-        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token")),
+        "lakebase_service_token_set": bool(get_effective_setting("lakebase_service_token") or os.getenv("DATABRICKS_CLIENT_ID")),
+        "lakebase_token_source": "override" if get_effective_setting("lakebase_service_token") else ("auto" if os.getenv("DATABRICKS_CLIENT_ID") else "none"),
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
+        "normalization_model": overrides.get("normalization_model", ""),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
+        "validation_model": overrides.get("validation_model", ""),
     }
 
 
@@ -439,8 +507,9 @@ class SettingsUpdateRequest(GatewayUpdateRequest):
 
 
 @gateway_router.put("/settings")
-async def update_settings_endpoint(body: SettingsUpdateRequest):
-    """Update server configuration."""
+async def update_settings_endpoint(body: SettingsUpdateRequest, req: Request):
+    """Update server configuration. Owner only."""
+    await require_role(req, "owner")
     batch = {}
     updated = {}
     for field, value in body.model_dump(exclude_none=True).items():

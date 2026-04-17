@@ -28,7 +28,7 @@ class RuntimeConfig(BaseModel):
     databricks_embedding_endpoint: Optional[str] = None
     
     # Storage backend selection
-    storage_backend: Optional[str] = None  # 'local' or 'lakebase'
+    storage_backend: Optional[str] = None  # 'lakebase'
     cache_ttl_hours: Optional[float] = None  # 0 = no freshness limit
     
     # Lakebase/PostgreSQL configuration (for PGVector caching)

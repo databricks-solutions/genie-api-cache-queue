@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { Pencil, Eye, EyeOff, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { Pencil, Loader2, CheckCircle, XCircle, FlaskConical, Database, SlidersHorizontal, Palette, Users, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 import { useTheme } from '../../context/ThemeContext'
+import { useRole } from '../../context/RoleContext'
+import Modal from '../shared/Modal'
 
 const secondsToTtl = (seconds) => {
   if (!seconds || seconds === 0) return { value: '0', unit: 'hours' }
@@ -20,6 +22,11 @@ const ttlToSeconds = (value, unit) => {
 
 const systemFont = '-apple-system, "system-ui", "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif'
 const systemStyle = { fontFamily: systemFont, WebkitFontSmoothing: 'auto', MozOsxFontSmoothing: 'auto' }
+
+const GROUP_ALIASES = {
+  'account users': 'All workspace users',
+}
+const groupLabel = (displayName) => GROUP_ALIASES[displayName] || displayName
 
 /* ── Toggle ── */
 function ToggleSwitch({ checked, onChange }) {
@@ -78,6 +85,60 @@ function EditableText({ value, onChange, placeholder, masked }) {
   )
 }
 
+/* ── Principal search dropdown ── */
+function PrincipalSearchDropdown({ query, searchResults, groups, loading, onSelect }) {
+  const q = (query || '').toLowerCase()
+  const words = q.split(/\s+/).filter(Boolean)
+  const matchesAll = (text) => words.every(w => text.includes(w))
+
+  const matchedGroups = groups.filter(g => {
+    if (!q) return true
+    const searchable = `${g.displayName} ${GROUP_ALIASES[g.displayName] || ''}`.toLowerCase()
+    return matchesAll(searchable)
+  }).slice(0, 5).map(g => ({ type: 'group', id: g.displayName, name: groupLabel(g.displayName), detail: 'Group' }))
+
+  const matchedUsers = searchResults.map(u => ({ type: 'user', id: u.email, name: u.displayName || u.email, detail: u.displayName ? u.email : '' }))
+
+  const items = q ? [...matchedGroups, ...matchedUsers] : matchedGroups.slice(0, 5)
+
+  const label = q ? `Results for "${query}"` : 'Suggested choices'
+
+  return (
+    <div className="absolute z-50 mt-1 w-full bg-dbx-bg border border-dbx-border rounded-lg shadow-lg max-h-64 overflow-y-auto">
+      <div className="px-3 py-2 text-[11px] text-dbx-text-secondary font-medium">{label}</div>
+      {loading && (
+        <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-dbx-text-secondary justify-center">
+          <Loader2 size={14} className="animate-spin" /> Loading workspace principals...
+        </div>
+      )}
+      {!loading && items.length === 0 && (
+        <div className="px-3 py-4 text-[13px] text-dbx-text-secondary text-center">
+          {q ? 'No matching users or groups' : 'No workspace data available'}
+        </div>
+      )}
+      {items.map(item => (
+        <button key={`${item.type}-${item.id}`} type="button"
+          className="w-full text-left px-3 py-2.5 hover:bg-dbx-sidebar transition-colors flex items-center gap-3"
+          onMouseDown={(e) => { e.preventDefault(); onSelect(item) }}>
+          {item.type === 'user' ? (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+              <path d="M10 10a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM3 17.5c0-3.5 3.134-5.5 7-5.5s7 2 7 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+              <path d="M7 9a3 3 0 100-6 3 3 0 000 6zM1.5 16.5c0-3 2.686-4.5 5.5-4.5 1 0 1.9.2 2.7.5M13 9a3 3 0 100-6 3 3 0 000 6zM18.5 16.5c0-3-2.686-4.5-5.5-4.5-1.2 0-2.3.3-3.2.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] text-dbx-text truncate">{item.name}</div>
+            {item.detail && <div className="text-[11px] text-dbx-text-secondary truncate">{item.detail}</div>}
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 /* ── Field row container ── */
 function FieldRow({ label, description, children, noBorder }) {
   return (
@@ -125,7 +186,7 @@ function EndpointSelect({ value, onChange, endpoints, loading, placeholder, filt
 }
 
 /* ── Sidebar structure ── */
-const SIDEBAR = [
+const SIDEBAR_BASE = [
   { category: 'Preferences', icon: Palette, items: [{ id: 'appearance', label: 'Appearance' }] },
   { category: 'Connection', icon: Database, items: [{ id: 'general', label: 'General' }] },
   { category: 'Gateway Defaults', icon: SlidersHorizontal, items: [
@@ -134,11 +195,29 @@ const SIDEBAR = [
     { id: 'ai-pipeline', label: 'AI Pipeline' },
   ]},
 ]
+const SIDEBAR_MANAGE = [
+  { category: 'Access Control', icon: Users, items: [{ id: 'access', label: 'Access Control' }] },
+]
 
 /* ── Main component ── */
 export default function SettingsPage() {
   const { themeMode, setThemeMode } = useTheme()
-  const [activeSection, setActiveSection] = useState('general')
+  const { isOwner, isManage, identity: currentIdentity } = useRole()
+  const [activeSection, setActiveSection] = useState('appearance')
+
+  const [principals, setPrincipals] = useState([])
+  const [principalsLoading, setPrincipalsLoading] = useState(false)
+  const [principalError, setPrincipalError] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchRole, setSearchRole] = useState('use')
+  const [searchSaving, setSearchSaving] = useState(false)
+  const [showSearch, setShowSearch] = useState(false)
+  const [searchResults, setSearchResults] = useState([])
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [workspaceGroups, setWorkspaceGroups] = useState([])
+  const [removeTarget, setRemoveTarget] = useState(null)
+  const [removing, setRemoving] = useState(false)
+  const [removeError, setRemoveError] = useState(null)
   const [config, setConfig] = useState({
     storage_backend: 'lakebase', lakebase_service_token: '', lakebase_instance_name: '',
     lakebase_catalog: 'default', lakebase_schema: 'public',
@@ -197,6 +276,116 @@ export default function SettingsPage() {
       .finally(() => setEndpointsLoading(false))
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
+
+  // Load RBAC data as soon as user has manage+ role
+  useEffect(() => {
+    if (!isManage) return
+    setPrincipalsLoading(true)
+    Promise.all([
+      api.listUsers().catch(() => []),
+      api.listGroups().catch(() => []),
+      api.listWorkspaceGroups().catch((e) => { console.error('Failed to load workspace groups:', e); return [] }),
+    ]).then(([roleUsers, roleGroups, wsGroups]) => {
+      const merged = [
+        ...roleUsers.map(u => ({ type: 'user', identity: u.identity, displayName: '', role: u.role, granted_by: u.granted_by })),
+        ...roleGroups.map(g => ({ type: 'group', identity: g.group_name, displayName: g.group_name, role: g.role, granted_by: g.granted_by })),
+      ]
+      setPrincipals(merged)
+      setWorkspaceGroups(wsGroups)
+    }).finally(() => setPrincipalsLoading(false))
+  }, [isManage])
+
+  // Debounced server-side user search
+  const searchTimerRef = useRef(null)
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+    if (!searchQuery || searchQuery.length < 2) {
+      setSearchResults([])
+      return
+    }
+    setSearchLoading(true)
+    searchTimerRef.current = setTimeout(() => {
+      api.searchWorkspacePrincipals(searchQuery)
+        .then(setSearchResults)
+        .catch(() => setSearchResults([]))
+        .finally(() => setSearchLoading(false))
+    }, 300)
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current) }
+  }, [searchQuery])
+
+  const handleAddPrincipal = async (item) => {
+    setSearchSaving(true)
+    setPrincipalError(null)
+    try {
+      if (item.type === 'user') {
+        const saved = await api.setUserRole(item.id, searchRole)
+        setPrincipals(prev => {
+          const without = prev.filter(p => !(p.type === 'user' && p.identity === saved.identity))
+          return [...without, { type: 'user', identity: saved.identity, displayName: item.name, role: saved.role, granted_by: saved.granted_by }]
+        })
+      } else {
+        const saved = await api.setGroupRole(item.id, searchRole)
+        setPrincipals(prev => {
+          const without = prev.filter(p => !(p.type === 'group' && p.identity === saved.group_name))
+          return [...without, { type: 'group', identity: saved.group_name, displayName: saved.group_name, role: saved.role, granted_by: saved.granted_by }]
+        })
+      }
+      setSearchQuery('')
+      setSearchRole('use')
+    } catch (err) {
+      setPrincipalError(err.response?.data?.detail || 'Failed to assign role.')
+    } finally { setSearchSaving(false) }
+  }
+
+  const handleChangePrincipalRole = async (principal, newRole) => {
+    setPrincipalError(null)
+    try {
+      if (principal.type === 'user') {
+        await api.setUserRole(principal.identity, newRole)
+      } else {
+        await api.setGroupRole(principal.identity, newRole)
+      }
+      setPrincipals(prev => prev.map(p =>
+        p.type === principal.type && p.identity === principal.identity ? { ...p, role: newRole } : p
+      ))
+    } catch (err) {
+      setPrincipalError(err.response?.data?.detail || 'Failed to change role.')
+    }
+  }
+
+  const handleRemovePrincipal = (principal) => {
+    setRemoveError(null)
+    setRemoveTarget(principal)
+  }
+
+  const cancelRemovePrincipal = () => {
+    setRemoveTarget(null)
+    setRemoveError(null)
+  }
+
+  const confirmRemovePrincipal = async () => {
+    if (!removeTarget) return
+    setRemoveError(null)
+    setRemoving(true)
+    try {
+      if (removeTarget.type === 'user') {
+        await api.deleteUserRole(removeTarget.identity)
+      } else {
+        await api.deleteGroupRole(removeTarget.identity)
+      }
+      setPrincipals(prev => prev.filter(p => !(p.type === removeTarget.type && p.identity === removeTarget.identity)))
+      setRemoveTarget(null)
+    } catch (err) {
+      setRemoveError(err.response?.data?.detail || 'Failed to remove.')
+    } finally {
+      setRemoving(false)
+    }
+  }
+
+  const SIDEBAR = useMemo(
+    () => (isManage ? [...SIDEBAR_BASE, ...SIDEBAR_MANAGE] : SIDEBAR_BASE),
+    [isManage]
+  )
 
   const persistSettings = useCallback(async () => {
     const c = configRef.current
@@ -377,7 +566,7 @@ export default function SettingsPage() {
             </FieldRow>
 
             <FieldRow label="Lakebase Service Token" description={
-              tokenSource === 'auto' ? 'Using auto-injected DATABRICKS_TOKEN. Set a custom token to override.'
+              tokenSource === 'auto' ? 'Using app service principal credentials (DATABRICKS_CLIENT_ID/SECRET). Set a custom token to override.'
                 : tokenSource === 'override' ? 'Custom token active (in-memory override).'
                 : 'Service principal token for Lakebase operations.'
             }>
@@ -460,6 +649,142 @@ export default function SettingsPage() {
             </FieldRow>
           </div>
 
+          {/* ── Access Control (manage+) ── */}
+          {isManage && (
+            <div ref={el => sectionRefs.current['access'] = el} className="mb-10">
+              <h2 className="text-[22px] font-semibold text-dbx-text leading-[28px] pb-3 border-b border-dbx-border">Access Control</h2>
+
+              <div className="py-4 text-[12px] text-dbx-text-secondary">
+                Workspace admins always have <span className="font-semibold text-dbx-text">Owner</span> access. Group roles use highest privilege when a user belongs to multiple groups.
+              </div>
+
+              {/* Role matrix */}
+              <div className="mb-6 rounded border border-dbx-border overflow-hidden text-[12px]">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-dbx-sidebar text-dbx-text-secondary">
+                      <th className="text-left px-3 py-2 font-medium">Role</th>
+                      <th className="text-left px-3 py-2 font-medium">Query</th>
+                      <th className="text-left px-3 py-2 font-medium">Configure</th>
+                      <th className="text-left px-3 py-2 font-medium">Create/Delete</th>
+                      <th className="text-left px-3 py-2 font-medium">Manage Users</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[
+                      { role: 'use',    q: true,  c: false, cd: false, mu: false },
+                      { role: 'manage', q: true,  c: true,  cd: false, mu: true  },
+                      { role: 'owner',  q: true,  c: true,  cd: true,  mu: true  },
+                    ].map(({ role, q, c, cd, mu }) => (
+                      <tr key={role} className="border-t border-dbx-border">
+                        <td className="px-3 py-2 font-medium capitalize text-dbx-text">{role}</td>
+                        {[q, c, cd, mu].map((v, i) => (
+                          <td key={i} className="px-3 py-2">
+                            <span className={v ? 'text-dbx-blue' : 'text-dbx-border-input'}>{v ? '●' : '○'}</span>
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Search input + role selector */}
+              <div className="flex items-center gap-2 mb-4">
+                <div className="relative flex-1">
+                  <input type="text"
+                    placeholder={workspaceGroups.length > 0 ? `Type to add users or groups (${workspaceGroups.length} groups loaded)` : 'Type to add users or groups'}
+                    value={searchQuery}
+                    onChange={(e) => { setSearchQuery(e.target.value); setShowSearch(true) }}
+                    onFocus={() => setShowSearch(true)}
+                    onBlur={() => setTimeout(() => setShowSearch(false), 200)}
+                    className={`${inputClass} w-full`}
+                  />
+                  {showSearch && (
+                    <PrincipalSearchDropdown
+                      query={searchQuery}
+                      searchResults={searchResults}
+                      groups={workspaceGroups}
+                      loading={searchLoading}
+                      onSelect={(item) => {
+                        handleAddPrincipal(item)
+                        setShowSearch(false)
+                      }}
+                    />
+                  )}
+                </div>
+                <select value={searchRole} onChange={(e) => setSearchRole(e.target.value)}
+                  className={`${inputClass} bg-dbx-bg`} style={{ width: '120px' }}>
+                  <option value="use">Use</option>
+                  <option value="manage">Manage</option>
+                  {isOwner && <option value="owner">Owner</option>}
+                </select>
+              </div>
+
+              {principalError && (
+                <div className="mb-3 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[13px]">
+                  {principalError}
+                </div>
+              )}
+
+              {/* Principals with access */}
+              <div className="text-[12px] text-dbx-text-secondary font-medium mb-2 mt-6">Principals with access</div>
+              {principalsLoading ? (
+                <div className="flex items-center gap-2 py-4 text-[13px] text-dbx-text-secondary">
+                  <Loader2 size={14} className="animate-spin" /> Loading...
+                </div>
+              ) : principals.length === 0 ? (
+                <div className="py-6 text-center text-[13px] text-dbx-text-secondary border border-dbx-border rounded">
+                  No explicit role assignments yet.
+                </div>
+              ) : (
+                <div className="space-y-0 border border-dbx-border rounded overflow-hidden">
+                  {principals.map((p) => {
+                    const isSelf = p.type === 'user' && !!currentIdentity &&
+                      (p.identity || '').toLowerCase() === currentIdentity.toLowerCase()
+                    return (
+                    <div key={`${p.type}-${p.identity}`}
+                      className="flex items-center gap-3 px-4 py-3 border-b last:border-b-0 border-dbx-border">
+                      {p.type === 'user' ? (
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+                          <path d="M10 10a3.5 3.5 0 100-7 3.5 3.5 0 000 7zM3 17.5c0-3.5 3.134-5.5 7-5.5s7 2 7 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                      ) : (
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="none" className="text-dbx-text-secondary shrink-0">
+                          <path d="M7 9a3 3 0 100-6 3 3 0 000 6zM1.5 16.5c0-3 2.686-4.5 5.5-4.5 1 0 1.9.2 2.7.5M13 9a3 3 0 100-6 3 3 0 000 6zM18.5 16.5c0-3-2.686-4.5-5.5-4.5-1.2 0-2.3.3-3.2.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                      )}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] text-dbx-text truncate">
+                          {p.type === 'group' ? groupLabel(p.identity) : (p.displayName || p.identity)}
+                          {isSelf && <span className="ml-2 text-[11px] text-dbx-text-secondary">(you)</span>}
+                        </div>
+                        {p.type === 'user' && p.displayName && (
+                          <div className="text-[11px] text-dbx-text-secondary truncate">{p.identity}</div>
+                        )}
+                      </div>
+                      <select value={p.role}
+                        onChange={(e) => handleChangePrincipalRole(p, e.target.value)}
+                        disabled={isSelf}
+                        title={isSelf ? "You can't change your own role" : undefined}
+                        className="h-7 text-[12px] text-dbx-text bg-dbx-bg border border-dbx-border rounded px-2 outline-none disabled:opacity-50 disabled:cursor-not-allowed">
+                        <option value="use">Use</option>
+                        <option value="manage">Manage</option>
+                        {isOwner && <option value="owner">Owner</option>}
+                      </select>
+                      <button onClick={() => handleRemovePrincipal(p)}
+                        disabled={isSelf}
+                        title={isSelf ? "You can't remove your own access" : 'Remove'}
+                        className="text-dbx-text-secondary hover:text-red-600 transition-colors p-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-dbx-text-secondary">
+                        <XCircle size={14} />
+                      </button>
+                    </div>
+                  )})}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ── AI Pipeline ── */}
           <div ref={el => sectionRefs.current['ai-pipeline'] = el} className="mb-10">
             <h3 className="text-[18px] font-semibold text-dbx-text leading-[24px] mb-2">AI Pipeline</h3>
@@ -506,6 +831,43 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+
+      <Modal isOpen={!!removeTarget} onClose={() => !removing && cancelRemovePrincipal()} title="Remove Access" maxWidth="max-w-md">
+        <div className="flex flex-col items-center text-center pt-2">
+          <div className="w-12 h-12 rounded-full bg-dbx-status-red-bg flex items-center justify-center mb-4">
+            <AlertTriangle size={24} className="text-dbx-text-danger" />
+          </div>
+          <p className="text-[14px] text-dbx-text mb-1">
+            Remove {removeTarget?.type === 'group' ? 'group' : 'user'} access?
+          </p>
+          <p className="text-[13px] text-dbx-text-secondary mb-6">
+            <span className="font-medium text-dbx-text">
+              {removeTarget ? (removeTarget.type === 'group' ? groupLabel(removeTarget.identity) : (removeTarget.displayName || removeTarget.identity)) : ''}
+            </span> will lose access to this app.
+          </p>
+          {removeError && (
+            <div className="w-full mb-4 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[12px] text-left">
+              {removeError}
+            </div>
+          )}
+          <div className="flex gap-3 w-full">
+            <button
+              onClick={cancelRemovePrincipal}
+              disabled={removing}
+              className="flex-1 h-8 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmRemovePrincipal}
+              disabled={removing}
+              className="flex-1 h-8 text-[13px] font-medium text-white bg-[#D32F2F] rounded hover:bg-[#B71C1C] transition-colors disabled:opacity-50"
+            >
+              {removing ? 'Removing...' : 'Remove'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

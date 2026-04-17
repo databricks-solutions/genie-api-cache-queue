@@ -3,8 +3,11 @@ Dynamic storage service that can switch backends at runtime.
 Useful for Databricks Apps where Lakebase config comes from frontend.
 All public methods are async — PGVector operations are awaited directly.
 
-On connection errors, the cached backend is invalidated and recreated from
-scratch (new JWT, new pool) before retrying the operation.
+On transient Lakebase errors, the operation is retried once after a health
+check that reinitializes a closed pool or refreshes an expiring JWT. If the
+retry also fails, the backend is explicitly reinitialized (new pool) before
+a final attempt. Config-level ValueError is re-raised immediately — retries
+cannot fix misconfiguration.
 """
 
 import asyncio
@@ -147,27 +150,45 @@ class DynamicStorageService:
                 backend = await self._get_or_create_pgvector_backend(runtime_settings)
                 await self._proactive_refresh(backend)
                 return backend
-            if rt.storage_backend == 'local':
-                return self.default_backend
+            if rt.storage_backend not in ('lakebase', 'pgvector'):
+                raise ValueError(f"Unsupported storage backend: '{rt.storage_backend}'. Only 'lakebase' is supported.")
         return self.default_backend
 
     async def _with_reconnect(self, operation, runtime_settings):
-        """Run operation. On any Lakebase error, reinitialize pool and retry once."""
+        """Run operation with Lakebase recovery on transient errors.
+
+        Config-level ValueError (missing SP token, wrong backend, etc.) is re-raised
+        immediately — retry cannot fix a misconfiguration.
+
+        For other errors: _resolve_backend runs a health check that reinitializes a
+        closed pool or refreshes an expiring JWT, so we retry once before forcing
+        an explicit reinit. This avoids double-reinit when the health check already
+        rebuilt the pool.
+        """
         try:
             return await operation()
+        except ValueError:
+            raise
         except Exception as first_err:
+            logger.warning("Lakebase error: %s (%s) — retrying after health check",
+                          type(first_err).__name__, first_err)
             backend = await self._resolve_backend(runtime_settings)
             if not hasattr(backend, 'reinitialize'):
                 raise
-            logger.warning("Lakebase error: %s (%s) — reinitializing",
-                          type(first_err).__name__, first_err)
             try:
-                async with self._creation_lock:
-                    await backend.reinitialize()
-            except Exception as reinit_err:
-                logger.error("Reinitialize failed: %s", reinit_err)
-                raise first_err
-            return await operation()
+                return await operation()
+            except ValueError:
+                raise
+            except Exception as second_err:
+                logger.warning("Lakebase still failing: %s (%s) — reinitializing",
+                              type(second_err).__name__, second_err)
+                try:
+                    async with self._creation_lock:
+                        await backend.reinitialize()
+                except Exception as reinit_err:
+                    logger.error("Reinitialize failed: %s", reinit_err)
+                    raise first_err
+                return await operation()
 
     async def search_similar_query(
         self,
@@ -342,3 +363,68 @@ class DynamicStorageService:
         if hasattr(backend, 'pool'):
             return await backend.get_gateway_stats(gateway_id)
         return backend.get_gateway_stats(gateway_id)
+
+    # --- User & group roles CRUD (Lakebase only) ---
+
+    async def _resolve_rbac_backend(self):
+        """Resolve default backend with health check; require pgvector for RBAC."""
+        backend = await self._resolve_backend(None)
+        if not hasattr(backend, 'pool'):
+            raise ValueError(
+                "RBAC requires Lakebase (pgvector). Configure a Lakebase instance in Settings."
+            )
+        return backend
+
+    async def get_user_role(self, identity: str):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.get_user_role(identity)
+        return await self._with_reconnect(_op, None)
+
+    async def set_user_role(self, identity: str, role: str, granted_by: str = None):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.set_user_role(identity, role, granted_by)
+        return await self._with_reconnect(_op, None)
+
+    async def list_user_roles(self) -> list:
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.list_user_roles()
+        return await self._with_reconnect(_op, None)
+
+    async def delete_user_role(self, identity: str):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.delete_user_role(identity)
+        return await self._with_reconnect(_op, None)
+
+    async def get_group_role(self, group_name: str):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.get_group_role(group_name)
+        return await self._with_reconnect(_op, None)
+
+    async def set_group_role(self, group_name: str, role: str, granted_by: str = None):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.set_group_role(group_name, role, granted_by)
+        return await self._with_reconnect(_op, None)
+
+    async def list_group_roles(self) -> list:
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.list_group_roles()
+        return await self._with_reconnect(_op, None)
+
+    async def delete_group_role(self, group_name: str):
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.delete_group_role(group_name)
+        return await self._with_reconnect(_op, None)
+
+    async def count_owners(self) -> int:
+        async def _op():
+            backend = await self._resolve_rbac_backend()
+            return await backend.count_owners()
+        return await self._with_reconnect(_op, None)
