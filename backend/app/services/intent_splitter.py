@@ -10,6 +10,7 @@ returns only the portion belonging to the latest intent, so downstream embedding
 and cache lookup operates on a single coherent question.
 """
 
+import json
 import logging
 
 from databricks.sdk import WorkspaceClient
@@ -34,9 +35,16 @@ Rules:
 drill-downs) are NOT intent shifts — they are continuations of the same intent.
 - An intent shift happens when a sentence clearly is not additive to the previous \
 sentences and clearly switches to a different subject.
-- If the entire conversation is one continuous intent, return it unchanged.
+- If the entire conversation is one continuous intent, return the conversation unchanged.
 - Preserve the original wording exactly — do not paraphrase, translate, or modify.
-- If you find a clear intent shift, return only the relevant portion of the conversation, with no explanation.
+
+Respond ONLY with valid JSON matching exactly this schema — no explanation, no markdown:
+{{
+  "latest_intent": "<the portion of the conversation belonging to the latest intent, verbatim>"
+}}
+
+Do NOT translate or change the original wording. Do NOT add any additional text or explanation. \
+Do NOT add markdown like ```json or ```. Do NOT add line breaks outside of the JSON string value.
 
 {space_context}
 
@@ -75,8 +83,38 @@ async def split_by_intent(context_text: str, runtime_settings=None, space_contex
             body={"messages": [{"role": "user", "content": prompt}]},
         )
 
-        result = response["choices"][0]["message"]["content"].strip()
+        content = response["choices"][0]["message"]["content"]
 
+        try:
+            # Strip markdown code fences the LLM sometimes wraps around JSON
+            stripped = content.strip()
+            if stripped.startswith("```"):
+                stripped = stripped.lstrip("`")
+                if stripped.startswith("json"):
+                    stripped = stripped[4:]
+                # Remove closing fence (may be malformed, e.g. missing newline before ```)
+                if "```" in stripped:
+                    stripped = stripped[: stripped.rfind("```")]
+                content = stripped.strip()
+            parsed = json.loads(content)
+        except Exception:
+            import traceback
+            logger.warning("Intent splitter: traceback=%s", traceback.format_exc())
+            logger.warning(
+                "Intent splitter: unparseable result in response %r — returning original context",
+                content[:120],
+            )
+            return context_text
+
+        result = parsed.get("latest_intent")
+        if not isinstance(result, str):
+            logger.warning(
+                "Intent splitter: missing or non-string 'latest_intent' in %r — returning original context",
+                parsed,
+            )
+            return context_text
+
+        result = result.strip()
         if not result:
             logger.warning("Intent splitter: empty result — returning original context")
             return context_text
