@@ -127,6 +127,9 @@ class DatabaseService:
     async def clear_cache(self, runtime_settings=None, gateway_id=None) -> int:
         return await self.backend.clear_cache(runtime_settings, gateway_id=gateway_id)
 
+    async def delete_cache_entries(self, entry_ids, gateway_id, runtime_settings=None) -> int:
+        return await self.backend.delete_cache_entries(entry_ids, gateway_id, runtime_settings=runtime_settings)
+
     # --- Gateway CRUD ---
 
     async def create_gateway(self, config: dict) -> dict:
@@ -146,6 +149,17 @@ class DatabaseService:
 
     async def get_gateway_stats(self, gateway_id: str) -> dict:
         return await self.backend.get_gateway_stats(gateway_id)
+
+    # --- Global settings ---
+
+    async def get_global_settings(self) -> dict:
+        return await self.backend.get_global_settings()
+
+    async def update_global_settings(self, updates: dict, updated_by: Optional[str] = None) -> None:
+        await self.backend.update_global_settings(updates, updated_by)
+
+    async def delete_global_setting(self, key: str) -> bool:
+        return await self.backend.delete_global_setting(key)
 
     # --- User roles ---
 

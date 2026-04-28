@@ -21,6 +21,8 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Default Databricks Foundation Model endpoint used for intent splitting.
+# Can be overridden per-gateway or globally via RuntimeSettings.intent_split_model.
 INTENT_SPLIT_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
 _INTENT_SPLIT_PROMPT_TEMPLATE = """\

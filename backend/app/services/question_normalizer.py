@@ -17,7 +17,8 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Databricks Foundation Model endpoint used for normalization.
+# Default Databricks Foundation Model endpoint used for normalization.
+# Can be overridden per-gateway or globally via RuntimeSettings.normalization_model.
 QUESTION_NORMALIZATION_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
 _NORMALIZATION_PROMPT_TEMPLATE = """\
@@ -44,14 +45,21 @@ QUESTION:
 
 
 def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
-    """Build a WorkspaceClient using user's OAuth token (X-Forwarded-Access-Token)."""
+    """Build a WorkspaceClient using user's OAuth token (X-Forwarded-Access-Token).
+
+    Resolves the serving endpoint from runtime_settings.normalization_model if set,
+    else falls back to QUESTION_NORMALIZATION_LLM_ENDPOINT.
+    """
+    endpoint = QUESTION_NORMALIZATION_LLM_ENDPOINT
+    if runtime_settings is not None and getattr(runtime_settings, "normalization_model", None):
+        endpoint = runtime_settings.normalization_model
     if runtime_settings:
         token = runtime_settings.databricks_token
         if not token:
             raise RuntimeError("No user token available for question normalization (X-Forwarded-Access-Token missing)")
         config = Config(host=runtime_settings.databricks_host, token=token, auth_type="pat")
-        return WorkspaceClient(config=config), QUESTION_NORMALIZATION_LLM_ENDPOINT
-    return WorkspaceClient(), QUESTION_NORMALIZATION_LLM_ENDPOINT
+        return WorkspaceClient(config=config), endpoint
+    return WorkspaceClient(), endpoint
 
 
 async def normalize_question(query_text: str, runtime_settings=None, space_context: str = "") -> str:

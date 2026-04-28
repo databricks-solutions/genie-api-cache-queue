@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { RefreshCw, Trash2, Database, TrendingUp, AlertTriangle } from 'lucide-react'
 import { api } from '../../services/api'
 import DataTable from '../shared/DataTable'
@@ -9,8 +9,10 @@ export default function GatewayCacheTab({ gateway }) {
   const [loading, setLoading] = useState(true)
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [error, setError] = useState(null)
-  const [clearing, setClearing] = useState(false)
-  const [showClearConfirm, setShowClearConfirm] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const headerCheckboxRef = useRef(null)
 
   const fetchCachedQueries = useCallback(async () => {
     try {
@@ -36,16 +38,55 @@ export default function GatewayCacheTab({ gateway }) {
     }
   }, [autoRefresh, fetchCachedQueries])
 
-  const handleClearCache = async () => {
-    setShowClearConfirm(false)
+  // Prune selections that no longer exist after a refresh.
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev
+      const existing = new Set(cachedQueries.map((q) => q.id))
+      const next = new Set()
+      for (const id of prev) if (existing.has(id)) next.add(id)
+      return next.size === prev.size ? prev : next
+    })
+  }, [cachedQueries])
+
+  const allSelected = cachedQueries.length > 0 && selectedIds.size === cachedQueries.length
+  const someSelected = selectedIds.size > 0 && !allSelected
+
+  useEffect(() => {
+    if (headerCheckboxRef.current) {
+      headerCheckboxRef.current.indeterminate = someSelected
+    }
+  }, [someSelected])
+
+  const toggleOne = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    setSelectedIds((prev) => {
+      if (prev.size === cachedQueries.length) return new Set()
+      return new Set(cachedQueries.map((q) => q.id))
+    })
+  }
+
+  const handleDeleteSelected = async () => {
+    setShowConfirm(false)
+    const ids = [...selectedIds]
+    if (ids.length === 0) return
     try {
-      setClearing(true)
-      await api.clearGatewayCache(gateway.id)
+      setDeleting(true)
+      await api.deleteGatewayCacheEntries(gateway.id, ids)
+      setSelectedIds(new Set())
       await fetchCachedQueries()
     } catch (err) {
-      setError('Failed to clear cache: ' + err.message)
+      setError('Failed to delete entries: ' + err.message)
     } finally {
-      setClearing(false)
+      setDeleting(false)
     }
   }
 
@@ -63,7 +104,32 @@ export default function GatewayCacheTab({ gateway }) {
     ? (totalUses / cachedQueries.length).toFixed(1)
     : '0'
 
-  const columns = [
+  const columns = useMemo(() => [
+    {
+      key: '__select',
+      width: '36px',
+      label: (
+        <input
+          ref={headerCheckboxRef}
+          type="checkbox"
+          aria-label="Select all"
+          checked={allSelected}
+          onChange={toggleAll}
+          disabled={cachedQueries.length === 0}
+          className="rounded accent-dbx-blue cursor-pointer align-middle"
+        />
+      ),
+      render: (_, row) => (
+        <input
+          type="checkbox"
+          aria-label={`Select entry ${row.id}`}
+          checked={selectedIds.has(row.id)}
+          onChange={(e) => { e.stopPropagation(); toggleOne(row.id) }}
+          onClick={(e) => e.stopPropagation()}
+          className="rounded accent-dbx-blue cursor-pointer align-middle"
+        />
+      ),
+    },
     {
       key: 'id',
       label: 'ID',
@@ -126,7 +192,10 @@ export default function GatewayCacheTab({ gateway }) {
         </span>
       ),
     },
-  ]
+  ], [allSelected, cachedQueries.length, selectedIds, gateway.cache_ttl_seconds])
+
+  const selectedCount = selectedIds.size
+  const confirmLabel = selectedCount === 1 ? 'entry' : 'entries'
 
   return (
     <div className="space-y-4">
@@ -151,14 +220,29 @@ export default function GatewayCacheTab({ gateway }) {
             Refresh
           </button>
         </div>
-        <button
-          onClick={() => setShowClearConfirm(true)}
-          disabled={clearing || cachedQueries.length === 0}
-          className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text-danger border border-dbx-border-input rounded hover:bg-dbx-status-red-bg transition-colors disabled:opacity-50"
-        >
-          <Trash2 size={14} />
-          {clearing ? 'Clearing...' : 'Clear Cache'}
-        </button>
+        <div className="flex items-center gap-2">
+          {selectedCount > 0 && (
+            <>
+              <span className="text-[12px] text-dbx-text-secondary">
+                {selectedCount} selected
+              </span>
+              <button
+                onClick={() => setSelectedIds(new Set())}
+                className="h-8 px-2 text-[12px] text-dbx-text-secondary hover:text-dbx-text transition-colors"
+              >
+                Clear selection
+              </button>
+              <button
+                onClick={() => setShowConfirm(true)}
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 h-8 px-3 text-[13px] font-medium text-dbx-text-danger border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors disabled:opacity-50"
+              >
+                <Trash2 size={14} />
+                {deleting ? 'Deleting...' : `Delete ${selectedCount}`}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Stats row */}
@@ -204,11 +288,10 @@ export default function GatewayCacheTab({ gateway }) {
         </div>
       )}
 
-      {/* Clear cache confirmation modal */}
       <Modal
-        isOpen={showClearConfirm}
-        onClose={() => setShowClearConfirm(false)}
-        title="Clear Cache"
+        isOpen={showConfirm}
+        onClose={() => setShowConfirm(false)}
+        title="Delete Selected Entries"
         maxWidth="max-w-md"
       >
         <div className="flex flex-col items-center text-center pt-2">
@@ -216,24 +299,24 @@ export default function GatewayCacheTab({ gateway }) {
             <AlertTriangle size={24} className="text-dbx-text-danger" />
           </div>
           <p className="text-[14px] text-dbx-text mb-1">
-            Are you sure you want to clear the cache?
+            Delete {selectedCount} selected {confirmLabel}?
           </p>
           <p className="text-[13px] text-dbx-text-secondary mb-6">
-            <span className="font-medium text-dbx-text">{cachedQueries.length} {cachedQueries.length === 1 ? 'entry' : 'entries'}</span> will be permanently deleted.
+            <span className="font-medium text-dbx-text">{selectedCount} {confirmLabel}</span> will be permanently deleted.
             Future queries will need to go through the Genie API again.
           </p>
           <div className="flex gap-3 w-full">
             <button
-              onClick={() => setShowClearConfirm(false)}
+              onClick={() => setShowConfirm(false)}
               className="flex-1 h-9 text-[13px] font-medium text-dbx-text border border-dbx-border-input rounded hover:bg-dbx-neutral-hover transition-colors"
             >
               Cancel
             </button>
             <button
-              onClick={handleClearCache}
+              onClick={handleDeleteSelected}
               className="flex-1 h-9 text-[13px] font-medium text-white bg-dbx-text-danger rounded hover:opacity-90 transition-colors"
             >
-              Clear {cachedQueries.length} {cachedQueries.length === 1 ? 'entry' : 'entries'}
+              Delete {selectedCount} {confirmLabel}
             </button>
           </div>
         </div>

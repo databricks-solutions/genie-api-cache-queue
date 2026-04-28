@@ -226,8 +226,8 @@ export const api = {
     const response = await axios.get(`${API_BASE_URL}/gateways/${gatewayId}/cache`);
     return response.data;
   },
-  clearGatewayCache: async (gatewayId) => {
-    const response = await axios.delete(`${API_BASE_URL}/gateways/${gatewayId}/cache`);
+  deleteGatewayCacheEntries: async (gatewayId, entryIds) => {
+    const response = await axios.post(`${API_BASE_URL}/gateways/${gatewayId}/cache/delete`, { entry_ids: entryIds });
     return response.data;
   },
   getGatewayLogs: async (gatewayId, limit = 50) => {
@@ -252,6 +252,10 @@ export const api = {
   },
   getSettings: async () => {
     const response = await axios.get(`${API_BASE_URL}/settings`);
+    return response.data;
+  },
+  getVersion: async () => {
+    const response = await axios.get(`${API_BASE_URL}/version`);
     return response.data;
   },
   updateSettings: async (settings) => {

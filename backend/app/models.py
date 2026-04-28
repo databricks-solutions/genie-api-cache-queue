@@ -26,11 +26,11 @@ class RuntimeConfig(BaseModel):
     max_queries_per_minute: Optional[int] = None
     embedding_provider: Optional[str] = None
     databricks_embedding_endpoint: Optional[str] = None
-    
+
     # Storage backend selection
     storage_backend: Optional[str] = None  # 'lakebase'
     cache_ttl_hours: Optional[float] = None  # 0 = no freshness limit
-    
+
     # Lakebase/PostgreSQL configuration (for PGVector caching)
     lakebase_instance_name: Optional[str] = None  # Lakebase instance name (e.g., my-lakebase-instance)
     lakebase_catalog: Optional[str] = None   # e.g., sean_lakebase_genie
@@ -45,6 +45,12 @@ class RuntimeConfig(BaseModel):
     question_normalization_enabled: Optional[bool] = None  # LLM-based question normalization
     cache_validation_enabled: Optional[bool] = None  # LLM-based cache hit validation
     caching_enabled: Optional[bool] = None  # Enable/disable semantic cache entirely
+    intent_split_enabled: Optional[bool] = None  # LLM-based intent split
+
+    # LLM serving endpoints (per-service overrides; fall back to module default)
+    normalization_model: Optional[str] = None
+    validation_model: Optional[str] = None
+    intent_split_model: Optional[str] = None
 
 class QueryRequest(BaseModel):
     query: str
@@ -166,6 +172,10 @@ class GatewayConfig(BaseModel):
     status: str = "active"
     created_by: Optional[str] = None
     description: str = ""
+    normalization_model: Optional[str] = None
+    validation_model: Optional[str] = None
+    intent_split_model: Optional[str] = None
+    intent_split_enabled: bool = True
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     # Stats (populated on list/get, not stored)
@@ -182,9 +192,14 @@ class GatewayCreateRequest(BaseModel):
     cache_ttl_hours: Optional[float] = None
     question_normalization_enabled: Optional[bool] = None
     cache_validation_enabled: Optional[bool] = None
+    caching_enabled: Optional[bool] = None
     embedding_provider: Optional[str] = None
     databricks_embedding_endpoint: Optional[str] = None
     shared_cache: Optional[bool] = None
+    normalization_model: Optional[str] = None
+    validation_model: Optional[str] = None
+    intent_split_model: Optional[str] = None
+    intent_split_enabled: Optional[bool] = None
     description: Optional[str] = ""
 
 
@@ -202,3 +217,7 @@ class GatewayUpdateRequest(BaseModel):
     sql_warehouse_id: Optional[str] = None
     status: Optional[str] = None
     description: Optional[str] = None
+    normalization_model: Optional[str] = None
+    validation_model: Optional[str] = None
+    intent_split_model: Optional[str] = None
+    intent_split_enabled: Optional[bool] = None
