@@ -31,6 +31,10 @@ from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
 from app.services.prompt_enricher import get_space_context
 from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
+from app.api.cache_hit_helpers import (
+    classify_cache_hit_exec as _classify_cache_hit_exec,
+    build_cache_hit_response as _build_cache_hit_response,
+)
 import app.services.database as _db
 
 _rate_limiter = _get_rate_limiter()
@@ -487,62 +491,42 @@ async def _handle_query(
 
         conv_id, msg_id, att_id = _make_synthetic_ids()
 
-        # Execute the cached SQL to get fresh data
         sql_result = None
+        exec_error = None
         try:
             sql_result = await genie_service.execute_sql(sql_query, rs)
         except Exception as e:
             logger.warning("Cache hit SQL execution failed: %s", e)
+            exec_error = {"error": f"Cache hit SQL execution failed: {e}", "type": "EXEC_EXCEPTION"}
 
-        statement_id = sql_result.get("statement_id") if sql_result else None
-        row_count = 0
-        if sql_result and sql_result.get("result"):
-            row_count = sql_result["result"].get("row_count", 0)
+        # Surface non-SUCCEEDED warehouse status as FAILED. Without this we'd
+        # silently return row_count=0 COMPLETED — catches Genie metric-view SQL
+        # (MEASURE/DIMENSION) the warehouse can't parse, TEMPORARILY_UNAVAILABLE
+        # concurrency throttles, etc.
+        if exec_error is None:
+            exec_error = _classify_cache_hit_exec(sql_result)
 
-        response = {
-            "conversation_id": conv_id,
-            "message_id": msg_id,
-            "status": "COMPLETED",
-            "attachments": [
-                {
-                    "attachment_id": att_id,
-                    "query": {
-                        "query": sql_query,
-                        "description": "Cached query — SQL re-executed against warehouse.",
-                        **({"statement_id": statement_id} if statement_id else {}),
-                        "query_result_metadata": {"row_count": row_count},
-                    },
-                },
-                {
-                    "attachment_id": f"{ATT_PREFIX}txt_{uuid.uuid4().hex[:16]}",
-                    "text": {"content": "This result was served from the semantic cache."},
-                },
-            ],
-        }
-        # Extract inner result (same format as cache miss)
-        actual_result = None
-        if sql_result and sql_result.get("status") == "SUCCEEDED":
-            actual_result = sql_result.get("result")
-
-        response["_proxy"] = {
-            "stage": "completed",
-            "from_cache": True,
-            "sql_query": sql_query,
-            "result": actual_result,
-            "auth_mode": auth_mode,
-        }
+        response = _build_cache_hit_response(
+            sql_query=sql_query,
+            sql_result=sql_result,
+            exec_error=exec_error,
+            conv_id=conv_id,
+            msg_id=msg_id,
+            att_id=att_id,
+            auth_mode=auth_mode,
+        )
+        proxy_stage = response["_proxy"]["stage"]
         await _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
             _synthetic_messages[msg_id] = response
             _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
 
-        # Save query log
         try:
             await _db.db_service.save_query_log(
                 query_id=msg_id,
                 query_text=original_query_text,
                 identity=identity,
-                stage="completed",
+                stage=proxy_stage,
                 from_cache=True,
                 gateway_id=gateway.get("id") if gateway else None,
                 runtime_settings=rs,
