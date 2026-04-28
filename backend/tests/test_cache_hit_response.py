@@ -27,13 +27,13 @@ def test_classify_succeeded_returns_none():
 def test_classify_failed_returns_exec_failed_with_message():
     sql_result = {
         "status": "FAILED",
-        "error": {"message": "Cannot parse MEASURE() outside Genie context"},
+        "error": {"message": "PARSE_SYNTAX_ERROR: unexpected token at line 3"},
     }
     err = classify_cache_hit_exec(sql_result)
     assert err is not None
     assert err["type"] == "EXEC_FAILED"
     assert "FAILED" in err["error"]
-    assert "MEASURE" in err["error"]
+    assert "PARSE_SYNTAX_ERROR" in err["error"]
 
 
 def test_classify_handles_string_error():
@@ -111,23 +111,23 @@ def test_build_response_exec_exception_marks_failed():
 
 
 def test_build_response_warehouse_failed_marks_failed():
-    """Q115 case: warehouse rejected MEASURE() semantic-layer SQL."""
+    """Generic warehouse-FAILED path: any non-SUCCEEDED status surfaces as FAILED."""
     sql_result = {
         "status": "FAILED",
         "statement_id": "stmt-bad",
-        "error": {"message": "syntax error: MEASURE"},
+        "error": {"message": "PARSE_SYNTAX_ERROR: unexpected token"},
         "result": None,
     }
     exec_error = classify_cache_hit_exec(sql_result)
     resp = build_cache_hit_response(
-        sql_query="SELECT MEASURE(`X`) FROM mv",
+        sql_query="SELECT bogus FROM t",
         sql_result=sql_result,
         exec_error=exec_error,
         conv_id="c", msg_id="m", att_id="a",
         auth_mode="user",
     )
     assert resp["status"] == "FAILED"
-    assert "MEASURE" in resp["error"]["error"]
+    assert "PARSE_SYNTAX_ERROR" in resp["error"]["error"]
     assert resp["_proxy"]["result"] is None
     assert resp["_proxy"]["stage"] == "failed"
 

@@ -9,7 +9,6 @@ from app.services.cache_write_validator import (
     _extract_requested_target,
     _split_targets,
     _REFUSAL_RE,
-    _METRIC_VIEW_RE,
 )
 
 
@@ -53,28 +52,23 @@ def test_skips_on_genie_refusal_text():
     assert d.reason == "genie_refusal"
 
 
-def test_skips_on_metric_view_sql():
+def test_metric_view_sql_is_cached():
+    # Regression: MEASURE()/DIMENSION() in cached SQL is fine — UC metric views
+    # are queryable from any SQL warehouse on Preview channel / DBR 16.4+ via
+    # /api/2.0/sql/statements. Earlier versions of this validator wrongly
+    # skipped any SQL containing MEASURE/DIMENSION; that rule was removed.
     d = evaluate_cache_write(
-        question="total grants",
-        sql_query="SELECT MEASURE(`Total Grant Commitment USD`) FROM mv_grants",
+        question="top recipient countries by total grant commitment",
+        sql_query=(
+            "SELECT `Recipient Country`, MEASURE(`Total Grant Commitment USD`) "
+            "FROM mv_tf_execution GROUP BY ALL"
+        ),
         row_count=5,
-        columns=["x"],
+        columns=["Recipient Country", "Total Grant Commitment USD"],
         genie_text=None,
     )
-    assert d.should_write is False
-    assert d.reason == "metric_view_sql"
-
-
-def test_skips_on_dimension_sql():
-    d = evaluate_cache_write(
-        question="trust funds",
-        sql_query="SELECT DIMENSION(`Trust Fund`) FROM mv",
-        row_count=5,
-        columns=["x"],
-        genie_text=None,
-    )
-    assert d.should_write is False
-    assert d.reason == "metric_view_sql"
+    assert d.should_write is True
+    assert d.reason is None
 
 
 def test_column_mismatch_skips_when_target_explicitly_named():
@@ -295,9 +289,3 @@ def test_refusal_pattern_matches_common_phrasings():
     assert not _REFUSAL_RE.search("Here is the breakdown of grants by year.")
 
 
-def test_metric_view_regex_is_case_insensitive():
-    assert _METRIC_VIEW_RE.search("select measure(`x`) from t")
-    assert _METRIC_VIEW_RE.search("SELECT Measure(  `x` ) FROM t")
-    assert _METRIC_VIEW_RE.search("dimension(  `Trust Fund` )")
-    # Benign SQL must NOT match — `MEASUREMENT` shouldn't false-positive.
-    assert not _METRIC_VIEW_RE.search("SELECT MEASUREMENT FROM t")

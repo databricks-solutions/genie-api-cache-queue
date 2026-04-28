@@ -362,8 +362,8 @@ async def _process_genie_background(
 
                 # Cache-write decision. Only persist if the warehouse actually
                 # ran the SQL successfully AND the heuristic validator approves
-                # (non-empty rows, no Genie refusal text, no MEASURE/DIMENSION,
-                # output columns match the user's requested target if any).
+                # (non-empty rows, no Genie refusal text, output columns match
+                # the user's requested target if any).
                 cache_skip_reason: str | None = None
                 row_count: int | None = None
                 result_columns: list[str] | None = None
@@ -553,9 +553,9 @@ async def _handle_query(
             exec_error = {"error": f"Cache hit SQL execution failed: {e}", "type": "EXEC_EXCEPTION"}
 
         # Surface non-SUCCEEDED warehouse status as FAILED. Without this we'd
-        # silently return row_count=0 COMPLETED — catches Genie metric-view SQL
-        # (MEASURE/DIMENSION) the warehouse can't parse, TEMPORARILY_UNAVAILABLE
-        # concurrency throttles, etc.
+        # silently return row_count=0 COMPLETED — catches warehouse-side errors
+        # like syntax/permission failures, TEMPORARILY_UNAVAILABLE concurrency
+        # throttles, etc.
         if exec_error is None:
             exec_error = _classify_cache_hit_exec(sql_result)
 
