@@ -36,5 +36,14 @@ env:
     value: default
   - name: LAKEBASE_SCHEMA
     value: public
+  # MLflow tracing — toggle with TRACING_ENABLED=true to emit OTEL-compatible
+  # spans for every router query. Experiment path is patched by install.sh to
+  # /Users/<deployer>/<app-name>-traces so the SP writes to a workspace-resident
+  # experiment the deployer owns. Set TRACING_ENABLED=false to disable without
+  # removing the dep.
+  - name: TRACING_ENABLED
+    value: "true"
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "<patched-at-deploy>"
 
 # Static files served by FastAPI (not needed here)

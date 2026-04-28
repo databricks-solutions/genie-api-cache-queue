@@ -812,6 +812,60 @@ open(p, 'w').write(s)
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
+# Step 11b: Resolve MLflow experiment path and grant SP CAN_EDIT (idempotent)
+# ══════════════════════════════════════════════════════════════════════════
+# Tracing writes to a workspace experiment the deployer owns; the app SP
+# needs CAN_EDIT to append runs. We create-or-reuse the experiment by path
+# and then patch the permissions ACL. Failure here is non-fatal — tracing
+# falls back to a noop in the app if the experiment isn't reachable.
+_header "Step 11b: Configuring MLflow experiment for tracing"
+
+DEPLOYER_EMAIL=$(databricks current-user me --profile "$PROFILE" -o json 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('userName','') or d.get('emails',[{}])[0].get('value',''))" 2>/dev/null || echo "")
+
+if [ -z "$DEPLOYER_EMAIL" ]; then
+    _warn "Could not resolve deployer email — tracing experiment will use the app's SP workspace home"
+    MLFLOW_EXPERIMENT_NAME="/Shared/${APP_NAME}-traces"
+else
+    MLFLOW_EXPERIMENT_NAME="/Users/${DEPLOYER_EMAIL}/${APP_NAME}-traces"
+fi
+
+_info "Experiment path: $MLFLOW_EXPERIMENT_NAME"
+
+# Create-or-fetch the experiment.  The MLflow REST API returns {"experiment_id"}
+# on create and a conflict on re-create; we try create first, fall back to
+# get-by-name on conflict.
+EXPERIMENT_ID=$(databricks api post "/api/2.0/mlflow/experiments/create" \
+    --profile "$PROFILE" \
+    --json "{\"name\": \"$MLFLOW_EXPERIMENT_NAME\"}" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('experiment_id',''))" 2>/dev/null || echo "")
+
+if [ -z "$EXPERIMENT_ID" ]; then
+    EXPERIMENT_ID=$(databricks api get "/api/2.0/mlflow/experiments/get-by-name" \
+        --profile "$PROFILE" \
+        --json "{\"experiment_name\": \"$MLFLOW_EXPERIMENT_NAME\"}" 2>/dev/null \
+        | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('experiment',{}).get('experiment_id',''))" 2>/dev/null || echo "")
+fi
+
+if [ -n "$EXPERIMENT_ID" ]; then
+    _ok "Experiment resolved: id=$EXPERIMENT_ID"
+    # Grant CAN_MANAGE to the app SP on this experiment. The permissions API
+    # keys service principals by application_id (UUID), not display name — the
+    # Lakebase grant accepts either format but MLflow experiments do not.
+    EXP_PERM_PAYLOAD="{\"access_control_list\": [{\"service_principal_name\": \"$SP_CLIENT_ID\", \"permission_level\": \"CAN_MANAGE\"}]}"
+    EXP_GRANT_ERR=$(databricks api patch "/api/2.0/permissions/experiments/$EXPERIMENT_ID" \
+            --profile "$PROFILE" --json "$EXP_PERM_PAYLOAD" 2>&1 >/dev/null || true)
+    if [ -z "$EXP_GRANT_ERR" ]; then
+        _ok "SP granted CAN_MANAGE on experiment"
+    else
+        _warn "Could not grant SP CAN_MANAGE on experiment — tracing may emit to a separate SP-owned experiment."
+        echo "    Error: $(echo "$EXP_GRANT_ERR" | head -3)"
+    fi
+else
+    _warn "Could not create or resolve MLflow experiment — tracing will be disabled at boot"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════
 # Step 12: Patch app.yaml with resolved values and sync to workspace
 # ══════════════════════════════════════════════════════════════════════════
 _header "Step 12: Syncing files to workspace"
@@ -828,18 +882,19 @@ replacements = {
     'LAKEBASE_INSTANCE': '$LAKEBASE_INSTANCE',
     'LAKEBASE_CATALOG': '$LAKEBASE_CATALOG',
     'LAKEBASE_SCHEMA': '$LAKEBASE_SCHEMA',
+    'MLFLOW_EXPERIMENT_NAME': '$MLFLOW_EXPERIMENT_NAME',
 }
 for key, val in replacements.items():
     content = re.sub(
         rf'(- name: {key}\n\s+value:).*',
-        rf'\1 {val}',
+        rf'\1 \"{val}\"' if '/' in val else rf'\1 {val}',
         content
     )
 sys.stdout.write(content)
 " > "$PATCHED_APP_YAML"
 
 cp "$PATCHED_APP_YAML" "$STAGING_DIR/app.yaml"
-_ok "Patched app.yaml (LAKEBASE_SCHEMA=$LAKEBASE_SCHEMA)"
+_ok "Patched app.yaml (LAKEBASE_SCHEMA=$LAKEBASE_SCHEMA, MLFLOW_EXPERIMENT_NAME=$MLFLOW_EXPERIMENT_NAME)"
 
 _info "Uploading to $WS_PATH ..."
 if ! databricks workspace import-dir "$STAGING_DIR" "$WS_PATH" \

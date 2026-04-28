@@ -38,6 +38,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Global settings hydrate failed (continuing with env defaults): %s", e)
 
+    # Initialize MLflow tracing. Gated on TRACING_ENABLED env; no-op when off.
+    try:
+        from app.services.tracing import init_tracing
+        await init_tracing()
+    except Exception as e:
+        logger.warning("Tracing init raised unexpectedly: %s — continuing without tracing", e)
+
     # Start periodic JWT refresh for all Lakebase backends
     refresh_task = None
     if settings.storage_backend in ("lakebase", "pgvector") and settings.lakebase_instance:
