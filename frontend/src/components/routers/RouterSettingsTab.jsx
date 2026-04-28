@@ -13,6 +13,7 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
     routing_cache_enabled: !!routerCfg.routing_cache_enabled,
     similarity_threshold: routerCfg.similarity_threshold ?? 0.92,
     cache_ttl_hours: routerCfg.cache_ttl_hours ?? 24,
+    mlflow_experiment_path: routerCfg.mlflow_experiment_path || '',
   })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
@@ -37,6 +38,7 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
         routing_cache_enabled: form.routing_cache_enabled,
         similarity_threshold: Number(form.similarity_threshold),
         cache_ttl_hours: Math.round(Number(form.cache_ttl_hours)),
+        mlflow_experiment_path: (form.mlflow_experiment_path || '').trim(),
       })
       setSuccess('Saved')
       onUpdate?.()
@@ -161,6 +163,23 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
         {flushResult && (
           <div className="text-[12px] text-dbx-text-secondary mt-2">{flushResult}</div>
         )}
+      </Section>
+
+      <Section title="Tracing">
+        <Field label="MLflow experiment path">
+          <input
+            type="text"
+            value={form.mlflow_experiment_path}
+            onChange={(e) => setField('mlflow_experiment_path', e.target.value)}
+            placeholder="/Users/you@databricks.com/router-traces"
+            className="w-full h-8 px-2 border border-dbx-border-input rounded text-[13px] bg-dbx-bg font-mono"
+          />
+        </Field>
+        <div className="text-[12px] text-dbx-text-secondary -mt-2">
+          Workspace path for MLflow traces. Leave empty to disable tracing for this router. The
+          experiment is auto-created on save if it doesn't exist. Multiple routers can share a
+          path to combine traces.
+        </div>
       </Section>
 
       {error && (

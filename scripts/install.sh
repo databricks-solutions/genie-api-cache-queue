@@ -442,6 +442,7 @@ rsync -a \
     --exclude='docs' \
     --exclude='notebooks' \
     --exclude='scripts' \
+    --exclude='router' \
     --exclude='test-evidence' \
     --exclude='node_modules' \
     --exclude='__pycache__' \

@@ -16,6 +16,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 
 from app.config import get_settings
+from app.services import tracing
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -78,17 +79,26 @@ async def split_by_intent(context_text: str, runtime_settings=None, space_contex
 
         prompt = _INTENT_SPLIT_PROMPT_TEMPLATE.format(context_text=context_text, space_context=space_context)
 
-        response = client.api_client.do(
-            "POST",
-            f"/serving-endpoints/{endpoint}/invocations",
-            body={"messages": [{"role": "user", "content": prompt}]},
-        )
+        with tracing.span(
+            "gateway.intent_split",
+            span_type="LLM",
+            inputs={"context_text": context_text},
+            attributes={"model": endpoint},
+        ) as s:
+            response = client.api_client.do(
+                "POST",
+                f"/serving-endpoints/{endpoint}/invocations",
+                body={"messages": [{"role": "user", "content": prompt}]},
+            )
 
-        result = response["choices"][0]["message"]["content"].strip()
+            result = response["choices"][0]["message"]["content"].strip()
 
-        if not result:
-            logger.warning("Intent splitter: empty result — returning original context")
-            return context_text
+            if not result:
+                s.set_outputs({"result": None, "fallback": "empty_result"})
+                logger.warning("Intent splitter: empty result — returning original context")
+                return context_text
+
+            s.set_outputs({"result": result})
 
         logger.info(
             "Intent splitter: original=%r... result=%r...",

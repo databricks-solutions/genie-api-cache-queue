@@ -13,6 +13,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 
 from app.config import get_settings
+from app.services import tracing
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -86,13 +87,20 @@ async def normalize_question(query_text: str, runtime_settings=None, space_conte
 
         prompt = _NORMALIZATION_PROMPT_TEMPLATE.format(question=string_normalized, space_context=space_context)
 
-        response = client.api_client.do(
-            "POST",
-            f"/serving-endpoints/{endpoint}/invocations",
-            body={"messages": [{"role": "user", "content": prompt}]},
-        )
+        with tracing.span(
+            "gateway.normalize_question",
+            span_type="LLM",
+            inputs={"question": string_normalized},
+            attributes={"model": endpoint},
+        ) as norm_span:
+            response = client.api_client.do(
+                "POST",
+                f"/serving-endpoints/{endpoint}/invocations",
+                body={"messages": [{"role": "user", "content": prompt}]},
+            )
 
-        content = response["choices"][0]["message"]["content"]
+            content = response["choices"][0]["message"]["content"]
+            norm_span.set_outputs({"raw_content": content})
 
         try:
             # Strip markdown code fences the LLM sometimes wraps around JSON

@@ -13,6 +13,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 
 from app.config import get_settings
+from app.services import tracing
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -90,15 +91,44 @@ async def validate_cache_entry(
             f"QUESTION:\n{incoming_query}"
         )
 
-        response = client.api_client.do(
-            "POST",
-            f"/serving-endpoints/{endpoint}/invocations",
-            body={"messages": [{"role": "user", "content": prompt}]}
-        )
+        with tracing.span(
+            "gateway.cache.validate",
+            span_type="LLM",
+            inputs={"incoming": incoming_query, "cached": cached_query},
+            attributes={"model": endpoint},
+        ) as s:
+            response = client.api_client.do(
+                "POST",
+                f"/serving-endpoints/{endpoint}/invocations",
+                body={"messages": [{"role": "user", "content": prompt}]}
+            )
 
-        content = response["choices"][0]["message"]["content"]
-        result = json.loads(content)
-        is_cache_valid = _parse_validation_result(result)
+            content = response["choices"][0]["message"]["content"]
+
+            # Strip markdown fences the LLM sometimes wraps around JSON
+            # (e.g. ```json\n{"is_cache_valid": true}\n```). Mirrors the
+            # robust-parse pattern in question_normalizer.
+            stripped = content.strip()
+            if stripped.startswith("```"):
+                stripped = stripped.lstrip("`")
+                if stripped.startswith("json"):
+                    stripped = stripped[4:]
+                if "```" in stripped:
+                    stripped = stripped[: stripped.rfind("```")]
+                stripped = stripped.strip()
+
+            try:
+                result = json.loads(stripped)
+            except json.JSONDecodeError:
+                # Don't let a parse failure ERROR out the span — fail open is
+                # expected behavior, not a tracing-level error. Log the raw
+                # content so the trace still has the diagnostic.
+                s.set_outputs({"is_cache_valid": True, "fallback": "json_parse_error", "raw": content[:200]})
+                logger.warning("Cache LLM validation: unparseable JSON %r — treating as valid hit", content[:120])
+                return True
+
+            is_cache_valid = _parse_validation_result(result)
+            s.set_outputs({"is_cache_valid": is_cache_valid, "raw": content})
 
         if is_cache_valid is None:
             logger.warning(

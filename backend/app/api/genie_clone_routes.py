@@ -32,6 +32,7 @@ from app.services.cache_validator import validate_cache_entry
 from app.services.cache_write_validator import evaluate_cache_write
 from app.services.prompt_enricher import get_space_context
 from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
+from app.services import tracing
 from app.api.cache_hit_helpers import (
     classify_cache_hit_exec as _classify_cache_hit_exec,
     build_cache_hit_response as _build_cache_hit_response,
@@ -297,16 +298,26 @@ async def _process_genie_background(
         # normalized form is only used for cache key / embedding.
         genie_query = original_query_text or query_text
         try:
-            if conversation_id and not conversation_id.startswith(CONV_PREFIX):
-                try:
-                    result = await genie_service.send_message(space_id, conversation_id, genie_query, rs)
-                except GenieConfigError:
-                    raise
-                except Exception:
-                    logger.warning("send_message failed, falling back to start_conversation")
+            with tracing.span(
+                "gateway.genie.start_conversation",
+                span_type="CHAIN",
+                inputs={"genie_query": genie_query, "space_id": space_id},
+                attributes={"conversation_id": conversation_id, "attempt": attempt},
+            ) as g_span:
+                if conversation_id and not conversation_id.startswith(CONV_PREFIX):
+                    try:
+                        result = await genie_service.send_message(space_id, conversation_id, genie_query, rs)
+                    except GenieConfigError:
+                        raise
+                    except Exception:
+                        logger.warning("send_message failed, falling back to start_conversation")
+                        result = await genie_service.start_conversation(space_id, genie_query, rs)
+                else:
                     result = await genie_service.start_conversation(space_id, genie_query, rs)
-            else:
-                result = await genie_service.start_conversation(space_id, genie_query, rs)
+                g_span.set_outputs({
+                    "status": result.get("status"),
+                    "has_sql": bool(result.get("sql_query")),
+                })
 
 
             if result.get("status") == "COMPLETED":
@@ -343,10 +354,20 @@ async def _process_genie_background(
                 exec_succeeded = False
                 if sql_query:
                     try:
-                        sql_exec = await genie_service.execute_sql(sql_query, rs)
-                        if sql_exec.get("status") == "SUCCEEDED":
-                            actual_result = sql_exec.get("result")
-                            exec_succeeded = True
+                        with tracing.span(
+                            "gateway.warehouse.execute_sql",
+                            span_type="CHAIN",
+                            inputs={"sql_query": sql_query},
+                        ) as wh_span:
+                            sql_exec = await genie_service.execute_sql(sql_query, rs)
+                            wh_status = sql_exec.get("status") if isinstance(sql_exec, dict) else None
+                            if wh_status == "SUCCEEDED":
+                                actual_result = sql_exec.get("result")
+                                exec_succeeded = True
+                            wh_span.set_outputs({
+                                "status": wh_status,
+                                "row_count": (actual_result or {}).get("row_count") if isinstance(actual_result, dict) else None,
+                            })
                     except Exception as e:
                         logger.warning("execute_sql after cache miss failed: %s", e)
 
@@ -386,14 +407,29 @@ async def _process_genie_background(
                 elif not exec_succeeded:
                     cache_skip_reason = "exec_failed"
                 else:
-                    decision = evaluate_cache_write(
-                        question=original_query_text or query_text,
-                        sql_query=sql_query,
-                        row_count=row_count,
-                        columns=result_columns,
-                        genie_text=genie_text,
-                        enabled=rs.cache_write_validation_enabled,
-                    )
+                    with tracing.span(
+                        "gateway.cache.write_validate",
+                        span_type="CHAIN",
+                        inputs={
+                            "question": original_query_text or query_text,
+                            "row_count": row_count,
+                            "columns": result_columns,
+                        },
+                        attributes={"enabled": rs.cache_write_validation_enabled},
+                    ) as wv_span:
+                        decision = evaluate_cache_write(
+                            question=original_query_text or query_text,
+                            sql_query=sql_query,
+                            row_count=row_count,
+                            columns=result_columns,
+                            genie_text=genie_text,
+                            enabled=rs.cache_write_validation_enabled,
+                        )
+                        wv_span.set_outputs({
+                            "should_write": decision.should_write,
+                            "reason": decision.reason,
+                            "detail": decision.detail,
+                        })
                     if not decision.should_write:
                         cache_skip_reason = decision.reason
                         logger.warning(
@@ -403,18 +439,28 @@ async def _process_genie_background(
 
                 if cache_skip_reason is None:
                     try:
-                        cache_id = await _db.db_service.save_query_cache(
-                            query_text, query_embedding, sql_query,
-                            identity, gateway_id or space_id, rs,
-                            original_query_text=original_query_text,
-                            genie_space_id=space_id,
-                            row_count=row_count,
-                            result_columns=result_columns,
-                            genie_text=genie_text,
-                            genie_description=genie_description,
-                        )
-                        logger.info("Background cache SAVED id=%s row_count=%s query=%s",
-                                    cache_id, row_count, query_text[:50])
+                        with tracing.span(
+                            "gateway.cache.write",
+                            span_type="RETRIEVER",
+                            inputs={"query_text": query_text, "sql_query": sql_query},
+                            attributes={
+                                "gateway_id": gateway_id,
+                                "row_count": row_count,
+                            },
+                        ) as cw_span:
+                            cache_id = await _db.db_service.save_query_cache(
+                                query_text, query_embedding, sql_query,
+                                identity, gateway_id or space_id, rs,
+                                original_query_text=original_query_text,
+                                genie_space_id=space_id,
+                                row_count=row_count,
+                                result_columns=result_columns,
+                                genie_text=genie_text,
+                                genie_description=genie_description,
+                            )
+                            cw_span.set_outputs({"cache_id": cache_id})
+                            logger.info("Background cache SAVED id=%s row_count=%s query=%s",
+                                        cache_id, row_count, query_text[:50])
                     except Exception as e:
                         logger.error("Background cache save FAILED: %s", e, exc_info=True)
 
@@ -520,13 +566,27 @@ async def _handle_query(
     query_embedding = None
     cached = None
     try:
-        query_embedding = embedding_service.get_embedding(query_text, rs)
-        logger.info("Embedding generated: len=%s for query=%s", len(query_embedding) if query_embedding else None, query_text[:40])
-        cache_namespace = gateway.get("id") if gateway else space_id
-        cached = await _db.db_service.search_similar_query(
-            query_embedding, identity, rs.similarity_threshold,
-            cache_namespace, rs, shared_cache=rs.shared_cache,
-        )
+        with tracing.span(
+            "gateway.cache.lookup",
+            span_type="RETRIEVER",
+            inputs={"query_text": query_text},
+            attributes={
+                "gateway_id": gateway.get("id") if gateway else None,
+                "similarity_threshold": rs.similarity_threshold,
+                "shared_cache": rs.shared_cache,
+            },
+        ) as cl_span:
+            query_embedding = embedding_service.get_embedding(query_text, rs)
+            logger.info("Embedding generated: len=%s for query=%s", len(query_embedding) if query_embedding else None, query_text[:40])
+            cache_namespace = gateway.get("id") if gateway else space_id
+            cached = await _db.db_service.search_similar_query(
+                query_embedding, identity, rs.similarity_threshold,
+                cache_namespace, rs, shared_cache=rs.shared_cache,
+            )
+            cl_span.set_outputs({
+                "hit": cached is not None,
+                "similarity": cached[3] if cached else None,
+            })
     except Exception as e:
         logger.warning("Cache lookup failed: %s — proceeding without cache", e)
 
@@ -547,7 +607,17 @@ async def _handle_query(
         sql_result = None
         exec_error = None
         try:
-            sql_result = await genie_service.execute_sql(sql_query, rs)
+            with tracing.span(
+                "gateway.cache.hit.execute_sql",
+                span_type="CHAIN",
+                inputs={"sql_query": sql_query},
+                attributes={"similarity": similarity},
+            ) as hit_span:
+                sql_result = await genie_service.execute_sql(sql_query, rs)
+                hit_span.set_outputs({
+                    "status": (sql_result or {}).get("status"),
+                    "row_count": ((sql_result or {}).get("result") or {}).get("row_count"),
+                })
         except Exception as e:
             logger.warning("Cache hit SQL execution failed: %s", e)
             exec_error = {"error": f"Cache hit SQL execution failed: {e}", "type": "EXEC_EXCEPTION"}

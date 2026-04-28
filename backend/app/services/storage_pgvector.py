@@ -214,6 +214,7 @@ class PGVectorStorageService:
             await self._migrate_gateway_llm_models(conn)
             await self._migrate_cache_write_signals(conn)
             await self._migrate_query_log_skip_reason(conn)
+            await self._migrate_routers_mlflow_path(conn)
 
     async def _migrate_genie_space_id_columns(self, conn):
         """Migration: ensure both gateway_id and genie_space_id columns exist.
@@ -370,6 +371,23 @@ class PGVectorStorageService:
                     logger.info("Added %s column to %s", column, self.gateway_table_name)
             except Exception as e:
                 logger.warning("Could not add %s to %s: %s", column, self.gateway_table_name, e)
+
+    async def _migrate_routers_mlflow_path(self, conn):
+        """Migration: add mlflow_experiment_path to routers (NULL = tracing disabled)."""
+        parts = self.routers_table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        column = "mlflow_experiment_path"
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                schema, tbl, column
+            )
+            if not exists:
+                await conn.execute(f'ALTER TABLE {self.routers_table_name} ADD COLUMN {column} TEXT')
+                logger.info("Added %s column to %s", column, self.routers_table_name)
+        except Exception as e:
+            logger.warning("Could not add %s to %s: %s", column, self.routers_table_name, e)
 
     async def _build_connection_string_with_creds(self, hostname, quote_plus, uuid):
         """Generate OAuth credentials and build connection string for a Lakebase hostname."""
@@ -647,6 +665,7 @@ class PGVectorStorageService:
                 routing_cache_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 similarity_threshold REAL NOT NULL DEFAULT 0.92,
                 cache_ttl_hours INTEGER NOT NULL DEFAULT 24,
+                mlflow_experiment_path TEXT,
                 created_by TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -1460,6 +1479,7 @@ class PGVectorStorageService:
             ("routing_cache_enabled", config.get("routing_cache_enabled", True)),
             ("similarity_threshold", config.get("similarity_threshold", 0.92)),
             ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
+            ("mlflow_experiment_path", config.get("mlflow_experiment_path")),
             ("created_by", config.get("created_by")),
             ("created_at", config.get("created_at")),
             ("updated_at", config.get("updated_at")),
@@ -1507,12 +1527,13 @@ class PGVectorStorageService:
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
 
-        _clearable_text_fields = {"selector_model", "selector_system_prompt"}
+        _clearable_text_fields = {"selector_model", "selector_system_prompt", "mlflow_experiment_path"}
         allowed = {
             "name", "description", "status",
             "selector_model", "selector_system_prompt",
             "decompose_enabled", "routing_cache_enabled",
             "similarity_threshold", "cache_ttl_hours",
+            "mlflow_experiment_path",
         }
         set_parts = []
         params = []
@@ -1753,6 +1774,7 @@ class PGVectorStorageService:
             return count or 0
 
     def _row_to_router_dict(self, row) -> dict:
+        keys = row.keys()
         return {
             "id": row["id"],
             "name": row["name"],
@@ -1764,6 +1786,7 @@ class PGVectorStorageService:
             "routing_cache_enabled": row["routing_cache_enabled"],
             "similarity_threshold": row["similarity_threshold"],
             "cache_ttl_hours": row["cache_ttl_hours"],
+            "mlflow_experiment_path": row["mlflow_experiment_path"] if "mlflow_experiment_path" in keys else None,
             "created_by": row["created_by"],
             "created_at": _to_utc_iso(row["created_at"]),
             "updated_at": _to_utc_iso(row["updated_at"]),

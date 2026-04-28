@@ -5,10 +5,11 @@ import Modal from '../shared/Modal'
 export default function RouterCreateModal({ open, onClose, onCreated }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [mlflowPath, setMlflowPath] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
 
-  const reset = () => { setName(''); setDescription(''); setError(null) }
+  const reset = () => { setName(''); setDescription(''); setMlflowPath(''); setError(null) }
   const handleClose = () => { if (!submitting) { reset(); onClose?.() } }
 
   const submit = async () => {
@@ -17,6 +18,8 @@ export default function RouterCreateModal({ open, onClose, onCreated }) {
     setError(null)
     try {
       const body = { name: name.trim(), description: description.trim() }
+      const path = mlflowPath.trim()
+      if (path) body.mlflow_experiment_path = path
       const created = await api.createRouter(body)
       reset()
       onCreated?.(created)
@@ -50,6 +53,17 @@ export default function RouterCreateModal({ open, onClose, onCreated }) {
           rows={3}
           className="w-full px-3 py-2 border border-dbx-border-input rounded text-[13px] text-dbx-text focus:outline-none focus:border-dbx-blue bg-dbx-bg resize-none"
         />
+        <label className="block text-[13px] font-medium text-dbx-text mb-1 mt-4">MLflow experiment path (optional)</label>
+        <input
+          type="text"
+          value={mlflowPath}
+          onChange={(e) => setMlflowPath(e.target.value)}
+          placeholder="/Users/you@databricks.com/router-traces"
+          className="w-full h-9 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text focus:outline-none focus:border-dbx-blue bg-dbx-bg font-mono"
+        />
+        <div className="text-[12px] text-dbx-text-secondary mt-1">
+          Leave empty to skip tracing. The experiment is auto-created on save.
+        </div>
         {error && (
           <div className="mt-3 px-3 py-2 rounded bg-red-50 border border-red-200 text-red-700 text-[12px]">
             {error}

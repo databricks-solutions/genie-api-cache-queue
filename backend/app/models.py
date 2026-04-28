@@ -259,6 +259,7 @@ class RouterConfig(BaseModel):
     routing_cache_enabled: bool = True
     similarity_threshold: float = 0.92
     cache_ttl_hours: int = 24
+    mlflow_experiment_path: Optional[str] = None
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -293,6 +294,7 @@ class RouterCreateRequest(BaseModel):
     routing_cache_enabled: Optional[bool] = None
     similarity_threshold: Optional[float] = None
     cache_ttl_hours: Optional[int] = None
+    mlflow_experiment_path: Optional[str] = None
     members: Optional[List[RouterMemberCreateRequest]] = None  # optional initial members
 
 
@@ -306,6 +308,7 @@ class RouterUpdateRequest(BaseModel):
     routing_cache_enabled: Optional[bool] = None
     similarity_threshold: Optional[float] = None
     cache_ttl_hours: Optional[int] = None
+    mlflow_experiment_path: Optional[str] = None
 
 
 class RouterQueryRequest(BaseModel):

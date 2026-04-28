@@ -68,6 +68,16 @@ async def create_router(body: RouterCreateRequest, req: Request):
         if any(r["name"].lower() == body.name.lower() for r in existing):
             raise HTTPException(status_code=409, detail=f"A router named '{body.name}' already exists.")
 
+        # If the user supplied an MLflow experiment path, ensure the experiment
+        # exists (auto-create) before persisting. Surfacing failures here means
+        # the UI never lets a router save with a path that won't resolve later.
+        mlflow_path = (body.mlflow_experiment_path or "").strip() or None
+        if mlflow_path:
+            try:
+                tracing.ensure_experiment(mlflow_path)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Could not create or access MLflow experiment '{mlflow_path}': {e}")
+
         config = {
             "id": str(uuid.uuid4()),
             "name": body.name,
@@ -79,6 +89,7 @@ async def create_router(body: RouterCreateRequest, req: Request):
             "routing_cache_enabled": body.routing_cache_enabled if body.routing_cache_enabled is not None else True,
             "similarity_threshold": body.similarity_threshold if body.similarity_threshold is not None else 0.92,
             "cache_ttl_hours": body.cache_ttl_hours if body.cache_ttl_hours is not None else 24,
+            "mlflow_experiment_path": mlflow_path,
             "created_by": user_email,
             "created_at": now,
             "updated_at": now,
@@ -122,9 +133,28 @@ async def update_router(router_id: str, body: RouterUpdateRequest, req: Request)
     """Update router fields. Manage or above."""
     await require_role(req, "manage")
     try:
-        updates = body.model_dump(exclude_none=True)
+        # Use exclude_unset (not exclude_none) so the user can clear nullable
+        # fields by sending null — the storage layer treats "" as a clear for
+        # mlflow_experiment_path. Without this, you can't disable tracing once
+        # set.
+        updates = body.model_dump(exclude_unset=True)
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
+
+        if "mlflow_experiment_path" in updates:
+            raw = updates["mlflow_experiment_path"]
+            cleaned = (raw or "").strip() if isinstance(raw, str) else None
+            if cleaned:
+                try:
+                    tracing.ensure_experiment(cleaned)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Could not create or access MLflow experiment '{cleaned}': {e}")
+                updates["mlflow_experiment_path"] = cleaned
+            else:
+                # Empty string or None ⇒ clear path (disable tracing for this router).
+                updates["mlflow_experiment_path"] = ""
+            tracing.invalidate_experiment_cache()
+
         result = await _db.db_service.update_router(router_id, updates)
         if not result:
             raise HTTPException(status_code=404, detail="Router not found")
@@ -995,8 +1025,12 @@ async def preview_routing(router_id: str, body: RouterQueryRequest, req: Request
         token = resolve_user_token_optional(req)
         identity = req.headers.get("X-Forwarded-Email") or "api-user"
 
-        with tracing.span(
+        experiment_id = tracing.resolve_experiment_id(router_cfg.get("mlflow_experiment_path"))
+
+        async with tracing.start_router_root_span(
             "router.preview",
+            experiment_id=experiment_id,
+            router_id=router_id,
             span_type="AGENT",
             inputs={"question": body.question, "hints": body.hints},
             attributes={
@@ -1045,8 +1079,12 @@ async def router_query(router_id: str, body: RouterQueryRequest, req: Request):
         token = resolve_user_token_optional(req)
         identity = req.headers.get("X-Forwarded-Email") or "api-user"
 
-        with tracing.span(
+        experiment_id = tracing.resolve_experiment_id(router_cfg.get("mlflow_experiment_path"))
+
+        async with tracing.start_router_root_span(
             "router.query",
+            experiment_id=experiment_id,
+            router_id=router_id,
             span_type="AGENT",
             inputs={"question": body.question, "hints": body.hints},
             attributes={
