@@ -221,3 +221,91 @@ class GatewayUpdateRequest(BaseModel):
     validation_model: Optional[str] = None
     intent_split_model: Optional[str] = None
     intent_split_enabled: Optional[bool] = None
+
+
+# --- Router CRUD models ---
+
+class RouterMember(BaseModel):
+    """A (router, gateway) edge carrying the catalog metadata the selector sees.
+
+    `when_to_use` is the critical routing hint and belongs on the edge (not the
+    gateway) so one gateway can play different roles in different routers.
+    """
+    router_id: str
+    gateway_id: str
+    ordinal: int = 0
+    title: str
+    when_to_use: str
+    tables: List[str] = []
+    sample_questions: List[str] = []
+    disabled: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class RouterConfig(BaseModel):
+    """Router configuration stored in the `routers` table."""
+    id: str
+    name: str
+    description: str = ""
+    status: str = "active"
+    selector_model: Optional[str] = None
+    selector_system_prompt: Optional[str] = None
+    decompose_enabled: bool = True
+    routing_cache_enabled: bool = True
+    similarity_threshold: float = 0.92
+    cache_ttl_hours: int = 24
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    members: Optional[List[RouterMember]] = None  # hydrated on GET /routers/{id}
+
+
+class RouterMemberCreateRequest(BaseModel):
+    gateway_id: str
+    title: Optional[str] = None  # defaults to gateway.name server-side if omitted
+    when_to_use: str
+    ordinal: Optional[int] = None
+    tables: Optional[List[str]] = None
+    sample_questions: Optional[List[str]] = None
+    disabled: Optional[bool] = None
+
+
+class RouterMemberUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    when_to_use: Optional[str] = None
+    ordinal: Optional[int] = None
+    tables: Optional[List[str]] = None
+    sample_questions: Optional[List[str]] = None
+    disabled: Optional[bool] = None
+
+
+class RouterCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    selector_model: Optional[str] = None
+    selector_system_prompt: Optional[str] = None
+    decompose_enabled: Optional[bool] = None
+    routing_cache_enabled: Optional[bool] = None
+    similarity_threshold: Optional[float] = None
+    cache_ttl_hours: Optional[int] = None
+    members: Optional[List[RouterMemberCreateRequest]] = None  # optional initial members
+
+
+class RouterUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    selector_model: Optional[str] = None
+    selector_system_prompt: Optional[str] = None
+    decompose_enabled: Optional[bool] = None
+    routing_cache_enabled: Optional[bool] = None
+    similarity_threshold: Optional[float] = None
+    cache_ttl_hours: Optional[int] = None
+
+
+class RouterQueryRequest(BaseModel):
+    """Body for POST /routers/{id}/query and /preview (Phase 2 endpoints)."""
+    question: str
+    hints: Optional[List[str]] = None
+    session_id: Optional[str] = None

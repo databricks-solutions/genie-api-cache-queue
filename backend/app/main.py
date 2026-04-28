@@ -19,6 +19,7 @@ from app.api.genie_clone_routes import genie_clone_router
 from app.api.gateway_routes import gateway_router
 from app.api.mcp_routes import mcp_router
 from app.api.rbac_routes import rbac_router
+from app.api.router_routes import router_router
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 app.include_router(gateway_router, prefix="/api")
 app.include_router(rbac_router, prefix="/api")
+app.include_router(router_router, prefix="/api/v1")
 app.include_router(genie_clone_router, prefix="/api/2.0/genie")
 app.include_router(mcp_router, prefix="/api/2.0/mcp")
 

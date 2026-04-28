@@ -76,6 +76,9 @@ class PGVectorStorageService:
         self.user_roles_table_name = f"{schema_prefix}.user_roles"
         self.group_roles_table_name = f"{schema_prefix}.group_roles"
         self.global_settings_table_name = f"{schema_prefix}.global_settings"
+        self.routers_table_name = f"{schema_prefix}.routers"
+        self.router_members_table_name = f"{schema_prefix}.router_members"
+        self.routing_cache_table_name = f"{schema_prefix}.routing_cache"
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -201,6 +204,9 @@ class PGVectorStorageService:
             await self._ensure_user_roles_table(conn)
             await self._ensure_group_roles_table(conn)
             await self._ensure_global_settings_table(conn)
+            await self._ensure_routers_table(conn)
+            await self._ensure_router_members_table(conn)
+            await self._ensure_routing_cache_table(conn)
             await self._migrate_genie_space_id_columns(conn)
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
@@ -568,6 +574,90 @@ class PGVectorStorageService:
             )
         """)
         logger.info("Global settings table '%s' initialized", self.global_settings_table_name)
+
+    async def _ensure_routers_table(self, conn):
+        """Create the routers table if it does not exist.
+
+        A router groups several gateways as a selectable catalog. The query path
+        lives in Phase 2 — this is the storage shape.
+        """
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.routers_table_name} (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                selector_model TEXT,
+                selector_system_prompt TEXT,
+                decompose_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                routing_cache_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                similarity_threshold REAL NOT NULL DEFAULT 0.92,
+                cache_ttl_hours INTEGER NOT NULL DEFAULT 24,
+                created_by TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        logger.info("Routers table '%s' initialized", self.routers_table_name)
+
+    async def _ensure_router_members_table(self, conn):
+        """Create the router_members edge table (router ↔ gateway + catalog metadata).
+
+        when_to_use / tables / sample_questions live HERE rather than on the
+        gateway row so one gateway can play different roles in different
+        routers. ON DELETE CASCADE from routers cleans up members on router
+        deletion. No FK to gateway_configs — gateway hard-delete is allowed
+        and a dangling member row is a detectable recoverable state.
+        """
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.router_members_table_name} (
+                router_id TEXT NOT NULL REFERENCES {self.routers_table_name}(id) ON DELETE CASCADE,
+                gateway_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL,
+                when_to_use TEXT NOT NULL,
+                tables TEXT[],
+                sample_questions TEXT[],
+                disabled BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (router_id, gateway_id)
+            )
+        """)
+        idx_base = self.router_members_table_name.replace('.', '_')
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_base}_router_idx ON {self.router_members_table_name} (router_id, ordinal)"
+            )
+        except Exception as e:
+            logger.warning("Index creation skipped: %s", e)
+        logger.info("Router members table '%s' initialized", self.router_members_table_name)
+
+    async def _ensure_routing_cache_table(self, conn):
+        """Create the routing_cache table (question → decision, scoped per router)."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.routing_cache_table_name} (
+                id BIGSERIAL PRIMARY KEY,
+                router_id TEXT NOT NULL REFERENCES {self.routers_table_name}(id) ON DELETE CASCADE,
+                question TEXT NOT NULL,
+                question_embedding vector(1024) NOT NULL,
+                decision_json JSONB NOT NULL,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                ttl_expires TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        idx_base = self.routing_cache_table_name.replace('.', '_')
+        for idx_sql in [
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.routing_cache_table_name} USING ivfflat (question_embedding vector_cosine_ops) WITH (lists = 50)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_router_idx ON {self.routing_cache_table_name} (router_id)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_ttl_idx ON {self.routing_cache_table_name} (ttl_expires)",
+        ]:
+            try:
+                await conn.execute(idx_sql)
+            except Exception as e:
+                logger.warning("Index creation skipped: %s", e)
+        logger.info("Routing cache table '%s' initialized", self.routing_cache_table_name)
 
     async def search_similar_query(
         self,
@@ -1277,6 +1367,347 @@ class PGVectorStorageService:
                 f"DELETE FROM {self.group_roles_table_name} WHERE group_name = $1",
                 group_name
             )
+
+    # --- Router CRUD ---
+
+    async def create_router(self, config: dict) -> dict:
+        """Create a new router configuration."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        fields = [
+            ("id", config["id"]),
+            ("name", config["name"]),
+            ("description", config.get("description") or ""),
+            ("status", config.get("status", "active")),
+            ("selector_model", config.get("selector_model")),
+            ("selector_system_prompt", config.get("selector_system_prompt")),
+            ("decompose_enabled", config.get("decompose_enabled", True)),
+            ("routing_cache_enabled", config.get("routing_cache_enabled", True)),
+            ("similarity_threshold", config.get("similarity_threshold", 0.92)),
+            ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
+            ("created_by", config.get("created_by")),
+            ("created_at", config.get("created_at")),
+            ("updated_at", config.get("updated_at")),
+        ]
+        cols = ", ".join(c for c, _ in fields)
+        placeholders = ", ".join(f"${i}" for i in range(1, len(fields) + 1))
+        values = [v for _, v in fields]
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"INSERT INTO {self.routers_table_name} ({cols}) VALUES ({placeholders})",
+                *values,
+            )
+            logger.info("Router created in DB: id=%s name=%s", config["id"], config["name"])
+            return await self.get_router(config["id"], include_members=False)
+
+    async def get_router(self, router_id: str, include_members: bool = True) -> Optional[dict]:
+        """Get a router by ID, optionally hydrating members."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT * FROM {self.routers_table_name} WHERE id = $1",
+                router_id,
+            )
+            if not row:
+                return None
+            router = self._row_to_router_dict(row)
+            if include_members:
+                router["members"] = await self._fetch_members(conn, router_id)
+            return router
+
+    async def list_routers(self) -> list:
+        """List all routers (without members, for efficiency)."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT * FROM {self.routers_table_name} ORDER BY created_at DESC"
+            )
+            return [self._row_to_router_dict(r) for r in rows]
+
+    async def update_router(self, router_id: str, updates: dict) -> Optional[dict]:
+        """Update router fields. Only whitelisted keys are applied."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        _clearable_text_fields = {"selector_model", "selector_system_prompt"}
+        allowed = {
+            "name", "description", "status",
+            "selector_model", "selector_system_prompt",
+            "decompose_enabled", "routing_cache_enabled",
+            "similarity_threshold", "cache_ttl_hours",
+        }
+        set_parts = []
+        params = []
+        idx = 1
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            if key in _clearable_text_fields and value == "":
+                value = None
+            elif value is None:
+                continue
+            set_parts.append(f"{key} = ${idx}")
+            params.append(value)
+            idx += 1
+
+        if not set_parts:
+            return await self.get_router(router_id)
+
+        set_parts.append("updated_at = NOW()")
+        params.append(router_id)
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"UPDATE {self.routers_table_name} SET {', '.join(set_parts)} WHERE id = ${idx}",
+                *params,
+            )
+            if result == "UPDATE 0":
+                return None
+            logger.info("Router updated in DB: id=%s fields=%s", router_id, list(updates.keys()))
+            return await self.get_router(router_id)
+
+    async def delete_router(self, router_id: str) -> bool:
+        """Hard-delete a router (cascades to members + routing_cache)."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"DELETE FROM {self.routers_table_name} WHERE id = $1",
+                router_id,
+            )
+            deleted = result != "DELETE 0"
+            if deleted:
+                logger.info("Router deleted from DB: id=%s", router_id)
+            return deleted
+
+    # --- Router member CRUD ---
+
+    async def _fetch_members(self, conn, router_id: str) -> list:
+        rows = await conn.fetch(
+            f"""SELECT router_id, gateway_id, ordinal, title, when_to_use,
+                       tables, sample_questions, disabled, created_at, updated_at
+                FROM {self.router_members_table_name}
+                WHERE router_id = $1
+                ORDER BY ordinal, gateway_id""",
+            router_id,
+        )
+        return [self._row_to_member_dict(r) for r in rows]
+
+    async def add_router_member(self, member: dict) -> dict:
+        """Insert a new (router, gateway) member row. Raises on duplicate."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"""INSERT INTO {self.router_members_table_name}
+                    (router_id, gateway_id, ordinal, title, when_to_use,
+                     tables, sample_questions, disabled, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())""",
+                member["router_id"], member["gateway_id"], member.get("ordinal", 0),
+                member["title"], member["when_to_use"],
+                member.get("tables") or None,
+                member.get("sample_questions") or None,
+                member.get("disabled", False),
+            )
+            logger.info("Router member added: router=%s gateway=%s", member["router_id"], member["gateway_id"])
+            return await self.get_router_member(member["router_id"], member["gateway_id"])
+
+    async def get_router_member(self, router_id: str, gateway_id: str) -> Optional[dict]:
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""SELECT router_id, gateway_id, ordinal, title, when_to_use,
+                           tables, sample_questions, disabled, created_at, updated_at
+                    FROM {self.router_members_table_name}
+                    WHERE router_id = $1 AND gateway_id = $2""",
+                router_id, gateway_id,
+            )
+            return self._row_to_member_dict(row) if row else None
+
+    async def update_router_member(self, router_id: str, gateway_id: str, updates: dict) -> Optional[dict]:
+        """Update a member row's catalog metadata."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        allowed = {"ordinal", "title", "when_to_use", "tables", "sample_questions", "disabled"}
+        set_parts = []
+        params = []
+        idx = 1
+        for key, value in updates.items():
+            if key not in allowed or value is None:
+                continue
+            set_parts.append(f"{key} = ${idx}")
+            params.append(value)
+            idx += 1
+        if not set_parts:
+            return await self.get_router_member(router_id, gateway_id)
+
+        set_parts.append("updated_at = NOW()")
+        params.append(router_id)
+        params.append(gateway_id)
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"""UPDATE {self.router_members_table_name}
+                    SET {', '.join(set_parts)}
+                    WHERE router_id = ${idx} AND gateway_id = ${idx + 1}""",
+                *params,
+            )
+            if result == "UPDATE 0":
+                return None
+            return await self.get_router_member(router_id, gateway_id)
+
+    async def delete_router_member(self, router_id: str, gateway_id: str) -> bool:
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"DELETE FROM {self.router_members_table_name} WHERE router_id = $1 AND gateway_id = $2",
+                router_id, gateway_id,
+            )
+            deleted = result != "DELETE 0"
+            if deleted:
+                logger.info("Router member deleted: router=%s gateway=%s", router_id, gateway_id)
+            return deleted
+
+    # --- Routing cache (router-scoped question → decision) ---
+
+    async def lookup_routing_cache(
+        self,
+        router_id: str,
+        query_embedding: List[float],
+        threshold: float = 0.92,
+    ) -> Optional[dict]:
+        """Cosine-search the routing cache for the nearest question within threshold.
+
+        Returns {id, question, decision, similarity} or None. Only returns rows
+        whose ttl_expires is still in the future — expired rows stay in the
+        table but are not served (caller should prune).
+        """
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        import json as _json
+        embedding_array = np.array(query_embedding, dtype=np.float32)
+        async with self.pool.acquire() as conn:
+            await register_vector(conn)
+            row = await conn.fetchrow(
+                f"""SELECT id, question, decision_json,
+                           1 - (question_embedding <=> $1::vector) AS similarity
+                    FROM {self.routing_cache_table_name}
+                    WHERE router_id = $2
+                      AND ttl_expires > NOW()
+                    ORDER BY question_embedding <=> $1::vector ASC
+                    LIMIT 1""",
+                embedding_array, router_id,
+            )
+            if not row:
+                return None
+            if row["similarity"] < threshold:
+                logger.info(
+                    "Routing cache near-miss: router=%s best_sim=%.3f threshold=%.2f",
+                    router_id, row["similarity"], threshold,
+                )
+                return None
+            # Best-effort hit count bump
+            try:
+                await conn.execute(
+                    f"UPDATE {self.routing_cache_table_name} SET hit_count = hit_count + 1 WHERE id = $1",
+                    row["id"],
+                )
+            except Exception as e:
+                logger.warning("Routing cache hit-count bump failed: %s", e)
+            decision = row["decision_json"]
+            if isinstance(decision, (str, bytes, bytearray)):
+                try:
+                    decision = _json.loads(decision)
+                except Exception:
+                    pass
+            logger.info(
+                "Routing cache HIT: router=%s id=%s sim=%.3f q=%s",
+                router_id, row["id"], row["similarity"], row["question"][:40],
+            )
+            return {
+                "id": row["id"],
+                "question": row["question"],
+                "decision": decision,
+                "similarity": float(row["similarity"]),
+            }
+
+    async def save_routing_cache(
+        self,
+        router_id: str,
+        question: str,
+        query_embedding: List[float],
+        decision: dict,
+        ttl_hours: int,
+    ) -> int:
+        """Persist a routing decision for later reuse."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        import json as _json
+        embedding_array = np.array(query_embedding, dtype=np.float32)
+        expires_interval = f"{int(ttl_hours * 3600)} seconds"
+        async with self.pool.acquire() as conn:
+            await register_vector(conn)
+            row = await conn.fetchrow(
+                f"""INSERT INTO {self.routing_cache_table_name}
+                    (router_id, question, question_embedding, decision_json, ttl_expires, created_at)
+                    VALUES ($1, $2, $3::vector, $4::jsonb, NOW() + INTERVAL '{expires_interval}', NOW())
+                    RETURNING id""",
+                router_id, question, embedding_array, _json.dumps(decision),
+            )
+            return int(row["id"])
+
+    async def clear_routing_cache(self, router_id: str) -> int:
+        """Delete all routing cache rows for a router. Returns count deleted."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {self.routing_cache_table_name} WHERE router_id = $1",
+                router_id,
+            )
+            await conn.execute(
+                f"DELETE FROM {self.routing_cache_table_name} WHERE router_id = $1",
+                router_id,
+            )
+            logger.info("Routing cache cleared for router %s: %d entries", router_id, count)
+            return count or 0
+
+    def _row_to_router_dict(self, row) -> dict:
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"],
+            "status": row["status"],
+            "selector_model": row["selector_model"],
+            "selector_system_prompt": row["selector_system_prompt"],
+            "decompose_enabled": row["decompose_enabled"],
+            "routing_cache_enabled": row["routing_cache_enabled"],
+            "similarity_threshold": row["similarity_threshold"],
+            "cache_ttl_hours": row["cache_ttl_hours"],
+            "created_by": row["created_by"],
+            "created_at": _to_utc_iso(row["created_at"]),
+            "updated_at": _to_utc_iso(row["updated_at"]),
+        }
+
+    def _row_to_member_dict(self, row) -> dict:
+        return {
+            "router_id": row["router_id"],
+            "gateway_id": row["gateway_id"],
+            "ordinal": row["ordinal"],
+            "title": row["title"],
+            "when_to_use": row["when_to_use"],
+            "tables": list(row["tables"]) if row["tables"] else [],
+            "sample_questions": list(row["sample_questions"]) if row["sample_questions"] else [],
+            "disabled": row["disabled"],
+            "created_at": _to_utc_iso(row["created_at"]),
+            "updated_at": _to_utc_iso(row["updated_at"]),
+        }
 
     def _row_to_gateway_dict(self, row) -> dict:
         """Convert a database row to a gateway dict."""

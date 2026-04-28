@@ -150,6 +150,44 @@ class DatabaseService:
     async def get_gateway_stats(self, gateway_id: str) -> dict:
         return await self.backend.get_gateway_stats(gateway_id)
 
+    # --- Router CRUD ---
+
+    async def create_router(self, config: dict) -> dict:
+        return await self.backend.create_router(config)
+
+    async def get_router(self, router_id: str, include_members: bool = True):
+        return await self.backend.get_router(router_id, include_members=include_members)
+
+    async def list_routers(self) -> list:
+        return await self.backend.list_routers()
+
+    async def update_router(self, router_id: str, updates: dict):
+        return await self.backend.update_router(router_id, updates)
+
+    async def delete_router(self, router_id: str) -> bool:
+        return await self.backend.delete_router(router_id)
+
+    async def add_router_member(self, member: dict):
+        return await self.backend.add_router_member(member)
+
+    async def get_router_member(self, router_id: str, gateway_id: str):
+        return await self.backend.get_router_member(router_id, gateway_id)
+
+    async def update_router_member(self, router_id: str, gateway_id: str, updates: dict):
+        return await self.backend.update_router_member(router_id, gateway_id, updates)
+
+    async def delete_router_member(self, router_id: str, gateway_id: str) -> bool:
+        return await self.backend.delete_router_member(router_id, gateway_id)
+
+    async def lookup_routing_cache(self, router_id: str, query_embedding, threshold: float = 0.92):
+        return await self.backend.lookup_routing_cache(router_id, query_embedding, threshold)
+
+    async def save_routing_cache(self, router_id: str, question: str, query_embedding, decision: dict, ttl_hours: int) -> int:
+        return await self.backend.save_routing_cache(router_id, question, query_embedding, decision, ttl_hours)
+
+    async def clear_routing_cache(self, router_id: str) -> int:
+        return await self.backend.clear_routing_cache(router_id)
+
     # --- Global settings ---
 
     async def get_global_settings(self) -> dict:

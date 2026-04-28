@@ -11,6 +11,9 @@ databricks-sdk>=0.40.0
 pgvector==0.2.4
 asyncpg==0.29.0
 
+# YAML parsing for router catalog seed / import
+pyyaml>=6.0
+
 # MLflow tracing for router decisions (OTEL-compatible spans).
 # Full suite installed now so v2 phases (eval / feedback / LLM-as-judge)
 # don't require a second dep migration. Tracing code is gated on

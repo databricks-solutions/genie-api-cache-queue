@@ -373,6 +373,49 @@ class DynamicStorageService:
             return await backend.get_gateway_stats(gateway_id)
         return backend.get_gateway_stats(gateway_id)
 
+    # --- Router CRUD (delegates to default backend) ---
+
+    async def create_router(self, config: dict) -> dict:
+        await self._ensure_backend_healthy(self.default_backend)
+        return await self.default_backend.create_router(config)
+
+    async def get_router(self, router_id: str, include_members: bool = True):
+        await self._ensure_backend_healthy(self.default_backend)
+        return await self.default_backend.get_router(router_id, include_members=include_members)
+
+    async def list_routers(self) -> list:
+        await self._ensure_backend_healthy(self.default_backend)
+        return await self.default_backend.list_routers()
+
+    async def update_router(self, router_id: str, updates: dict):
+        return await self.default_backend.update_router(router_id, updates)
+
+    async def delete_router(self, router_id: str) -> bool:
+        return await self.default_backend.delete_router(router_id)
+
+    async def add_router_member(self, member: dict):
+        return await self.default_backend.add_router_member(member)
+
+    async def get_router_member(self, router_id: str, gateway_id: str):
+        return await self.default_backend.get_router_member(router_id, gateway_id)
+
+    async def update_router_member(self, router_id: str, gateway_id: str, updates: dict):
+        return await self.default_backend.update_router_member(router_id, gateway_id, updates)
+
+    async def delete_router_member(self, router_id: str, gateway_id: str) -> bool:
+        return await self.default_backend.delete_router_member(router_id, gateway_id)
+
+    async def lookup_routing_cache(self, router_id: str, query_embedding, threshold: float = 0.92):
+        await self._ensure_backend_healthy(self.default_backend)
+        return await self.default_backend.lookup_routing_cache(router_id, query_embedding, threshold)
+
+    async def save_routing_cache(self, router_id: str, question: str, query_embedding, decision: dict, ttl_hours: int) -> int:
+        await self._ensure_backend_healthy(self.default_backend)
+        return await self.default_backend.save_routing_cache(router_id, question, query_embedding, decision, ttl_hours)
+
+    async def clear_routing_cache(self, router_id: str) -> int:
+        return await self.default_backend.clear_routing_cache(router_id)
+
     # --- Global settings CRUD (Lakebase only) ---
 
     async def get_global_settings(self) -> dict:
