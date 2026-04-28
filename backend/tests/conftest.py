@@ -61,6 +61,7 @@ def _attach_to_parent(name: str) -> None:
 # databricks.sdk — used by app.auth at import time
 _make_stub("databricks")
 _make_stub("databricks.sdk", WorkspaceClient=MagicMock())
+_make_stub("databricks.sdk.core", Config=MagicMock())
 
 # pydantic_settings — used by app.config to define a BaseSettings subclass
 _make_stub("pydantic_settings", BaseSettings=object, SettingsConfigDict=MagicMock())

@@ -10,6 +10,7 @@ returns only the portion belonging to the latest intent, so downstream embedding
 and cache lookup operates on a single coherent question.
 """
 
+import json
 import logging
 
 from databricks.sdk import WorkspaceClient
@@ -37,9 +38,12 @@ Rules:
 drill-downs) are NOT intent shifts — they are continuations of the same intent.
 - An intent shift happens when a sentence clearly is not additive to the previous \
 sentences and clearly switches to a different subject.
-- If the entire conversation is one continuous intent, return it unchanged.
+- If the entire conversation is one continuous intent, return the entire conversation \
+verbatim as the latest intent.
 - Preserve the original wording exactly — do not paraphrase, translate, or modify.
-- If you find a clear intent shift, return only the relevant portion of the conversation, with no explanation.
+
+Respond ONLY with a JSON object matching exactly this schema:
+{{"latest_intent": "<the portion of the conversation belonging to the latest intent, verbatim>"}}
 
 {space_context}
 
@@ -67,6 +71,31 @@ def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
     return client, endpoint
 
 
+def _parse_latest_intent(content: str) -> str | None:
+    """Parse the LLM response and extract the `latest_intent` field.
+
+    Returns the trimmed string on success, or None on any parse failure
+    (invalid JSON, missing key, non-string value, empty after strip).
+    """
+    if not isinstance(content, str):
+        return None
+
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    result = parsed.get("latest_intent")
+    if not isinstance(result, str):
+        return None
+
+    result = result.strip()
+    return result or None
+
+
 async def split_by_intent(context_text: str, runtime_settings=None, space_context: str = "") -> str:
     """
     Given a conversation context string, detect intent shifts and return only the
@@ -88,14 +117,26 @@ async def split_by_intent(context_text: str, runtime_settings=None, space_contex
             response = client.api_client.do(
                 "POST",
                 f"/serving-endpoints/{endpoint}/invocations",
-                body={"messages": [{"role": "user", "content": prompt}]},
+                body={
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"},
+                },
             )
 
-            result = response["choices"][0]["message"]["content"].strip()
+            content = response["choices"][0]["message"]["content"]
+            result = _parse_latest_intent(content)
 
-            if not result:
-                s.set_outputs({"result": None, "fallback": "empty_result"})
-                logger.warning("Intent splitter: empty result — returning original context")
+            if result is None:
+                s.set_outputs({
+                    "result": None,
+                    "fallback": "parse_failed",
+                    "raw": content[:200] if isinstance(content, str) else None,
+                })
+                preview = content[:120] if isinstance(content, str) else content
+                logger.warning(
+                    "Intent splitter: unparseable response %r — returning original context",
+                    preview,
+                )
                 return context_text
 
             s.set_outputs({"result": result})
@@ -107,6 +148,6 @@ async def split_by_intent(context_text: str, runtime_settings=None, space_contex
         )
         return result
 
-    except Exception as exc:
-        logger.warning("Intent split failed — returning original context: %s", exc)
+    except Exception:
+        logger.warning("Intent split failed — returning original context", exc_info=True)
         return context_text
