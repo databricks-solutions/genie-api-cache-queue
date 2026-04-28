@@ -49,7 +49,14 @@ CONVERSATION:
 
 
 def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
-    """Build a WorkspaceClient respecting the current auth mode."""
+    """Build a WorkspaceClient respecting the current auth mode.
+
+    Resolves the serving endpoint from runtime_settings.intent_split_model if set,
+    else falls back to INTENT_SPLIT_LLM_ENDPOINT.
+    """
+    endpoint = INTENT_SPLIT_LLM_ENDPOINT
+    if runtime_settings is not None and getattr(runtime_settings, "intent_split_model", None):
+        endpoint = runtime_settings.intent_split_model
     if runtime_settings:
         token = runtime_settings.databricks_token
         if not token:
@@ -58,7 +65,7 @@ def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
         client = WorkspaceClient(config=config)
     else:
         client = WorkspaceClient()
-    return client, INTENT_SPLIT_LLM_ENDPOINT
+    return client, endpoint
 
 
 def _parse_latest_intent(content: str) -> str | None:
