@@ -714,105 +714,16 @@ def _column_names_from_result(result: dict) -> list[str]:
     return out
 
 
-# Columns ending in these are aggregates/metrics — we never want to bind to them
-# as id/key inputs for a downstream pick.
-_METRIC_SUFFIXES = ("_count", "_total", "_sum", "_avg", "_mean", "_ratio",
-                    "_pct", "_percent", "_usd", "_amount", "_value", "_rate")
-
-# Suffixes we strip from the TARGET column name before matching candidates.
-# The selector often attaches descriptive suffixes (`_id`, `_name`, `_code`)
-# that rooms don't surface on display-style columns.
-_TARGET_STRIP_SUFFIXES = ("_id", "_ids", "_name", "_names", "_code", "_codes",
-                          "_label", "_key", "_keys")
-
-
-def _norm(s: str) -> str:
-    """Normalize a column name: lowercase, strip non-alphanumerics.
-
-    `"Trust Fund"` → `"trustfund"`, `"donor_id"` → `"donorid"`, `"R1-ID"` →
-    `"r1id"`. Lets the fuzzy matcher ignore the difference between display
-    names with spaces/case and selector-produced `snake_case_id` names.
-    """
-    return "".join(ch for ch in s.lower() if ch.isalnum()) if isinstance(s, str) else ""
-
-
-def _is_metric_column(name: str) -> bool:
-    lower = name.lower() if isinstance(name, str) else ""
-    return any(lower.endswith(suf) for suf in _METRIC_SUFFIXES)
-
-
-def _target_stems(target: str) -> list[str]:
-    """Return the normalized stems to try for matching `target` against result columns.
-
-    Starts with the full normalized target and, if it ends with a descriptive
-    suffix (`_id`, `_name`, `_code`, etc.), adds the stripped-stem form so a
-    selector-written `recipient_country_name` can match a `Recipient Country`
-    column in the result.
-    """
-    t = _norm(target)
-    if not t:
-        return []
-    stems = [t]
-    lower = target.lower()
-    for suf in _TARGET_STRIP_SUFFIXES:
-        if lower.endswith(suf):
-            bare = lower[: -len(suf)]
-            stems.append(_norm(bare))
-            # Also handle "recipient_country" → "recipientcountry" and its
-            # trailing-s singular if someone wrote `_ids` → `_id` → stem.
-            if suf.endswith("s") and len(suf) > 2:
-                stems.append(_norm(lower[: -(len(suf) - 1)]))
-            break
-    # De-duplicate while preserving order.
-    seen, out = set(), []
-    for s in stems:
-        if s and s not in seen:
-            seen.add(s)
-            out.append(s)
-    return out
-
-
-def _fuzzy_column_match(target: str, col_names: list[str]) -> int | None:
-    """Conservative match for selector-produced column names vs actual results.
-
-    The selector writes snake_case names often suffixed with `_id`, `_name`,
-    `_code`, etc. Rooms return display-friendly names (`Donor`, `Trust Fund`,
-    `Recipient Country`) or raw snake_case (`donor_id`, `trust_fund_id`).
-
-    Order:
-    1. Exact match after normalization (case/space/punct-insensitive).
-    2. Stem match: strip descriptive suffix (`_id`, `_name`, etc.) and look
-       for a column whose normalized form equals the stem (or stem+"id").
-
-    REJECTS metric-suffix candidates (`trust_fund_count`, `donor_total_usd`):
-    binding to an aggregate column silently passes nonsense to downstream.
-    """
-    if not col_names or not isinstance(target, str):
-        return None
-
-    normed = [_norm(c) if isinstance(c, str) else "" for c in col_names]
-
-    # 1. Exact match on full target.
-    t_full = _norm(target)
-    if t_full and t_full in normed:
-        return normed.index(t_full)
-
-    # 2. Stem match (per suffix-stripping rules).
-    stems = _target_stems(target)
-    for stem in stems:
-        if not stem:
-            continue
-        variants = {stem, stem + "id"}
-        candidates = []
-        for i, (orig, cand) in enumerate(zip(col_names, normed)):
-            if not cand or _is_metric_column(orig):
-                continue
-            if cand in variants:
-                candidates.append(i)
-        if len(candidates) == 1:
-            return candidates[0]
-
-    return None
+# Re-exports for backward-compatible local references; canonical source is
+# services/column_match.py (also used by the cache-write validator).
+from app.services.column_match import (
+    METRIC_SUFFIXES as _METRIC_SUFFIXES,
+    TARGET_STRIP_SUFFIXES as _TARGET_STRIP_SUFFIXES,
+    norm as _norm,
+    is_metric_column as _is_metric_column,
+    target_stems as _target_stems,
+    fuzzy_column_match as _fuzzy_column_match,
+)
 
 
 def _find_column_index(result_response: dict, column: str) -> tuple[int | None, list[str] | None, str]:

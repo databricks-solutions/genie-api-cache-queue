@@ -3,6 +3,7 @@ PostgreSQL + PGVector storage backend for efficient vector similarity search.
 Uses pgvector extension for fast cosine similarity operations.
 """
 
+import json
 import logging
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timezone
@@ -211,6 +212,8 @@ class PGVectorStorageService:
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
             await self._migrate_gateway_llm_models(conn)
+            await self._migrate_cache_write_signals(conn)
+            await self._migrate_query_log_skip_reason(conn)
 
     async def _migrate_genie_space_id_columns(self, conn):
         """Migration: ensure both gateway_id and genie_space_id columns exist.
@@ -295,6 +298,55 @@ class PGVectorStorageService:
         except Exception as e:
             logger.warning("Could not add caching_enabled to %s: %s", self.gateway_table_name, e)
 
+    async def _migrate_cache_write_signals(self, conn):
+        """Migration: add columns capturing what the warehouse + Genie returned at write time.
+
+        These let the write-time validator (services/cache_write_validator.py) record
+        why a row was kept, and let post-hoc analysis answer "did Genie tell us this
+        SQL was bad?" without re-running the query.
+        """
+        parts = self.table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        additions = [
+            ("row_count", "INTEGER"),
+            ("result_columns", "JSONB"),
+            ("genie_text", "TEXT"),
+            ("genie_description", "TEXT"),
+        ]
+        for column, coltype in additions:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                    schema, tbl, column
+                )
+                if not exists:
+                    await conn.execute(f'ALTER TABLE {self.table_name} ADD COLUMN {column} {coltype}')
+                    logger.info("Added %s column to %s", column, self.table_name)
+            except Exception as e:
+                logger.warning("Could not add %s to %s: %s", column, self.table_name, e)
+
+    async def _migrate_query_log_skip_reason(self, conn):
+        """Migration: surface cache-write skip decisions in query_logs."""
+        parts = self.query_log_table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        additions = [
+            ("row_count", "INTEGER"),
+            ("cache_skip_reason", "TEXT"),
+        ]
+        for column, coltype in additions:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                    schema, tbl, column
+                )
+                if not exists:
+                    await conn.execute(f'ALTER TABLE {self.query_log_table_name} ADD COLUMN {column} {coltype}')
+                    logger.info("Added %s column to %s", column, self.query_log_table_name)
+            except Exception as e:
+                logger.warning("Could not add %s to %s: %s", column, self.query_log_table_name, e)
+
     async def _migrate_gateway_llm_models(self, conn):
         """Migration: add per-gateway LLM model overrides + intent_split_enabled flag."""
         parts = self.gateway_table_name.split('.')
@@ -305,6 +357,7 @@ class PGVectorStorageService:
             ("validation_model", "TEXT"),
             ("intent_split_model", "TEXT"),
             ("intent_split_enabled", "BOOLEAN DEFAULT true"),
+            ("cache_write_validation_enabled", "BOOLEAN DEFAULT true"),
         ]
         for column, coltype in additions:
             try:
@@ -557,6 +610,7 @@ class PGVectorStorageService:
                 validation_model TEXT,
                 intent_split_model TEXT,
                 intent_split_enabled BOOLEAN DEFAULT true,
+                cache_write_validation_enabled BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
@@ -774,12 +828,17 @@ class PGVectorStorageService:
         gateway_id: str,
         original_query_text: str = None,
         genie_space_id: str = None,  # audit/reference only
+        row_count: Optional[int] = None,
+        result_columns: Optional[List[str]] = None,
+        genie_text: Optional[str] = None,
+        genie_description: Optional[str] = None,
     ) -> int:
         """Save a new query to the cache."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
 
         embedding_array = np.array(query_embedding, dtype=np.float32)
+        result_columns_json = json.dumps(result_columns) if result_columns is not None else None
 
         async with self.pool.acquire() as conn:
             await register_vector(conn)
@@ -787,13 +846,18 @@ class PGVectorStorageService:
             row = await conn.fetchrow(f"""
                 INSERT INTO {self.table_name}
                 (query_text, original_query_text, query_embedding, sql_query, identity, gateway_id, genie_space_id,
+                 row_count, result_columns, genie_text, genie_description,
                  created_at, last_used, use_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7,
+                        $8, $9::jsonb, $10, $11,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
                 RETURNING id
-            """, query_text, original_query_text, embedding_array, sql_query, identity, gateway_id, genie_space_id)
+            """, query_text, original_query_text, embedding_array, sql_query, identity, gateway_id, genie_space_id,
+               row_count, result_columns_json, genie_text, genie_description)
 
             cache_id = row['id']
-            logger.info("Saved to cache id=%d", cache_id)
+            logger.info("Saved to cache id=%d row_count=%s cols=%s", cache_id, row_count,
+                        len(result_columns) if result_columns else 0)
             return cache_id
 
     async def get_all_cached_queries(
@@ -935,6 +999,8 @@ class PGVectorStorageService:
         from_cache: bool = False,
         gateway_id: Optional[str] = None,
         genie_space_id: Optional[str] = None,  # audit/reference only
+        row_count: Optional[int] = None,
+        cache_skip_reason: Optional[str] = None,
     ) -> int:
         """Save a query log entry"""
         if not self.pool:
@@ -943,8 +1009,9 @@ class PGVectorStorageService:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(f"""
                 INSERT INTO {self.query_log_table_name}
-                (query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7,
+                (query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id,
+                 row_count, cache_skip_reason, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                         CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
                         CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 ON CONFLICT (query_id)
@@ -953,9 +1020,12 @@ class PGVectorStorageService:
                     from_cache = EXCLUDED.from_cache,
                     gateway_id = COALESCE(EXCLUDED.gateway_id, {self.query_log_table_name}.gateway_id),
                     genie_space_id = COALESCE(EXCLUDED.genie_space_id, {self.query_log_table_name}.genie_space_id),
+                    row_count = COALESCE(EXCLUDED.row_count, {self.query_log_table_name}.row_count),
+                    cache_skip_reason = COALESCE(EXCLUDED.cache_skip_reason, {self.query_log_table_name}.cache_skip_reason),
                     updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
                 RETURNING id
-            """, query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id)
+            """, query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id,
+               row_count, cache_skip_reason)
 
             return row['id']
 
@@ -1026,6 +1096,7 @@ class PGVectorStorageService:
             ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
             ("question_normalization_enabled", config.get("question_normalization_enabled", False)),
             ("cache_validation_enabled", config.get("cache_validation_enabled", False)),
+            ("cache_write_validation_enabled", config.get("cache_write_validation_enabled", True)),
             ("caching_enabled", config.get("caching_enabled", True)),
             ("embedding_provider", config.get("embedding_provider", "databricks")),
             ("databricks_embedding_endpoint", config.get("databricks_embedding_endpoint", "databricks-gte-large-en")),
@@ -1061,7 +1132,8 @@ class PGVectorStorageService:
             row = await conn.fetchrow(f"""
                 SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                        max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
-                       cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                       cache_validation_enabled, cache_write_validation_enabled, caching_enabled,
+                       embedding_provider, databricks_embedding_endpoint,
                        shared_cache, status, created_by, description,
                        normalization_model, validation_model, intent_split_model, intent_split_enabled,
                        created_at, updated_at
@@ -1082,7 +1154,8 @@ class PGVectorStorageService:
             rows = await conn.fetch(f"""
                 SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                        max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
-                       cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                       cache_validation_enabled, cache_write_validation_enabled, caching_enabled,
+                       embedding_provider, databricks_embedding_endpoint,
                        shared_cache, status, created_by, description,
                        normalization_model, validation_model, intent_split_model, intent_split_enabled,
                        created_at, updated_at
@@ -1107,7 +1180,8 @@ class PGVectorStorageService:
         # Build dynamic SET clause from provided updates
         allowed_fields = {
             "name", "similarity_threshold", "max_queries_per_minute", "cache_ttl_hours",
-            "question_normalization_enabled", "cache_validation_enabled", "caching_enabled",
+            "question_normalization_enabled", "cache_validation_enabled",
+            "cache_write_validation_enabled", "caching_enabled",
             "embedding_provider", "databricks_embedding_endpoint", "shared_cache", "status", "description",
             "sql_warehouse_id", "genie_space_id",
             "normalization_model", "validation_model", "intent_split_model", "intent_split_enabled",
@@ -1722,6 +1796,7 @@ class PGVectorStorageService:
             "cache_ttl_hours": row["cache_ttl_hours"],
             "question_normalization_enabled": row["question_normalization_enabled"],
             "cache_validation_enabled": row["cache_validation_enabled"],
+            "cache_write_validation_enabled": row["cache_write_validation_enabled"] if "cache_write_validation_enabled" in keys else True,
             "caching_enabled": row["caching_enabled"] if "caching_enabled" in keys else True,
             "embedding_provider": row["embedding_provider"],
             "databricks_embedding_endpoint": row["databricks_embedding_endpoint"],

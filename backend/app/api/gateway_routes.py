@@ -112,6 +112,7 @@ def _build_gateway_config_from_body(body: GatewayCreateRequest, user_email: str 
         "cache_ttl_hours": body.cache_ttl_hours,
         "question_normalization_enabled": body.question_normalization_enabled,
         "cache_validation_enabled": body.cache_validation_enabled,
+        "cache_write_validation_enabled": body.cache_write_validation_enabled,
         "caching_enabled": body.caching_enabled,
         "embedding_provider": _unset_if_blank(body.embedding_provider),
         "databricks_embedding_endpoint": _unset_if_blank(body.databricks_embedding_endpoint),
@@ -550,6 +551,7 @@ async def get_settings_endpoint(req: Request):
         "question_normalization_enabled": overrides.get("question_normalization_enabled", True),
         "normalization_model": overrides.get("normalization_model", ""),
         "cache_validation_enabled": overrides.get("cache_validation_enabled", True),
+        "cache_write_validation_enabled": overrides.get("cache_write_validation_enabled", True),
         "validation_model": overrides.get("validation_model", ""),
         "intent_split_enabled": overrides.get("intent_split_enabled", True),
         "intent_split_model": overrides.get("intent_split_model", ""),
@@ -611,6 +613,7 @@ _DELETABLE_SETTING_KEYS = (
 _EXPECTED_DELETABLE_KEYS = {
     "similarity_threshold", "max_queries_per_minute", "cache_ttl_hours",
     "question_normalization_enabled", "cache_validation_enabled",
+    "cache_write_validation_enabled",
     "intent_split_enabled", "normalization_model", "validation_model",
     "intent_split_model", "embedding_provider", "databricks_embedding_endpoint",
     "shared_cache", "lakebase_service_token",

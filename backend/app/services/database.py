@@ -105,18 +105,31 @@ class DatabaseService:
         runtime_settings=None,
         original_query_text: str = None,
         genie_space_id: str = None,
+        row_count: Optional[int] = None,
+        result_columns: Optional[List[str]] = None,
+        genie_text: Optional[str] = None,
+        genie_description: Optional[str] = None,
     ) -> int:
         return await self.backend.save_query_cache(
             query_text, query_embedding, sql_query, identity, gateway_id, runtime_settings,
             original_query_text=original_query_text,
             genie_space_id=genie_space_id,
+            row_count=row_count,
+            result_columns=result_columns,
+            genie_text=genie_text,
+            genie_description=genie_description,
         )
 
     async def get_all_cached_queries(self, identity: Optional[str] = None, runtime_settings=None, gateway_id: Optional[str] = None) -> List[dict]:
         return await self.backend.get_all_cached_queries(identity, runtime_settings, gateway_id=gateway_id)
 
-    async def save_query_log(self, query_id, query_text, identity, stage, from_cache=False, gateway_id=None, runtime_settings=None):
-        return await self.backend.save_query_log(query_id, query_text, identity, stage, from_cache, gateway_id, runtime_settings)
+    async def save_query_log(self, query_id, query_text, identity, stage, from_cache=False, gateway_id=None, runtime_settings=None,
+                             row_count: Optional[int] = None, cache_skip_reason: Optional[str] = None):
+        return await self.backend.save_query_log(
+            query_id, query_text, identity, stage, from_cache, gateway_id, runtime_settings,
+            row_count=row_count,
+            cache_skip_reason=cache_skip_reason,
+        )
 
     async def get_query_logs(self, identity=None, limit=50, runtime_settings=None, gateway_id=None):
         return await self.backend.get_query_logs(identity, limit, runtime_settings, gateway_id=gateway_id)

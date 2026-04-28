@@ -29,6 +29,7 @@ from app.utils import exponential_backoff
 from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
+from app.services.cache_write_validator import evaluate_cache_write
 from app.services.prompt_enricher import get_space_context
 from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
 from app.api.cache_hit_helpers import (
@@ -177,6 +178,7 @@ def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
         shared_cache=_coalesce(gw.get("shared_cache"), get_effective_setting("shared_cache")),
         question_normalization_enabled=_coalesce(gw.get("question_normalization_enabled"), get_effective_setting("question_normalization_enabled")),
         cache_validation_enabled=_coalesce(gw.get("cache_validation_enabled"), get_effective_setting("cache_validation_enabled")),
+        cache_write_validation_enabled=_coalesce(gw.get("cache_write_validation_enabled"), get_effective_setting("cache_write_validation_enabled")),
         caching_enabled=_coalesce(gw.get("caching_enabled"), get_effective_setting("caching_enabled")),
         intent_split_enabled=_coalesce(gw.get("intent_split_enabled"), get_effective_setting("intent_split_enabled")),
         normalization_model=_coalesce_model(gw.get("normalization_model"), get_effective_setting("normalization_model")),
@@ -309,21 +311,8 @@ async def _process_genie_background(
 
             if result.get("status") == "COMPLETED":
                 sql_query = result.get("sql_query", "")
-
-                if sql_query and query_embedding is not None:
-                    try:
-                        cache_id = await _db.db_service.save_query_cache(
-                            query_text, query_embedding, sql_query,
-                            identity, gateway_id or space_id, rs,
-                            original_query_text=original_query_text,
-                            genie_space_id=space_id,
-                        )
-                        logger.info("Background cache SAVED id=%s query=%s", cache_id, query_text[:50])
-                    except Exception as e:
-                        logger.error("Background cache save FAILED: %s", e, exc_info=True)
-                else:
-                    logger.warning("Background cache SKIPPED: sql=%s embedding=%s",
-                                   bool(sql_query), query_embedding is not None)
+                genie_text = result.get("genie_text")
+                genie_description = result.get("genie_description")
 
                 conv_id = CONV_PREFIX + msg_id[len(MSG_PREFIX):]
                 completed = _format_completed_response(conv_id, msg_id, att_id, sql_query)
@@ -347,17 +336,21 @@ async def _process_genie_background(
                         if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
                             _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
 
-                # Now execute SQL (poll arriving here sees stage=processing_genie, not received)
+                # Execute SQL FIRST (poll arriving here sees stage=processing_genie, not received)
+                # so the write-time validator can see row_count + columns + warehouse status
+                # before deciding whether to persist (question, SQL) into the pgvector cache.
                 actual_result = None
+                exec_succeeded = False
                 if sql_query:
                     try:
                         sql_exec = await genie_service.execute_sql(sql_query, rs)
                         if sql_exec.get("status") == "SUCCEEDED":
                             actual_result = sql_exec.get("result")
+                            exec_succeeded = True
                     except Exception as e:
                         logger.warning("execute_sql after cache miss failed: %s", e)
 
-                # Update _proxy to final state
+                # Update _proxy to final state — caller's response is now ready.
                 async with _get_message_lock(msg_id):
                     _synthetic_messages[msg_id]["_proxy"] = {
                         "stage": "completed",
@@ -367,7 +360,65 @@ async def _process_genie_background(
                         "auth_mode": auth_mode,
                     }
 
-                # Save query log
+                # Cache-write decision. Only persist if the warehouse actually
+                # ran the SQL successfully AND the heuristic validator approves
+                # (non-empty rows, no Genie refusal text, no MEASURE/DIMENSION,
+                # output columns match the user's requested target if any).
+                cache_skip_reason: str | None = None
+                row_count: int | None = None
+                result_columns: list[str] | None = None
+                if isinstance(actual_result, dict):
+                    rc = actual_result.get("row_count")
+                    if isinstance(rc, int):
+                        row_count = rc
+                    cols = actual_result.get("columns")
+                    if isinstance(cols, list):
+                        result_columns = [
+                            c.get("name") if isinstance(c, dict) else c
+                            for c in cols
+                            if (isinstance(c, dict) and c.get("name")) or isinstance(c, str)
+                        ]
+
+                if not sql_query:
+                    cache_skip_reason = "no_sql"
+                elif query_embedding is None:
+                    cache_skip_reason = "no_embedding"
+                elif not exec_succeeded:
+                    cache_skip_reason = "exec_failed"
+                else:
+                    decision = evaluate_cache_write(
+                        question=original_query_text or query_text,
+                        sql_query=sql_query,
+                        row_count=row_count,
+                        columns=result_columns,
+                        genie_text=genie_text,
+                        enabled=rs.cache_write_validation_enabled,
+                    )
+                    if not decision.should_write:
+                        cache_skip_reason = decision.reason
+                        logger.warning(
+                            "cache_write SKIPPED reason=%s detail=%s query=%s",
+                            decision.reason, decision.detail, (original_query_text or query_text)[:80],
+                        )
+
+                if cache_skip_reason is None:
+                    try:
+                        cache_id = await _db.db_service.save_query_cache(
+                            query_text, query_embedding, sql_query,
+                            identity, gateway_id or space_id, rs,
+                            original_query_text=original_query_text,
+                            genie_space_id=space_id,
+                            row_count=row_count,
+                            result_columns=result_columns,
+                            genie_text=genie_text,
+                            genie_description=genie_description,
+                        )
+                        logger.info("Background cache SAVED id=%s row_count=%s query=%s",
+                                    cache_id, row_count, query_text[:50])
+                    except Exception as e:
+                        logger.error("Background cache save FAILED: %s", e, exc_info=True)
+
+                # Save query log — record skip reason + row_count for observability.
                 try:
                     await _db.db_service.save_query_log(
                         query_id=msg_id,
@@ -377,6 +428,8 @@ async def _process_genie_background(
                         from_cache=False,
                         gateway_id=gateway_id,
                         runtime_settings=rs,
+                        row_count=row_count,
+                        cache_skip_reason=cache_skip_reason,
                     )
                 except Exception as e:
                     logger.warning("Failed to save cache miss query log: %s", e)

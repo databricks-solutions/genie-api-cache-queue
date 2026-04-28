@@ -129,6 +129,14 @@ class RuntimeSettings:
         return val if val is not None else True
 
     @property
+    def cache_write_validation_enabled(self) -> bool:
+        from app.api.config_store import get_effective_setting
+        if self.runtime and self.runtime.cache_write_validation_enabled is not None:
+            return self.runtime.cache_write_validation_enabled
+        val = get_effective_setting("cache_write_validation_enabled")
+        return val if val is not None else True
+
+    @property
     def intent_split_enabled(self) -> bool:
         from app.api.config_store import get_effective_setting
         if self.runtime and self.runtime.intent_split_enabled is not None:

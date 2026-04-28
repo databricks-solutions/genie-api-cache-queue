@@ -225,6 +225,10 @@ class DynamicStorageService:
         runtime_settings=None,
         original_query_text: str = None,
         genie_space_id: str = None,
+        row_count: Optional[int] = None,
+        result_columns: Optional[List[str]] = None,
+        genie_text: Optional[str] = None,
+        genie_description: Optional[str] = None,
     ) -> int:
         """Save a new query to the cache."""
         async def _op():
@@ -234,6 +238,10 @@ class DynamicStorageService:
                     query_text, query_embedding, sql_query, identity, gateway_id,
                     original_query_text=original_query_text,
                     genie_space_id=genie_space_id,
+                    row_count=row_count,
+                    result_columns=result_columns,
+                    genie_text=genie_text,
+                    genie_description=genie_description,
                 )
             return backend.save_query_cache(
                 query_text, query_embedding, sql_query, identity, gateway_id,
@@ -264,14 +272,18 @@ class DynamicStorageService:
         stage: str,
         from_cache: bool = False,
         gateway_id: Optional[str] = None,
-        runtime_settings=None
+        runtime_settings=None,
+        row_count: Optional[int] = None,
+        cache_skip_reason: Optional[str] = None,
     ) -> Optional[int]:
         """Save a query log entry."""
         async def _op():
             backend = await self._resolve_backend(runtime_settings)
             if hasattr(backend, 'pool'):
                 return await backend.save_query_log(
-                    query_id, query_text, identity, stage, from_cache, gateway_id
+                    query_id, query_text, identity, stage, from_cache, gateway_id,
+                    row_count=row_count,
+                    cache_skip_reason=cache_skip_reason,
                 )
             return None
         try:

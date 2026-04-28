@@ -44,6 +44,7 @@ class RuntimeConfig(BaseModel):
     # Feature flags
     question_normalization_enabled: Optional[bool] = None  # LLM-based question normalization
     cache_validation_enabled: Optional[bool] = None  # LLM-based cache hit validation
+    cache_write_validation_enabled: Optional[bool] = None  # Heuristic write-time validation
     caching_enabled: Optional[bool] = None  # Enable/disable semantic cache entirely
     intent_split_enabled: Optional[bool] = None  # LLM-based intent split
 
@@ -165,6 +166,7 @@ class GatewayConfig(BaseModel):
     cache_ttl_hours: float = 24
     question_normalization_enabled: bool = False
     cache_validation_enabled: bool = False
+    cache_write_validation_enabled: bool = True
     caching_enabled: bool = True
     embedding_provider: str = "databricks"
     databricks_embedding_endpoint: str = "databricks-gte-large-en"
@@ -192,6 +194,7 @@ class GatewayCreateRequest(BaseModel):
     cache_ttl_hours: Optional[float] = None
     question_normalization_enabled: Optional[bool] = None
     cache_validation_enabled: Optional[bool] = None
+    cache_write_validation_enabled: Optional[bool] = None
     caching_enabled: Optional[bool] = None
     embedding_provider: Optional[str] = None
     databricks_embedding_endpoint: Optional[str] = None
@@ -210,6 +213,7 @@ class GatewayUpdateRequest(BaseModel):
     cache_ttl_hours: Optional[float] = None
     question_normalization_enabled: Optional[bool] = None
     cache_validation_enabled: Optional[bool] = None
+    cache_write_validation_enabled: Optional[bool] = None
     caching_enabled: Optional[bool] = None
     embedding_provider: Optional[str] = None
     databricks_embedding_endpoint: Optional[str] = None
