@@ -3,11 +3,11 @@ LLM-based cache validation service.
 
 Validates that a cached query is semantically equivalent to the incoming query
 to avoid false cache hits from vector similarity alone (e.g. "Revenue in Q1"
-vs "Revenue in Q2"). Uses native JSON mode on the serving endpoint so we
-never have to fence-strip markdown.
+vs "Revenue in Q2"). Uses native JSON mode where the model supports it and
+falls back to fence-tolerant parsing for models that don't (Claude wraps
+output in ```json fences even when asked not to).
 """
 
-import json
 import logging
 
 from databricks.sdk import WorkspaceClient
@@ -15,6 +15,7 @@ from databricks.sdk.core import Config
 
 from app.config import get_settings
 from app.services import tracing
+from app.services.llm_json import JSON_INSTRUCTION, invoke_json, parse_json_content
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -24,21 +25,12 @@ settings = get_settings()
 CACHE_VALIDATION_LLM_ENDPOINT = "databricks-llama-4-maverick"
 
 
-def _parse_is_cache_valid(content: str) -> bool | None:
-    """Parse the LLM response and extract `is_cache_valid` as a bool.
+def _extract_is_cache_valid(parsed) -> bool | None:
+    """Coerce the `is_cache_valid` field from an already-parsed dict.
 
-    Returns True/False on a successful parse with a valid value, or None on
-    any parse failure (invalid JSON, missing key, non-coercible value). The
-    caller treats None as fail-open (= valid hit).
+    Returns True/False on a valid value, or None on missing/non-coercible
+    value. The caller treats None as fail-open (= valid hit).
     """
-    if not isinstance(content, str):
-        return None
-
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-
     if not isinstance(parsed, dict):
         return None
 
@@ -55,6 +47,23 @@ def _parse_is_cache_valid(content: str) -> bool | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return bool(value)
     return None
+
+
+def _parse_is_cache_valid(content: str) -> bool | None:
+    """Parse a JSON string from the LLM response and extract `is_cache_valid`.
+
+    Tolerates ```json fences (Claude-style). Returns None on any parse
+    failure or non-coercible value.
+    """
+    if not isinstance(content, str):
+        return None
+
+    try:
+        parsed = parse_json_content(content)
+    except ValueError:
+        return None
+
+    return _extract_is_cache_valid(parsed)
 
 
 def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
@@ -102,6 +111,7 @@ async def validate_cache_entry(
             "set is_cache_valid to true. Otherwise, set it to false. "
             "Respond ONLY with a JSON object matching this schema: "
             '{"is_cache_valid": <boolean>}.'
+            f" {JSON_INSTRUCTION}"
             f"{space_context_section}\n\n"
             f"CACHED ENTRY:\n{cached_query}\n\n"
             f"QUESTION:\n{incoming_query}"
@@ -113,32 +123,40 @@ async def validate_cache_entry(
             inputs={"incoming": incoming_query, "cached": cached_query},
             attributes={"model": endpoint},
         ) as s:
-            response = client.api_client.do(
-                "POST",
-                f"/serving-endpoints/{endpoint}/invocations",
-                body={
-                    "messages": [{"role": "user", "content": prompt}],
-                    "response_format": {"type": "json_object"},
-                },
-            )
+            try:
+                parsed = invoke_json(
+                    client,
+                    endpoint,
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                )
+            except ValueError as parse_err:
+                s.set_outputs({
+                    "is_cache_valid": True,
+                    "fallback": "parse_failed",
+                    "raw": str(parse_err)[:200],
+                })
+                logger.warning(
+                    "Cache LLM validation: unparseable response — treating as valid hit (%s)",
+                    parse_err,
+                )
+                return True
 
-            content = response["choices"][0]["message"]["content"]
-            is_cache_valid = _parse_is_cache_valid(content)
+            is_cache_valid = _extract_is_cache_valid(parsed)
 
             if is_cache_valid is None:
                 s.set_outputs({
                     "is_cache_valid": True,
                     "fallback": "parse_failed",
-                    "raw": content[:200] if isinstance(content, str) else None,
+                    "raw": parsed,
                 })
-                preview = content[:120] if isinstance(content, str) else content
                 logger.warning(
-                    "Cache LLM validation: unparseable response %r — treating as valid hit",
-                    preview,
+                    "Cache LLM validation: unrecognized response shape %r — treating as valid hit",
+                    parsed,
                 )
                 return True
 
-            s.set_outputs({"is_cache_valid": is_cache_valid, "raw": content})
+            s.set_outputs({"is_cache_valid": is_cache_valid, "raw": parsed})
 
         logger.info(
             "Cache LLM validation: result=%s cached=%r... incoming=%r...",

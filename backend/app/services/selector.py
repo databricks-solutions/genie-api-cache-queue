@@ -10,14 +10,20 @@ WorkspaceClient with the caller's token, POST to
 `/serving-endpoints/{endpoint}/invocations`.
 """
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
+
+from app.services.llm_json import (
+    JSON_INSTRUCTION,
+    build_json_body,
+    invoke_json,
+    is_claude_endpoint,
+    parse_json_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -200,89 +206,31 @@ def _catalog_as_prompt(members: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
-def _extract_content(data: Any) -> str:
-    choices = (data or {}).get("choices") or []
-    if choices:
-        msg = choices[0].get("message") or {}
-        return msg.get("content") or ""
-    preds = (data or {}).get("predictions") or []
-    if preds:
-        return str(preds[0])
-    return ""
-
-
-def _is_claude_endpoint(endpoint: str) -> bool:
-    """Endpoints whose serving stack rejects `response_format: json_object`.
-
-    Databricks FMAPI is OpenAI-compatible but the per-model wrappers around
-    Bedrock-served Claude reject `response_format` (verified on FEVM
-    2026-04-27 with `databricks-claude-haiku-4-5`). Llama-served-on-DBX
-    accepts it. We branch on endpoint name rather than detect at runtime to
-    keep the request shape stable per model.
-    """
-    return "claude" in (endpoint or "").lower()
+# Thin private aliases kept so test_selector.py continues to import them.
+# All callers should prefer the public names in app.services.llm_json.
+_is_claude_endpoint = is_claude_endpoint
+_parse_json_content = parse_json_content
 
 
 def _build_selector_body(endpoint: str, system_prompt: str, user_prompt: str) -> dict:
-    r"""Construct the FMAPI invocation body, with per-endpoint shape adjustments.
+    """Selector-specific wrapper around `llm_json.build_json_body`.
 
-    Llama-4-maverick accepts the full OpenAI shape including
-    `response_format: {type: json_object}`. Claude on Databricks (Bedrock-
-    proxied) rejects that field — we drop it and rely on the prompt
-    instruction to constrain the output to JSON. The fence-tolerant parser
-    `_parse_json_content` handles Claude's occasional ```json ... ```
-    wrapping at the read side.
+    DAG schema has more tokens per pick (id/depends_on/bind); 1024 leaves
+    room for 3-stage plans with bind entries without truncating.
+
+    Note: tried `seed: 42` for FMAPI determinism on 2026-04-27 — Llama
+    rejects it with BadRequest (strict schema validation). Not all
+    OpenAI-compatible servers accept `seed`. See project_selector_temp_finding.
     """
-    body: dict = {
-        "messages": [
+    return build_json_body(
+        endpoint,
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.0,
-        # DAG schema has more tokens per pick (id/depends_on/bind); give it room
-        # for 3-stage plans with bind entries without truncating.
-        "max_tokens": 1024,
-        "response_format": {"type": "json_object"},
-    }
-    if _is_claude_endpoint(endpoint):
-        body.pop("response_format", None)
-    return body
-    # Note: tried `seed: 42` for FMAPI determinism on 2026-04-27 — Llama
-    # rejects it with BadRequest (strict schema validation). Not all
-    # OpenAI-compatible servers accept `seed`. See project_selector_temp_finding.
-
-
-def _parse_json_content(content: str) -> dict:
-    """Parse JSON from a chat-completion content string, tolerating fences.
-
-    Tries `json.loads` first (Llama path: clean JSON when response_format is
-    set). On JSONDecodeError, strips a single leading code fence (with or
-    without a `json` language tag) plus its closing ``` and retries
-    (Claude path: the model occasionally wraps complex outputs even when
-    asked not to). Raises ValueError if neither attempt parses.
-    """
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
-    s = (content or "").strip()
-    # Find a fenced block: ```json ... ``` OR ``` ... ```
-    if s.startswith("```"):
-        # drop the opening fence line
-        nl = s.find("\n")
-        if nl != -1:
-            s = s[nl + 1:]
-        else:
-            s = s[3:]
-        # drop trailing ``` if present (with or without trailing text)
-        if s.rstrip().endswith("```"):
-            s = s.rstrip()[:-3]
-        elif "```" in s:
-            s = s.rsplit("```", 1)[0]
-    try:
-        return json.loads(s.strip())
-    except json.JSONDecodeError as e:
-        raise ValueError(f"content is not parseable JSON (with or without fence): {e}") from e
+        temperature=0.0,
+        max_tokens=1024,
+    )
 
 
 def _active_members(members: list[dict]) -> list[dict]:
@@ -327,9 +275,7 @@ async def select_rooms(
     # FMAPI's response_format check wants the literal lowercase word "json" in
     # the user message (not just the system prompt), so we append an explicit
     # instruction here too.
-    user_prompt += "\n\nRespond with a json object only."
-
-    body = _build_selector_body(endpoint, prompt, user_prompt)
+    user_prompt += f"\n\n{JSON_INSTRUCTION}"
 
     if not token:
         logger.warning("Selector: no user token — falling back to first active member")
@@ -343,11 +289,19 @@ async def select_rooms(
     try:
         config = Config(host=databricks_host, token=token, auth_type="pat")
         client = WorkspaceClient(config=config)
-        response = client.api_client.do(
-            "POST",
-            f"/serving-endpoints/{endpoint}/invocations",
-            body=body,
+        parsed = invoke_json(
+            client,
+            endpoint,
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=1024,
         )
+    except ValueError as e:
+        logger.warning("Selector returned non-JSON (endpoint=%s): %s", endpoint, e)
+        return RoutingDecision(picks=[], decomposed=False, rationale="selector returned non-JSON")
     except Exception as e:
         logger.warning("Selector LLM call failed (endpoint=%s): %s — falling back to first active member", endpoint, e)
         fallback = active[0]
@@ -356,13 +310,6 @@ async def select_rooms(
             decomposed=False,
             rationale=f"selector failed ({type(e).__name__}); fell back to {fallback['gateway_id']}",
         )
-
-    content = _extract_content(response)
-    try:
-        parsed = _parse_json_content(content)
-    except (ValueError, json.JSONDecodeError):
-        logger.warning("Selector returned non-JSON (endpoint=%s): %s", endpoint, content[:200])
-        return RoutingDecision(picks=[], decomposed=False, rationale="selector returned non-JSON")
 
     picks = _parse_picks(parsed.get("picks") or [], active)
 
