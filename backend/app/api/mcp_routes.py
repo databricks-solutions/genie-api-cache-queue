@@ -51,6 +51,12 @@ from app.api.genie_clone_routes import (
     _process_genie_background,
 )
 
+# Router-MCP reuses the routing-decision + DAG-execution path from REST so the
+# MCP handler is a thin protocol adapter, not a second copy of the logic.
+from app.api.router_routes import _resolve_decision, _execute_dag
+from app.api.auth_helpers import require_role, resolve_user_token_optional
+from app.services import tracing
+
 # ── Protocol constants ────────────────────────────────────────────────
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "GenieCacheQueueMCP"
@@ -660,6 +666,328 @@ async def mcp_endpoint(space_id: str, request: Request):
                 space_id, real_space_id, arguments, token, gateway,
             )
             return _jsonrpc_ok(req_id, result)
+
+        return _jsonrpc_error(req_id, -32601, f"Tool not found: {tool_name}")
+
+    return _jsonrpc_error(req_id, -32601, f"Method not found: {method}")
+
+
+# ── Router MCP ────────────────────────────────────────────────────────
+#
+# Parallel surface to the gateway MCP above, but scoped to a router. The
+# router runs a selector LLM internally — the agent sees ONE `ask` tool that
+# decomposes, picks the right gateway(s), and fans out, plus `list_rooms` for
+# catalog inspection. If you want per-gateway tools, point clients at the
+# gateway MCP (`/api/2.0/mcp/genie/{space_id}`) instead.
+
+import time as _time
+
+
+def _build_router_tools(router_id: str, router_cfg: dict) -> list:
+    """Tool list for ``tools/list`` on a router MCP.
+
+    Description bakes in the router's name + active member catalog so the
+    agent has enough context to phrase good questions without a separate
+    discovery call. ``list_rooms`` stays available for richer inspection.
+    """
+    name = router_cfg.get("name") or router_id
+    description = router_cfg.get("description") or ""
+    members = router_cfg.get("members") or []
+    active = [m for m in members if not m.get("disabled")]
+
+    member_lines = []
+    for m in active:
+        title = m.get("title") or m.get("gateway_id")
+        when = (m.get("when_to_use") or "").strip()
+        line = f"- {title}"
+        if when:
+            line += f": {when}"
+        member_lines.append(line)
+    catalog_block = "\n".join(member_lines) if member_lines else "(no active members)"
+
+    ask_desc = (
+        f"Ask a natural-language data question against the {name} router.\n"
+        "The router's selector decides which underlying Genie space(s) handle "
+        "the question (decomposing into sub-questions when the question spans "
+        "multiple sources) and returns the merged results.\n"
+        f"{('Router description: ' + description) if description else ''}\n"
+        "Active member spaces and when to use each:\n"
+        f"{catalog_block}\n"
+        "Returns a structured response with the routing decision (which "
+        "spaces were picked and why) plus per-source results (SQL, rows, "
+        "errors)."
+    )
+    list_desc = (
+        f"List the active member spaces of the {name} router along with their "
+        "catalog metadata (when_to_use, sample questions, tables). Useful for "
+        "discovery before phrasing a question. Optional ``filter`` does a "
+        "case-insensitive substring match against title and when_to_use."
+    )
+
+    return [
+        {
+            "name": f"ask_{router_id}",
+            "description": ask_desc,
+            "inputSchema": {
+                "type": "object",
+                "required": ["question"],
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "Natural-language data question.",
+                    },
+                    "hints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional hints to bias the selector (e.g. preferred member titles).",
+                    },
+                },
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "router_id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "routing": {"type": "object"},
+                    "diagnostics": {"type": "object"},
+                    "sources": {"type": "array", "items": {"type": "object"}},
+                    "elapsed_ms": {"type": "integer"},
+                    "trace_id": {"type": ["string", "null"]},
+                },
+            },
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "name": f"list_rooms_{router_id}",
+            "description": list_desc,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "description": "Case-insensitive substring filter applied to title + when_to_use.",
+                    },
+                },
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "router_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "members": {"type": "array", "items": {"type": "object"}},
+                },
+            },
+            "annotations": {"readOnlyHint": True},
+        },
+    ]
+
+
+def _wrap_router_result(payload: dict, is_error: bool = False) -> dict:
+    """Match the gateway MCP envelope: text content + structuredContent."""
+    return {
+        "content": [{"type": "text", "text": json.dumps(payload, default=str)}],
+        "isError": is_error,
+        "structuredContent": payload,
+    }
+
+
+async def _handle_router_initialize(router_cfg: dict):
+    name = router_cfg.get("name") or router_cfg.get("id")
+    description = router_cfg.get("description") or ""
+    instructions = (
+        f"Router '{name}' multiplexes several Genie spaces behind a selector "
+        "LLM. Use ``ask`` to send a natural-language question (the router "
+        "picks the right space(s) and merges results) or ``list_rooms`` to "
+        "inspect the catalog before asking."
+    )
+    if description:
+        instructions += f"\nDescription: {description}"
+
+    return {
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {"tools": {}},
+        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+        "instructions": instructions,
+    }
+
+
+async def _handle_router_ask(router_cfg: dict, arguments: dict, token: str, identity: str) -> dict:
+    """Run decompose → select → DAG-execute for one MCP ask call.
+
+    Synchronous: blocks until ``_execute_dag`` finishes (which itself polls
+    each gateway dispatch in-process up to ``_DISPATCH_POLL_TIMEOUT_S``).
+    Returns the same payload shape as ``POST /api/v1/routers/{id}/query``.
+    """
+    question = (arguments.get("question") or "").strip()
+    if not question:
+        return _wrap_router_result(
+            {"error": "question is required", "router_id": router_cfg["id"]},
+            is_error=True,
+        )
+
+    hints = arguments.get("hints") or None
+    router_id = router_cfg["id"]
+    experiment_id = tracing.resolve_experiment_id(router_cfg.get("mlflow_experiment_path"))
+
+    async with tracing.start_router_root_span(
+        "router.query",
+        experiment_id=experiment_id,
+        router_id=router_id,
+        span_type="AGENT",
+        inputs={"question": question, "hints": hints},
+        attributes={
+            "router_id": router_id,
+            "user_identity": identity,
+            "mode": "mcp_query",
+        },
+    ) as root:
+        t0 = _time.monotonic()
+        decision, meta = await _resolve_decision(
+            router_cfg, question, hints, token, use_cache=True,
+        )
+
+        if not decision.picks:
+            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            root.set_outputs({
+                "n_picks": 0,
+                "decomposed": decision.decomposed,
+                "rationale": decision.rationale,
+                "elapsed_ms": elapsed_ms,
+            })
+            trace_id = tracing.current_trace_id()
+            payload = {
+                "router_id": router_id,
+                "question": question,
+                "routing": decision.model_dump(),
+                "diagnostics": meta,
+                "sources": [],
+                "elapsed_ms": elapsed_ms,
+                "trace_id": trace_id,
+            }
+            return _wrap_router_result(payload)
+
+        results, dag_stats = await _execute_dag(decision.picks, token, identity)
+        elapsed_ms = int((_time.monotonic() - t0) * 1000)
+        n_ok = sum(1 for r in results if r.get("status") == "COMPLETED")
+        n_skipped = sum(1 for r in results if r.get("status") == "SKIPPED")
+        root.set_outputs({
+            "n_picks": len(decision.picks),
+            "decomposed": decision.decomposed,
+            "rationale": decision.rationale,
+            "n_ok": n_ok,
+            "n_failed": len(results) - n_ok - n_skipped,
+            "n_skipped": n_skipped,
+            "n_stages": dag_stats["n_stages"],
+            "n_skipped_upstream_failed": dag_stats["n_skipped_upstream_failed"],
+            "n_skipped_binding_failed": dag_stats["n_skipped_binding_failed"],
+            "elapsed_ms": elapsed_ms,
+        })
+        trace_id = tracing.current_trace_id()
+
+    payload = {
+        "router_id": router_id,
+        "question": question,
+        "routing": decision.model_dump(),
+        "diagnostics": {**meta, **dag_stats},
+        "sources": results,
+        "elapsed_ms": elapsed_ms,
+        "trace_id": trace_id,
+    }
+    is_error = n_ok == 0  # no successful sources ⇒ surface as error to the agent
+    return _wrap_router_result(payload, is_error=is_error)
+
+
+def _handle_router_list_rooms(router_cfg: dict, arguments: dict) -> dict:
+    """Catalog inspection — active members with metadata, optional substring filter."""
+    flt = (arguments.get("filter") or "").strip().lower()
+    members = router_cfg.get("members") or []
+    out = []
+    for m in members:
+        if m.get("disabled"):
+            continue
+        if flt:
+            haystack = " ".join([
+                str(m.get("title") or ""),
+                str(m.get("when_to_use") or ""),
+                str(m.get("gateway_id") or ""),
+            ]).lower()
+            if flt not in haystack:
+                continue
+        out.append({
+            "gateway_id": m.get("gateway_id"),
+            "title": m.get("title"),
+            "ordinal": m.get("ordinal"),
+            "when_to_use": m.get("when_to_use"),
+            "tables": m.get("tables") or [],
+            "sample_questions": m.get("sample_questions") or [],
+        })
+    out.sort(key=lambda x: (x.get("ordinal") or 0, x.get("title") or ""))
+    payload = {
+        "router_id": router_cfg["id"],
+        "name": router_cfg.get("name"),
+        "members": out,
+    }
+    return _wrap_router_result(payload)
+
+
+@mcp_router.post("/router/{router_id}")
+async def mcp_router_endpoint(router_id: str, request: Request):
+    """Streamable HTTP MCP endpoint for a router (JSON-RPC 2.0)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return _jsonrpc_error(None, -32700, "Parse error")
+
+    method = body.get("method", "")
+    req_id = body.get("id")
+    params = body.get("params", {})
+
+    if method == "notifications/initialized":
+        return JSONResponse(content=None, status_code=204)
+
+    # RBAC: match the REST `/routers/{id}/query` endpoint contract.
+    try:
+        identity, _role_token, _role = await require_role(request, "use")
+    except Exception as e:
+        # Bubble HTTPExceptions up as JSON-RPC errors so MCP clients see them.
+        from fastapi import HTTPException as _HTTPExc
+        if isinstance(e, _HTTPExc):
+            return _jsonrpc_error(req_id, -32001, e.detail, {"status": e.status_code})
+        raise
+
+    # Token used for downstream Genie/warehouse calls (allows SP fallback so
+    # the router endpoint behaves consistently with `POST /routers/{id}/query`).
+    token = resolve_user_token_optional(request)
+    if not identity:
+        identity = "mcp-user"
+
+    router_cfg = await _db.db_service.get_router(router_id, include_members=True)
+    if not router_cfg:
+        return _jsonrpc_error(req_id, -32602, f"Router not found: {router_id}")
+
+    if method == "initialize":
+        return _jsonrpc_ok(req_id, await _handle_router_initialize(router_cfg))
+
+    if method == "tools/list":
+        return _jsonrpc_ok(req_id, {"tools": _build_router_tools(router_id, router_cfg)})
+
+    if method == "tools/call":
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments") or {}
+
+        if tool_name == f"ask_{router_id}":
+            try:
+                result = await _handle_router_ask(router_cfg, arguments, token, identity)
+            except Exception as e:
+                logger.exception("Router MCP ask failed")
+                result = _wrap_router_result(
+                    {"error": f"{type(e).__name__}: {e}", "router_id": router_id},
+                    is_error=True,
+                )
+            return _jsonrpc_ok(req_id, result)
+
+        if tool_name == f"list_rooms_{router_id}":
+            return _jsonrpc_ok(req_id, _handle_router_list_rooms(router_cfg, arguments))
 
         return _jsonrpc_error(req_id, -32601, f"Tool not found: {tool_name}")
 

@@ -419,6 +419,17 @@ async with MCPServerStreamableHttp(params={
 
 > **Tip:** Enable **Question Normalization** on the gateway when using MCP. Agents may rephrase the same intent differently across calls — normalization maps variations to a canonical form before embedding, improving cache hit rates.
 
+### Router MCP
+
+Routers also expose an MCP endpoint at `POST /api/2.0/mcp/router/{router_id}`. The selector runs server-side, so the agent sees a single tool that handles multi-source questions:
+
+| Tool | Description |
+|------|-------------|
+| `ask_{router_id}` | Ask a natural language question. The router decomposes (when needed), picks the right member space(s), fans out, and returns merged per-source results. |
+| `list_rooms_{router_id}` | List active member spaces with their `when_to_use`, `tables`, and `sample_questions`. Optional `filter` substring narrows the list. |
+
+If you'd rather have the agent pick gateways directly, point it at one gateway-MCP endpoint per space instead.
+
 ---
 
 ## API Reference

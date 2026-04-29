@@ -7,6 +7,7 @@ export default function ApiReferencePage() {
     genie: true,
     proxy: false,
     gateway: false,
+    router: false,
   })
   const [expandedEndpoints, setExpandedEndpoints] = useState({
     'clone-start': true,
@@ -24,6 +25,17 @@ export default function ApiReferencePage() {
     'gw-delete': false,
     'gw-spaces': false,
     'gw-warehouses': false,
+    'rt-list': false,
+    'rt-create': false,
+    'rt-get': false,
+    'rt-update': false,
+    'rt-delete': false,
+    'rt-member-add': false,
+    'rt-member-update': false,
+    'rt-member-delete': false,
+    'rt-cache-flush': false,
+    'rt-preview': false,
+    'rt-query': false,
   })
 
   const baseUrl = window.location.origin
@@ -420,6 +432,202 @@ export default function ApiReferencePage() {
                 <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">curl</p>
                 <CodeBlock id="curl-gw-warehouses" code={`curl ${baseUrl}/api/workspace/warehouses \\
   -H "Authorization: Bearer $TOKEN"`} />
+              </div>
+            </EndpointRow>
+          </div>
+        )}
+      </div>
+
+      {/* Section 4: Routers */}
+      <div className="bg-dbx-bg border border-dbx-border rounded overflow-hidden mb-4">
+        <button
+          onClick={() => toggleSection('router')}
+          className="w-full flex items-center gap-2.5 px-4 py-3 text-left hover:bg-dbx-neutral-hover transition-colors"
+        >
+          {expandedSections.router
+            ? <ChevronDown className="w-4 h-4 text-dbx-text-secondary" />
+            : <ChevronRight className="w-4 h-4 text-dbx-text-secondary" />}
+          <h2 className="text-[14px] font-medium text-dbx-text">Routers</h2>
+          <span className="text-[12px] text-dbx-text-secondary">-- Group several gateways under one endpoint with a selector LLM that picks (and decomposes across) the right members.</span>
+        </button>
+
+        {expandedSections.router && (
+          <div>
+            <div className="px-4 pb-3 border-t border-dbx-border pt-3">
+              <p className="text-[13px] text-dbx-text-secondary">
+                Base path: <code className="bg-dbx-sidebar px-1 rounded text-[12px]">/api/v1</code>. Catalog metadata
+                (<code>when_to_use</code>, <code>tables</code>, <code>sample_questions</code>) lives on each member edge,
+                so the same gateway can be enrolled in multiple routers with different routing hints.
+              </p>
+            </div>
+
+            <EndpointRow
+              id="rt-list"
+              method="GET"
+              path="/api/v1/routers"
+              description="List all routers"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Returns all routers (members not hydrated). Requires the <code className="bg-dbx-sidebar px-1 rounded text-[12px]">use</code> role.</p>
+              <div>
+                <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">curl</p>
+                <CodeBlock id="curl-rt-list" code={`curl ${baseUrl}/api/v1/routers \\
+  -H "Authorization: Bearer $TOKEN"`} />
+              </div>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-create"
+              method="POST"
+              path="/api/v1/routers"
+              description="Create a router"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Owner role required. Optionally seed initial members in the same call.</p>
+              <div>
+                <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">Request Body</p>
+                <CodeBlock id="body-rt-create" code={`{
+  "name": "Operations Router",
+  "description": "Routes operations questions across finance + logistics",
+  "selector_model": "databricks-claude-haiku-4-5",
+  "decompose_enabled": true,
+  "routing_cache_enabled": true,
+  "similarity_threshold": 0.92,
+  "cache_ttl_hours": 24,
+  "mlflow_experiment_path": "/Users/me/router-traces",
+  "members": [
+    { "gateway_id": "<UUID>", "title": "Finance",   "when_to_use": "..." },
+    { "gateway_id": "<UUID>", "title": "Logistics", "when_to_use": "..." }
+  ]
+}`} />
+              </div>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-get"
+              method="GET"
+              path="/api/v1/routers/{router_id}"
+              description="Get a router with members"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Members are hydrated with their full catalog metadata.</p>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-update"
+              method="PUT"
+              path="/api/v1/routers/{router_id}"
+              description="Update router settings"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Manage role required. Partial update -- send only the fields you want to change. Send <code className="bg-dbx-sidebar px-1 rounded text-[12px]">"mlflow_experiment_path": null</code> to disable tracing for this router.</p>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-delete"
+              method="DELETE"
+              path="/api/v1/routers/{router_id}"
+              description="Delete a router"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Owner role required. Cascades to members and routing cache.</p>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-member-add"
+              method="POST"
+              path="/api/v1/routers/{router_id}/members"
+              description="Add a gateway as a member"
+            >
+              <div>
+                <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">Request Body</p>
+                <CodeBlock id="body-rt-member-add" code={`{
+  "gateway_id": "<UUID>",
+  "title": "R5 -- Disbursements & Execution",
+  "when_to_use": "Use for project-level cashflow and execution health...",
+  "tables": ["mv_disbursement_execution", "fact_disbursement"],
+  "sample_questions": ["Top 5 problem projects by disbursement ratio?"],
+  "ordinal": 5
+}`} />
+              </div>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-member-update"
+              method="PUT"
+              path="/api/v1/routers/{router_id}/members/{gateway_id}"
+              description="Update member catalog metadata"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Edit <code>when_to_use</code>, sample questions, or table list without touching the gateway itself.</p>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-member-delete"
+              method="DELETE"
+              path="/api/v1/routers/{router_id}/members/{gateway_id}"
+              description="Remove a member"
+            />
+
+            <EndpointRow
+              id="rt-cache-flush"
+              method="DELETE"
+              path="/api/v1/routers/{router_id}/cache"
+              description="Flush the routing cache"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Drops all <code>(question_embedding → decision)</code> rows for this router. Use after editing <code>when_to_use</code> hints so the selector re-evaluates.</p>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-preview"
+              method="POST"
+              path="/api/v1/routers/{router_id}/preview"
+              description="Preview routing decision (no dispatch)"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">Runs the selector and returns the routing decision without spending warehouse time. Used by the Preview tab when iterating on catalog metadata.</p>
+              <div>
+                <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">Request Body</p>
+                <CodeBlock id="body-rt-preview" code={`{
+  "question": "Compare disbursement velocity to ISR ratings by region.",
+  "hints": []
+}`} />
+              </div>
+            </EndpointRow>
+
+            <EndpointRow
+              id="rt-query"
+              method="POST"
+              path="/api/v1/routers/{router_id}/query"
+              description="Decompose, select, dispatch (DAG)"
+            >
+              <p className="text-[13px] text-dbx-text-secondary">
+                Runs the full pipeline: routing-cache lookup → selector LLM (with optional decomposition) → topological
+                dispatch across member gateways → upstream-result binding into dependent sub-questions → merged
+                per-source response. Blocks until the DAG finishes.
+              </p>
+              <div>
+                <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">Request Body</p>
+                <CodeBlock id="body-rt-query" code={`{
+  "question": "Which donors funded climate-themed trust funds, and what projects did those fund?",
+  "hints": []
+}`} />
+              </div>
+              <div>
+                <p className="text-[12px] font-medium text-dbx-text-secondary mb-1">Response</p>
+                <CodeBlock id="resp-rt-query" code={`{
+  "router_id": "...",
+  "question": "...",
+  "routing": {
+    "picks": [
+      { "id": "p0", "gateway_id": "...", "sub_question": "...", "depends_on": [] },
+      { "id": "p1", "gateway_id": "...", "sub_question": "...for donors {{p0.donor_id}}",
+        "depends_on": ["p0"], "bind": [{ "placeholder": "p0.donor_id", "upstream": "p0", "column": "donor_id", "reducer": "list" }] }
+    ],
+    "decomposed": true,
+    "rationale": "..."
+  },
+  "diagnostics": { "cache_hit": false, "selector_ms": 812, "n_stages": 2 },
+  "sources": [
+    { "pick_id": "p0", "status": "COMPLETED", "response": { "attachments": [...] }, "elapsed_ms": 4321 },
+    { "pick_id": "p1", "status": "COMPLETED", "response": { "attachments": [...] }, "elapsed_ms": 5102 }
+  ],
+  "elapsed_ms": 9876,
+  "trace_id": "tr-..."
+}`} />
               </div>
             </EndpointRow>
           </div>
