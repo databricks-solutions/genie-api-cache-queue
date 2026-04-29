@@ -5,6 +5,7 @@ Performance and governance layer for the Databricks Genie API. Deploy as a Datab
 - **Semantic caching** — Similar questions resolve instantly by re-executing the cached SQL against the warehouse (fresh data, sub-second latency)
 - **Traffic management** — Built-in queue with automatic retry and exponential backoff for burst workloads
 - **Multi-gateway** — Each gateway maps to one Genie Space + SQL Warehouse with independent caches, settings, and access controls
+- **Routing** — Group several gateways under a single Router. The selector LLM picks (and optionally decomposes a question across) the right members, fans out in parallel, and returns per-source results — all behind one endpoint.
 
 Genie translates natural language to SQL. The Gateway caches that translation so repeated and similar questions skip the NL-to-SQL step entirely and go straight to execution — faster responses, lower compute cost, and higher throughput for production workloads.
 
@@ -14,7 +15,7 @@ Genie translates natural language to SQL. The Gateway caches that translation so
 Caller (OAuth)
     |
     v
-App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/)
+App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/ or /api/routers/)
     |
     +-- Gateway Config (DB)         <-- name, space_id, warehouse_id, settings
     +-- Embedding Service           <-- caller's OAuth (semantic similarity)
@@ -22,6 +23,23 @@ App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/)
     +-- Genie API                   <-- caller's OAuth (on cache miss only)
     +-- SQL Warehouse               <-- caller's OAuth (re-execute cached SQL)
 ```
+
+When a Router is in front of N gateways:
+
+```
+Caller (OAuth)
+    |
+    v
+Router (/api/routers/{id}/query)
+    |
+    +-- Selector LLM                <-- picks members + decomposes into sub-questions
+    +-- Routing Cache (PGVector)    <-- (question → decision), per router
+    |
+    v  (fan-out in parallel; bearer is forwarded unchanged)
+Gateway A   Gateway B   Gateway C   ...
+```
+
+Two caches stack: the **routing cache** skips the selector LLM on repeat questions, and each gateway's **SQL cache** still skips Genie's NL-to-SQL.
 
 ## Quick Start
 
@@ -52,6 +70,7 @@ The script walks you through each step interactively:
 6. Sets OAuth scopes (`sql`, `serving.serving-endpoints`, `dashboards.genie`)
 7. Grants the app's service principal `CAN_MANAGE` on the Lakebase project
 8. Creates the SP's PostgreSQL role via `databricks_create_role()`
+9. Creates (or reuses) an MLflow experiment at `/Users/<deployer>/<app-name>-traces` and grants the SP `CAN_MANAGE` so router tracing can write spans (non-fatal — tracing falls back to no-op if the experiment can't be reached)
 
 For subsequent deploys (code updates, config changes), re-run with `--update` to skip prompts and reuse your saved configuration (stored in `.env.deploy`):
 
@@ -168,8 +187,87 @@ Each gateway has a detail page with five tabs.
 | `max_queries_per_minute` | Traffic management threshold | 5 |
 | `question_normalization_enabled` | Normalize questions before embedding | true |
 | `cache_validation_enabled` | Validate cache hits with LLM | true |
+| `cache_write_validation_enabled` | Heuristic checks before persisting Genie's SQL: skip empty results, refusal text, and column mismatches | true |
 | `embedding_provider` | `databricks` or custom endpoint | `databricks` |
 | `shared_cache` | Share cache across all users | true |
+
+---
+
+## Routers
+
+A **router** groups several gateways under one endpoint. The selector LLM reads each member's `when_to_use` hint and picks the right gateway(s); for compound questions it can decompose into sub-questions arranged as a DAG, run independent picks in parallel, and substitute upstream results into downstream sub-questions.
+
+The router never introspects the caller's bearer — it forwards the token unchanged to each gateway, which forwards it to Genie and the warehouse. Row/column permissions still follow the real user.
+
+### Creating a router
+
+From the **Routers** entry in the sidebar, click **+** to create one:
+
+> **TODO:** add screenshot at `docs/screenshots/11-router-list.png`.
+
+| Field | Description |
+|-------|-------------|
+| **Name** | Display name |
+| **Description** | Optional |
+| **MLflow experiment path** | Optional. Leave empty to skip tracing; non-empty paths are auto-created (or reused) on save. |
+
+Then open the new router and use the **Members** tab to attach gateways one by one.
+
+### Router tabs
+
+> **TODO:** add screenshots at `docs/screenshots/12-router-overview.png`, `13-router-members.png`, `14-router-preview.png`.
+
+| Tab | What it does |
+|-----|--------------|
+| **Overview** | Description, owner, decompose / routing-cache toggles, selector model, MLflow experiment path. |
+| **Members** | Add/edit/remove gateways. Per-member fields: `title`, `when_to_use` (instructional hint the selector reads — include "use for…" *and* "NOT for…" clauses), `tables` (one per line), `sample_questions` (one per line), `disabled`. |
+| **Preview** | Run the selector without dispatching. Quick way to iterate on `when_to_use` hints without burning warehouse or Genie quota. |
+| **Settings** | Identity, selector model + system-prompt overrides, decompose toggle, routing-cache toggle, similarity threshold, cache TTL, MLflow experiment path, and a flush-routing-cache button. |
+
+### Router configuration reference
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `name` | Unique display name | Required |
+| `description` | Free text | empty |
+| `status` | `active` or `disabled` | `active` |
+| `selector_model` | Serving endpoint for the selector LLM | inherits gateway default (`databricks-llama-4-maverick`) |
+| `selector_system_prompt` | Override the built-in selector prompt | built-in |
+| `decompose_enabled` | Allow the selector to split into multiple picks (DAG) | true |
+| `routing_cache_enabled` | Cache `(question → decision)` in pgvector to skip the selector on repeats | true |
+| `similarity_threshold` | Routing-cache match threshold (0–1) | 0.92 |
+| `cache_ttl_hours` | Routing-cache freshness in hours | 24 |
+| `mlflow_experiment_path` | Per-router MLflow experiment. Empty = tracing disabled for this router. | empty |
+
+### Calling a router
+
+```python
+import requests
+
+r = requests.post(
+    f"{APP_HOST}/api/routers/{ROUTER_ID}/query",
+    headers={"Authorization": f"Bearer {TOKEN}"},
+    json={"question": "Top donors and the projects they fund?"},
+)
+data = r.json()
+
+for src in data["sources"]:
+    print(src["pick_id"], src["status"], src["gateway_id"], src["sub_question"])
+    # Full Genie-shaped result is at src["response"]; src["error"] is set on failure.
+```
+
+Top-level response fields:
+
+- `routing` — `{ picks, decomposed, rationale, ... }`, the selector's plan.
+- `sources[]` — one per pick (or one per DAG stage when decomposed). Each has `pick_id`, `gateway_id`, `sub_question`, `status` (`COMPLETED` / `FAILED` / `SKIPPED`), `response` (full Genie message with attachments), `error`, `elapsed_ms`.
+- `diagnostics` — selector + cache + DAG counters.
+- `trace_id` — present when the router has an MLflow experiment configured.
+
+For a no-side-effects dry run, swap `query` → `preview` to get the routing decision without dispatching to any gateway.
+
+### Routing cache
+
+`(question_embedding → decision)` is stored in the `routing_cache` pgvector table, keyed per router. On a hit, the selector LLM is skipped entirely. Toggle off per-router via `routing_cache_enabled`, or flush from the Settings tab.
 
 ---
 
@@ -190,6 +288,7 @@ Global settings are persisted to Lakebase (the `global_settings` table in the ap
 | **Question Normalization** | LLM rewrites questions before embedding to improve cache hit rate |
 | **Intent Split** | LLM isolates the latest intent in multi-turn conversations |
 | **Cache Validation** | LLM validates cached results are relevant before returning them |
+| **Cache Write Validation** | Heuristic gate at cache MISS time: skips persisting `(question → SQL)` when the result is empty, the SQL contains Genie refusal text, or the returned columns don't match what the question asked for. No LLM call, no extra latency. |
 | **Normalization / Intent Split / Validation Model** | Serving endpoint override for each LLM stage. Leave blank to use `databricks-llama-4-maverick` |
 
 ---
@@ -245,7 +344,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "<app-sp-cli
 
 ### 3. Configure in Settings
 
-Set the **Lakebase Instance Name** in the Settings page. The app creates the required tables (cache, query_logs, gateways) automatically on first use.
+Set the **Lakebase Instance Name** in the Settings page. The app creates the required tables (`cache`, `query_logs`, `gateways`, `global_settings`, `user_roles`, `group_roles`, `routers`, `router_members`, `routing_cache`) automatically on first use.
 
 ### Local Development
 
@@ -264,6 +363,27 @@ For local development (outside Databricks Apps), configure the **Lakebase Servic
 | **Lakebase cache** | **App's built-in SP** | Auto-detected from `DATABRICKS_CLIENT_ID`/`SECRET` |
 
 **Callers don't need Lakebase access.** The app's SP handles all cache operations transparently.
+
+---
+
+## MLflow Tracing
+
+Router requests can emit OTEL-compatible MLflow traces with one root span per request and child spans for each phase. Direct gateway calls (no router in front) emit nothing — tracing is gated on a router-fronted request and on each router having an experiment configured.
+
+**Default behavior:** `install.sh` creates `/Users/<deployer>/<app-name>-traces`, grants the app SP `CAN_MANAGE`, and patches the path into `app.yaml` as `MLFLOW_EXPERIMENT_NAME`. Per-router, leave the **MLflow experiment path** field empty to disable tracing for that router; set a non-empty path to enable (the experiment is auto-created on save).
+
+**Disable globally** by setting `TRACING_ENABLED=false` in `app.yaml` — the dependency stays installed but the wrapper short-circuits to a no-op.
+
+**Span shape** (see `backend/app/services/tracing.py`):
+
+| Span | Type | What it captures |
+|------|------|------------------|
+| `router.preview` / `router.query` | AGENT (root) | Question, hints, picks count, decomposition flag, total elapsed, DAG stats |
+| `router.cache.lookup` | RETRIEVER | Routing-cache hit/miss + cached question + similarity |
+| `router.select` | AGENT | Selector LLM call: model, prompt size, latency, picks emitted |
+| `router.stage` | CHAIN | One per topological DAG stage; child of root |
+| `router.bind` | RETRIEVER | Per dependent pick: upstream pick id, column resolved, n bound values, failure reason if any |
+| `gateway.query` | CHAIN | Per pick: gateway id, sub-question, SQL, row count, cache_hit flag, sample rows |
 
 ---
 
@@ -354,6 +474,24 @@ Simplified REST API for external applications:
 | PUT | `/api/settings` | Update global settings |
 | POST | `/api/settings/test-connection` | Test Lakebase connection |
 
+### Router API
+
+Roles: `use` for list/get/preview/query, `manage` for member edits and routing-cache flush, `owner` for create/delete.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/routers` | List all routers (members not hydrated) |
+| POST | `/api/routers` | Create a router |
+| GET | `/api/routers/{id}` | Get router with hydrated members |
+| PUT | `/api/routers/{id}` | Update router fields |
+| DELETE | `/api/routers/{id}` | Delete a router (cascades to members + routing cache) |
+| POST | `/api/routers/{id}/members` | Add a gateway as a member |
+| PUT | `/api/routers/{id}/members/{gateway_id}` | Update member catalog metadata |
+| DELETE | `/api/routers/{id}/members/{gateway_id}` | Remove a member |
+| DELETE | `/api/routers/{id}/cache` | Flush the routing cache for this router |
+| POST | `/api/routers/{id}/preview` | Resolve the routing decision without dispatching |
+| POST | `/api/routers/{id}/query` | Resolve and execute the full DAG; returns one source per pick |
+
 ---
 
 ## Local Development
@@ -370,6 +508,8 @@ cd frontend
 npm install
 npm run dev                        # http://localhost:5173
 ```
+
+> **Tracing locally:** Set `TRACING_ENABLED=true` and create at least one router with a non-empty MLflow experiment path to emit spans. Both default off locally.
 
 ## Demo Notebook
 
