@@ -1,11 +1,17 @@
-# Databricks Apps Configuration
-# Reference: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/
+# Databricks Apps runtime config.
+#
+# This file is the source of truth for `command` and `env`. The bundle's
+# resources.apps.gateway.config block in databricks.yml is silently dropped
+# during `bundle deploy` (the direct engine warns "unknown field: config"),
+# so we cannot rely on the bundle to inject env vars.
+#
+# OAuth scopes + the attached Lakebase resource live in the bundle (and are
+# re-applied by scripts/post_deploy.py if missing).
 
-name: genie-cache-queue
-display_name: "Genie API with Cache & Queue"
-description: "Intelligent query caching and rate limiting for Databricks Genie API"
+name: genie-gateway-v2
+display_name: "Genie Gateway v2"
+description: "Genie API gateway with cache, queue, and router (DAB-deployed)"
 
-# Run command (requirements.txt auto-installed by runtime, frontend pre-built in frontend/dist/)
 command:
   - "python"
   - "-m"
@@ -16,34 +22,14 @@ command:
   - "--port"
   - "8000"
 
-# OAuth scopes and resources are NOT read from app.yaml by Databricks Apps.
-# Both are applied at deploy time via PATCH /api/2.0/apps/{name} in install.sh.
-# Keeping them out of app.yaml avoids confusion and prevents direct
-# `databricks apps deploy` calls from clearing the configuration.
-
-# Compute configuration
-compute:
-  size: small  # small (2 cores, 8GB), medium (4 cores, 16GB), large (8 cores, 32GB)
-
-# Environment variables
-# DATABRICKS_HOST and DATABRICKS_TOKEN are automatically provided by Databricks Apps
 env:
   - name: STORAGE_BACKEND
     value: pgvector
   - name: LAKEBASE_INSTANCE
-    value: <your-lakebase-instance>
+    value: genie-gateway-v2
   - name: LAKEBASE_CATALOG
     value: default
   - name: LAKEBASE_SCHEMA
-    value: public
-  # MLflow tracing — toggle with TRACING_ENABLED=true to emit OTEL-compatible
-  # spans for every router query. Experiment path is patched by install.sh to
-  # /Users/<deployer>/<app-name>-traces so the SP writes to a workspace-resident
-  # experiment the deployer owns. Set TRACING_ENABLED=false to disable without
-  # removing the dep.
+    value: genie_cache_v2
   - name: TRACING_ENABLED
     value: "true"
-  - name: MLFLOW_EXPERIMENT_NAME
-    value: "<patched-at-deploy>"
-
-# Static files served by FastAPI (not needed here)

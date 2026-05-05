@@ -1,0 +1,75 @@
+# Databricks Asset Bundle for Genie Gateway v2
+#
+# Replaces scripts/install.sh with declarative resource provisioning.
+# What this bundle owns:
+#   - The Lakebase database instance (genie-gateway-v2)
+#   - The Databricks App registration (genie-gateway-v2) including run command,
+#     env vars, OAuth scopes, and the attached Lakebase resource grant.
+#
+# What it does NOT own (lives in scripts/post_deploy.py):
+#   - Granting the app's SP CAN_MANAGE on the database instance (SP UUID is
+#     unknown until first bundle deploy creates the app).
+#   - Postgres-side CREATE ROLE / GRANT / schema ownership for the SP. That's
+#     SQL inside the Postgres instance, not a Databricks API call.
+#   - PATCHing the app's effective config if the schema fallback fired.
+#
+# What was REMOVED versus install.sh:
+#   - Pre-creating an MLflow experiment. The app lazy-creates per-router via
+#     tracing.ensure_experiment() when a router opts in (router_routes.py:77).
+
+bundle:
+  name: genie-gateway-v2
+
+variables:
+  app_name:
+    description: "Name of the Databricks App. Used as resource name + URL slug."
+    default: genie-gateway-v2
+  instance_name:
+    description: "Name of the Lakebase database instance."
+    default: genie-gateway-v2
+  schema_name:
+    description: "Postgres schema for cache tables. May be auto-suffixed by post_deploy.py if a same-named schema is already SP-owned by a different SP."
+    default: genie_cache_v2
+
+workspace:
+  # Override the bundle default (.bundle/<name>/<target>/files) with a stable,
+  # human-readable path. install.sh used /Workspace/Users/<deployer>/genie-gateway;
+  # we keep the same convention under the v2 name.
+  file_path: /Workspace/Users/${workspace.current_user.userName}/${var.app_name}
+
+resources:
+  database_instances:
+    gateway_db:
+      name: ${var.instance_name}
+      capacity: CU_1
+
+  apps:
+    gateway:
+      name: ${var.app_name}
+      description: "Genie Gateway v2: cache + queue + router fronting Genie API (DAB-deployed)"
+      source_code_path: ${workspace.file_path}
+
+      user_api_scopes:
+        - sql
+        - serving.serving-endpoints
+        - dashboards.genie
+
+      # NOTE: the app's `resources:` (Lakebase attachment) is NOT set here.
+      # If we declare it on app create, the Apps service tries to grant the
+      # SP `CAN_CONNECT_AND_CREATE` on the Postgres role at start time —
+      # but the SP's Postgres role doesn't exist yet (it's created by
+      # post_deploy.py after the app's SP UUID is known). The app would
+      # land in ERROR state with: "Role <uuid> not found in instance".
+      #
+      # scripts/post_deploy.py PATCHes the resource attachment in AFTER
+      # creating the SP's Postgres role.
+      #
+      # `config` (command + env) is also not set here — the direct deploy
+      # engine logs "unknown field: config" and drops it silently. app.yaml
+      # at the repo root is the working source of truth for command + env.
+
+targets:
+  fevm:
+    default: true
+    workspace:
+      profile: fevm
