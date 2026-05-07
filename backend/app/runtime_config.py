@@ -110,7 +110,17 @@ class RuntimeSettings:
     def shared_cache(self) -> bool:
         if self.runtime and self.runtime.shared_cache is not None:
             return self.runtime.shared_cache
-        return self.base.shared_cache
+        # `Settings` (config.py) has no `shared_cache` field, so we cannot
+        # rely on attribute access here — read from the global config_store
+        # then fall through to a safe default. Prior to this getattr guard,
+        # AttributeError was caught silently in the cache-lookup path
+        # (genie_clone_routes.py ~line 590), causing every query to skip
+        # cache lookup AND every subsequent write to silently fail.
+        from app.api.config_store import get_effective_setting
+        val = get_effective_setting("shared_cache")
+        if val is not None:
+            return bool(val)
+        return getattr(self.base, "shared_cache", True)
 
     @property
     def question_normalization_enabled(self) -> bool:

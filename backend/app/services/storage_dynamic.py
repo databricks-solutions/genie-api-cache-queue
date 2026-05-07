@@ -3,11 +3,12 @@ Dynamic storage service that can switch backends at runtime.
 Useful for Databricks Apps where Lakebase config comes from frontend.
 All public methods are async — PGVector operations are awaited directly.
 
-On transient Lakebase errors, the operation is retried once after a health
-check that reinitializes a closed pool or refreshes an expiring JWT. If the
-retry also fails, the backend is explicitly reinitialized (new pool) before
-a final attempt. Config-level ValueError is re-raised immediately — retries
-cannot fix misconfiguration.
+On Lakebase Autoscaling, JWT rotation happens per-connection-establishment via
+asyncpg's `password=callable` (see storage_pgvector.initialize). Transient auth
+failures self-heal because the next pooled connection authenticates with a
+fresh token, so we retry once on any transient error and rebuild the pool only
+if the retry also fails. Config-level ValueError is re-raised immediately —
+retries cannot fix misconfiguration.
 """
 
 import asyncio
@@ -91,44 +92,19 @@ class DynamicStorageService:
             logger.info("Lakebase connection initialized")
             return backend
 
-    async def _proactive_refresh(self, backend):
-        """Refresh a backend's JWT if it is expiring soon. Thread-safe via creation lock."""
-        if not hasattr(backend, 'is_token_expiring_soon') or not backend.is_token_expiring_soon():
-            return
-        async with self._creation_lock:
-            # Re-check after acquiring lock
-            if not backend.is_token_expiring_soon():
-                return
-            logger.info("Proactively refreshing Lakebase JWT")
-            await backend.reinitialize()
-
     async def _ensure_backend_healthy(self, backend):
-        """Ensure backend pool is open and JWT is fresh."""
-        if hasattr(backend, 'pool') and backend.pool is not None and backend.pool._closed:
+        """Rebuild the pool if it has been closed. JWT freshness is now handled
+        per-connection inside `initialize()` via `password=callable`, so there
+        is no proactive refresh path."""
+        if hasattr(backend, 'pool') and backend.pool is not None and getattr(backend.pool, '_closed', False):
             async with self._creation_lock:
-                if backend.pool is not None and not backend.pool._closed:
+                if backend.pool is not None and not getattr(backend.pool, '_closed', False):
                     return
-                logger.warning("Lakebase pool is closed — reinitializing")
-                await backend.reinitialize()
-            return
-        await self._proactive_refresh(backend)
-
-    async def refresh_all_backends(self):
-        """Proactively refresh all backends whose JWT is expiring soon. Called by background loop."""
-        for cache_key, backend in list(self._pgvector_backends.items()):
-            try:
-                await self._proactive_refresh(backend)
-            except Exception as e:
-                logger.error("Background refresh failed for %s: %s", cache_key, e)
-        # Also check default backend (may not be in _pgvector_backends)
-        try:
-            await self._proactive_refresh(self.default_backend)
-        except Exception as e:
-            logger.error("Background refresh failed for default backend: %s", e)
+                logger.warning("Lakebase pool is closed — re-running initialize()")
+                await backend.initialize()
 
     async def _resolve_backend(self, runtime_settings):
-        """Resolve which backend to use, initializing lazily if needed.
-        Proactively refreshes JWT before it expires."""
+        """Resolve which backend to use, initializing lazily if needed."""
         if not runtime_settings:
             await self._ensure_backend_healthy(self.default_backend)
             return self.default_backend
@@ -148,45 +124,47 @@ class DynamicStorageService:
                         "DATABRICKS_CLIENT_ID/SECRET are set."
                     )
                 backend = await self._get_or_create_pgvector_backend(runtime_settings)
-                await self._proactive_refresh(backend)
+                await self._ensure_backend_healthy(backend)
                 return backend
             if rt.storage_backend not in ('lakebase', 'pgvector'):
                 raise ValueError(f"Unsupported storage backend: '{rt.storage_backend}'. Only 'lakebase' is supported.")
         return self.default_backend
 
     async def _with_reconnect(self, operation, runtime_settings):
-        """Run operation with Lakebase recovery on transient errors.
+        """Run an operation, retrying once on transient errors.
 
         Config-level ValueError (missing SP token, wrong backend, etc.) is re-raised
         immediately — retry cannot fix a misconfiguration.
 
-        For other errors: _resolve_backend runs a health check that reinitializes a
-        closed pool or refreshes an expiring JWT, so we retry once before forcing
-        an explicit reinit. This avoids double-reinit when the health check already
-        rebuilt the pool.
+        Per-checkout JWT rotation means stale-token failures self-heal: a single
+        retry forces asyncpg to acquire a different (or freshly-authenticated)
+        connection. If the retry still fails, we rebuild the pool once.
         """
         try:
             return await operation()
         except ValueError:
             raise
         except Exception as first_err:
-            logger.warning("Lakebase error: %s (%s) — retrying after health check",
+            logger.warning("Lakebase error: %s (%s) — retrying once",
                           type(first_err).__name__, first_err)
-            backend = await self._resolve_backend(runtime_settings)
-            if not hasattr(backend, 'reinitialize'):
-                raise
             try:
                 return await operation()
             except ValueError:
                 raise
             except Exception as second_err:
-                logger.warning("Lakebase still failing: %s (%s) — reinitializing",
+                logger.warning("Lakebase still failing: %s (%s) — rebuilding pool",
                               type(second_err).__name__, second_err)
+                backend = await self._resolve_backend(runtime_settings)
                 try:
                     async with self._creation_lock:
-                        await backend.reinitialize()
+                        if hasattr(backend, 'pool') and backend.pool is not None:
+                            try:
+                                await backend.pool.close()
+                            except Exception:
+                                pass
+                        await backend.initialize()
                 except Exception as reinit_err:
-                    logger.error("Reinitialize failed: %s", reinit_err)
+                    logger.error("Pool rebuild failed: %s", reinit_err)
                     raise first_err
                 return await operation()
 

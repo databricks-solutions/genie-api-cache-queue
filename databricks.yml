@@ -1,75 +1,151 @@
-# Databricks Asset Bundle for Genie Gateway v2
+# Databricks Asset Bundle for Genie Gateway.
 #
-# Replaces scripts/install.sh with declarative resource provisioning.
-# What this bundle owns:
-#   - The Lakebase database instance (genie-gateway-v2)
-#   - The Databricks App registration (genie-gateway-v2) including run command,
-#     env vars, OAuth scopes, and the attached Lakebase resource grant.
+# Deploys a Lakebase Autoscaling project + per-environment branch + endpoint,
+# and a Databricks App that attaches to the branch's auto-created database.
 #
-# What it does NOT own (lives in scripts/post_deploy.py):
-#   - Granting the app's SP CAN_MANAGE on the database instance (SP UUID is
-#     unknown until first bundle deploy creates the app).
-#   - Postgres-side CREATE ROLE / GRANT / schema ownership for the SP. That's
-#     SQL inside the Postgres instance, not a Databricks API call.
-#   - PATCHing the app's effective config if the schema fallback fired.
+# What this bundle owns end-to-end (no post_deploy hook required):
+#   - postgres_projects.gateway              (one shared project across targets)
+#   - postgres_branches.<env>                (per-target branch)
+#   - postgres_endpoints.<env>_endpoint      (per-target read-write endpoint)
+#   - apps.gateway                           (attached to the branch's `databricks_postgres` DB)
 #
-# What was REMOVED versus install.sh:
-#   - Pre-creating an MLflow experiment. The app lazy-creates per-router via
-#     tracing.ensure_experiment() when a router opts in (router_routes.py:77).
+# On Autoscaling, declaring `apps.resources[].postgres` at create time triggers
+# the platform to (a) create the SP's Postgres role with CONNECT+CREATE, and
+# (b) auto-inject PGHOST / PGUSER / PGDATABASE / PGPORT / PGSSLMODE plus the
+# `valueFrom: postgres` env binding. That's the entire chicken-and-egg fix —
+# no PATCH-after-deploy hop, no SP-role bootstrap script.
+#
+# `app.yaml` at the source root is the source of truth for `command` + `env`.
+# The bundle's `apps.gateway.config:` block is silently dropped by the direct
+# deploy engine.
+#
+# Targets:
+#   - dev:  per-developer branch via ${var.dev_user}; mode: development.
+#   - prod: shared `production` branch; mode: production.
 
 bundle:
-  name: genie-gateway-v2
+  name: genie-gateway
 
 variables:
   app_name:
     description: "Name of the Databricks App. Used as resource name + URL slug."
-    default: genie-gateway-v2
-  instance_name:
-    description: "Name of the Lakebase database instance."
-    default: genie-gateway-v2
+    default: genie-gateway
+  project_id:
+    description: "Lakebase Autoscaling project ID. Lowercase + hyphens, 1-63 chars."
+    default: genie-gateway
   schema_name:
-    description: "Postgres schema for cache tables. May be auto-suffixed by post_deploy.py if a same-named schema is already SP-owned by a different SP."
-    default: genie_cache_v2
+    description: "Postgres schema for cache tables. Owned by the app SP."
+    default: genie_cache
+  dev_user:
+    description: |
+      Used to namespace per-developer dev branches in the `dev` target.
+      Lakebase branch IDs require lowercase letters, numbers, and hyphens
+      (1-63 chars). ${workspace.current_user.short_name} usually fits but
+      may contain underscores or dots — override with `--var "dev_user=jane-doe"`
+      or set in your personal `databricks.local.yml` overlay if validation fails.
+    default: ${workspace.current_user.short_name}
+  branch_id:
+    description: "Lakebase branch ID. Overridden per-target (dev → dev-<user>, prod → production)."
+    default: dev-${var.dev_user}
+  database_path:
+    description: |
+      Full resource path of the auto-created Postgres database under the active
+      branch (e.g. projects/genie-gateway/branches/<id>/databases/db-xxxxxxxx).
+      Lakebase Autoscaling auto-creates one DB per branch with a generated ID,
+      and the app resource attachment needs the full path. The Makefile
+      resolves this via scripts/resolve_database.sh between the branch-create
+      and app-create stages of `make deploy`. For first-time deploys, leave
+      empty — the first `bundle deploy` will fail on the app but create the
+      branch; the Makefile then resolves the path and re-runs.
+    default: ""
 
-workspace:
-  # Override the bundle default (.bundle/<name>/<target>/files) with a stable,
-  # human-readable path. install.sh used /Workspace/Users/<deployer>/genie-gateway;
-  # we keep the same convention under the v2 name.
-  file_path: /Workspace/Users/${workspace.current_user.userName}/${var.app_name}
-
-resources:
-  database_instances:
-    gateway_db:
-      name: ${var.instance_name}
-      capacity: CU_1
-
-  apps:
-    gateway:
-      name: ${var.app_name}
-      description: "Genie Gateway v2: cache + queue + router fronting Genie API (DAB-deployed)"
-      source_code_path: ${workspace.file_path}
-
-      user_api_scopes:
-        - sql
-        - serving.serving-endpoints
-        - dashboards.genie
-
-      # NOTE: the app's `resources:` (Lakebase attachment) is NOT set here.
-      # If we declare it on app create, the Apps service tries to grant the
-      # SP `CAN_CONNECT_AND_CREATE` on the Postgres role at start time —
-      # but the SP's Postgres role doesn't exist yet (it's created by
-      # post_deploy.py after the app's SP UUID is known). The app would
-      # land in ERROR state with: "Role <uuid> not found in instance".
-      #
-      # scripts/post_deploy.py PATCHes the resource attachment in AFTER
-      # creating the SP's Postgres role.
-      #
-      # `config` (command + env) is also not set here — the direct deploy
-      # engine logs "unknown field: config" and drops it silently. app.yaml
-      # at the repo root is the working source of truth for command + env.
+# Note: postgres_projects.gateway is owned by the `dev` target only. DAB
+# tracks resource state per-target, so declaring the same project in both
+# targets causes "project already exists" on whichever target deploys second.
+# Branches under the shared project are still per-target — that's the whole
+# point of the dev/prod split. To bootstrap or rotate the project itself,
+# use `make deploy TARGET=dev` (which owns lifecycle).
 
 targets:
-  fevm:
+  dev:
+    mode: development
     default: true
+    variables:
+      branch_id:
+        default: "dev-${var.dev_user}"
+      # Override app_name so dev + prod don't collide (DAB's `mode: development`
+      # name-mangling is skipped for resources with an explicit `name:` field).
+      app_name:
+        default: "dev-${var.dev_user}-genie-gateway"
+    resources:
+      postgres_projects:
+        gateway:
+          project_id: ${var.project_id}
+          display_name: "Genie Gateway"
+          pg_version: 17
+      postgres_branches:
+        gateway_branch:
+          parent: ${resources.postgres_projects.gateway.id}
+          branch_id: ${var.branch_id}
+          # no_expiry keeps the branch alive across redeploys; without this,
+          # idle branches can be auto-pruned.
+          no_expiry: true
+      # NOTE: no postgres_endpoints declaration. The platform auto-creates a
+      # `primary` ENDPOINT_TYPE_READ_WRITE endpoint when a branch is created,
+      # using the project's default_endpoint_settings. To customize endpoint
+      # autoscaling (e.g. min CU < 1), PATCH the auto-created endpoint after
+      # the branch exists.
+      apps:
+        gateway:
+          name: ${var.app_name}
+          description: "Genie Gateway: cache + queue + router fronting Genie API"
+          source_code_path: ${workspace.file_path}
+          user_api_scopes:
+            - sql
+            - serving.serving-endpoints
+            - dashboards.genie
+          resources:
+            - name: postgres
+              description: "Lakebase Postgres for cache + governance tables"
+              postgres:
+                # Substituting the resource id forces DAB to deploy the branch
+                # before the app, which is required because app-create resolves
+                # the postgres resource at start time.
+                branch: ${resources.postgres_branches.gateway_branch.id}
+                database: ${var.database_path}
+                permission: CAN_CONNECT_AND_CREATE
+
+  prod:
+    mode: production
+    variables:
+      branch_id:
+        default: production
+    # NOTE: prod references the shared project's auto-created `production`
+    # branch by path. The project is owned by the dev target; the production
+    # branch is auto-created when the project is provisioned (it's the
+    # project's `default_branch`). DAB's per-target state means declaring
+    # either resource here would error with "already exists".
+    resources:
+      apps:
+        gateway:
+          name: ${var.app_name}
+          description: "Genie Gateway: cache + queue + router fronting Genie API"
+          source_code_path: ${workspace.file_path}
+          user_api_scopes:
+            - sql
+            - serving.serving-endpoints
+            - dashboards.genie
+          resources:
+            - name: postgres
+              description: "Lakebase Postgres for cache + governance tables"
+              postgres:
+                branch: projects/${var.project_id}/branches/production
+                database: ${var.database_path}
+                permission: CAN_CONNECT_AND_CREATE
+    permissions:
+      - user_name: ${workspace.current_user.userName}
+        level: CAN_MANAGE
     workspace:
-      profile: fevm
+      # mode: production needs an explicit root_path to satisfy "only one copy is
+      # deployed" — defaulting to the deployer's home keeps deploys per-user.
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

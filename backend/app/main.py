@@ -28,9 +28,12 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize storage backend (creates connection pool if using Lakebase/PGVector)
+    # Initialize storage backend (creates connection pool if using Lakebase/PGVector).
+    # Lakebase JWT rotation is handled per-connection inside the pool via
+    # `password=callable` (see storage_pgvector.initialize) — no wall-clock
+    # refresh task is needed.
     from app.services.database import initialize_storage
-    storage = await initialize_storage()
+    await initialize_storage()
 
     # Hydrate global settings from Lakebase so they survive redeploys
     try:
@@ -46,35 +49,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Tracing init raised unexpectedly: %s — continuing without tracing", e)
 
-    # Start periodic JWT refresh for all Lakebase backends
-    refresh_task = None
-    if settings.storage_backend in ("lakebase", "pgvector") and settings.lakebase_instance:
-        async def _token_refresh_loop():
-            while True:
-                await asyncio.sleep(30 * 60)  # Every 30 minutes
-                try:
-                    logger.info("Background JWT refresh: checking all backends")
-                    await storage.refresh_all_backends()
-                except Exception as e:
-                    logger.error("Background JWT refresh failed: %s", e)
-
-        refresh_task = asyncio.create_task(_token_refresh_loop())
-        logger.info("Started background JWT refresh task (every 30 min)")
-
     yield
 
-    if refresh_task:
-        refresh_task.cancel()
-    try:
-        tasks = ([refresh_task] if refresh_task else [])
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        from app.services.rbac import close_http_client
-        from app.api.gateway_routes import close_discovery_client
-        await close_http_client()
-        await close_discovery_client()
+    from app.services.rbac import close_http_client
+    from app.api.gateway_routes import close_discovery_client
+    await close_http_client()
+    await close_discovery_client()
 
 
 from app.version import __version__ as APP_VERSION

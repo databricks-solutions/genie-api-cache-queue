@@ -5,12 +5,14 @@
 # during `bundle deploy` (the direct engine warns "unknown field: config"),
 # so we cannot rely on the bundle to inject env vars.
 #
-# OAuth scopes + the attached Lakebase resource live in the bundle (and are
-# re-applied by scripts/post_deploy.py if missing).
+# OAuth scopes + the attached Lakebase resource live in the bundle. On Lakebase
+# Autoscaling, declaring `apps.resources[].postgres` in the bundle triggers the
+# platform to auto-inject PGHOST / PGUSER / PGDATABASE / PGPORT / PGSSLMODE
+# and to bind the LAKEBASE_ENDPOINT env var below to the endpoint resource path.
 
-name: genie-gateway-v2
-display_name: "Genie Gateway v2"
-description: "Genie API gateway with cache, queue, and router (DAB-deployed)"
+name: genie-gateway
+display_name: "Genie Gateway"
+description: "Genie API gateway with cache, queue, and router (Autoscaling)"
 
 command:
   - "python"
@@ -25,11 +27,11 @@ command:
 env:
   - name: STORAGE_BACKEND
     value: pgvector
-  - name: LAKEBASE_INSTANCE
-    value: genie-gateway-v2
-  - name: LAKEBASE_CATALOG
-    value: default
+  # Endpoint resource path (`projects/<id>/branches/<id>/endpoints/<id>`) for
+  # WorkspaceClient.postgres.generate_database_credential().
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres
   - name: LAKEBASE_SCHEMA
-    value: genie_cache_v2
+    value: genie_cache
   - name: TRACING_ENABLED
     value: "true"
