@@ -26,6 +26,14 @@
 bundle:
   name: genie-gateway
 
+# Per-developer overlay. Copy `databricks.local.yml.example` to
+# `databricks.local.yml` and set your own `dev_user` (sanitized to lowercase
+# + hyphens) when ${workspace.current_user.short_name} contains underscores
+# or dots — Lakebase branch IDs reject those characters. The glob no-ops when
+# no overlay exists.
+include:
+  - "*.local.yml"
+
 variables:
   app_name:
     description: "Name of the Databricks App. Used as resource name + URL slug."
@@ -41,8 +49,14 @@ variables:
       Used to namespace per-developer dev branches in the `dev` target.
       Lakebase branch IDs require lowercase letters, numbers, and hyphens
       (1-63 chars). ${workspace.current_user.short_name} usually fits but
-      may contain underscores or dots — override with `--var "dev_user=jane-doe"`
-      or set in your personal `databricks.local.yml` overlay if validation fails.
+      may contain underscores or dots — override one of three ways:
+        1. CLI flag:        `make deploy DEV_USER=jane-doe`
+        2. Env var:         `export BUNDLE_VAR_dev_user=jane-doe`
+        3. Local overlay:   copy `databricks.local.yml.example` to
+                            `databricks.local.yml` and edit
+      Without a sanitized override, `bundle deploy` may flag the branch_id
+      as different from the live branch and offer to recreate it (which
+      would delete your dev cache data). Decline.
     default: ${workspace.current_user.short_name}
   branch_id:
     description: "Lakebase branch ID. Overridden per-target (dev → dev-<user>, prod → production)."
