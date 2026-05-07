@@ -77,11 +77,6 @@ seed/
 eval/
 QUESTIONS.md
 
-# Per-developer DAB overlay (auto-included via include: ['*.local.yml']).
-# Used to override workspace-specific defaults like dev_user. The
-# `.example` template IS committed; the actual overlay is not.
-databricks.local.yml
-
 # Internal research / audit notes referencing specific commits + deploy
 # specifics. Keep local.
 docs/lakebase_appkit_audit.md

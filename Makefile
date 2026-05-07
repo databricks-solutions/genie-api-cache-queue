@@ -27,14 +27,12 @@ TARGET ?= dev
 PROFILE ?=
 PROFILE_ARG = $(if $(PROFILE),--profile $(PROFILE),)
 
-# Per-developer dev branch suffix (Lakebase branch IDs are lowercase + hyphens).
-# Defaults to a sanitized $USER but you can override on the command line:
-#   make deploy DEV_USER=jane-doe
-DEV_USER ?= $(shell echo "$$USER" | tr '_.' '-')
-
-# Bundle vars set on every command. ${branch_id} resolves automatically per
-# target (dev → dev-${DEV_USER}, prod → production).
-BUNDLE_VARS = --var "dev_user=$(DEV_USER)"
+# Bundle vars passed on every command. The dev target's branch_id defaults
+# to `dev-${workspace.current_user.id}` (the deployer's SCIM ID — always
+# valid for Lakebase's branch_id regex), so no per-developer override is
+# needed. To target a custom branch: `make deploy BUNDLE_VARS='--var
+# "branch_id=feature-foo"'`.
+BUNDLE_VARS ?=
 
 # Bypass the legacy Terraform-based deploy engine (which currently fails with
 # "openpgp: key expired" when downloading Terraform binaries — a HashiCorp
@@ -94,7 +92,7 @@ resolve-db:
 	./scripts/resolve_database.sh $$PROJECT_ID $$BRANCH_ID $(PROFILE)
 
 # Resolves the deployed app's name from the bundle summary so logs follow
-# both targets (dev → dev-${DEV_USER}-genie-gateway, prod → genie-gateway)
+# both targets (dev → dev-<scim-id>-genie-gateway, prod → genie-gateway)
 # without hardcoding either form.
 logs:
 	@APP_NAME=$$($(BUNDLE_SUMMARY_CMD) | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['resources']['apps']['gateway']['name'])") && \

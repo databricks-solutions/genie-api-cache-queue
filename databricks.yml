@@ -20,19 +20,11 @@
 # deploy engine.
 #
 # Targets:
-#   - dev:  per-developer branch via ${var.dev_user}; mode: development.
+#   - dev:  per-developer branch keyed on ${workspace.current_user.id}; mode: development.
 #   - prod: shared `production` branch; mode: production.
 
 bundle:
   name: genie-gateway
-
-# Per-developer overlay. Copy `databricks.local.yml.example` to
-# `databricks.local.yml` and set your own `dev_user` (sanitized to lowercase
-# + hyphens) when ${workspace.current_user.short_name} contains underscores
-# or dots — Lakebase branch IDs reject those characters. The glob no-ops when
-# no overlay exists.
-include:
-  - "*.local.yml"
 
 variables:
   app_name:
@@ -44,23 +36,15 @@ variables:
   schema_name:
     description: "Postgres schema for cache tables. Owned by the app SP."
     default: genie_cache
-  dev_user:
-    description: |
-      Used to namespace per-developer dev branches in the `dev` target.
-      Lakebase branch IDs require lowercase letters, numbers, and hyphens
-      (1-63 chars). ${workspace.current_user.short_name} usually fits but
-      may contain underscores or dots — override one of three ways:
-        1. CLI flag:        `make deploy DEV_USER=jane-doe`
-        2. Env var:         `export BUNDLE_VAR_dev_user=jane-doe`
-        3. Local overlay:   copy `databricks.local.yml.example` to
-                            `databricks.local.yml` and edit
-      Without a sanitized override, `bundle deploy` may flag the branch_id
-      as different from the live branch and offer to recreate it (which
-      would delete your dev cache data). Decline.
-    default: ${workspace.current_user.short_name}
   branch_id:
-    description: "Lakebase branch ID. Overridden per-target (dev → dev-<user>, prod → production)."
-    default: dev-${var.dev_user}
+    description: |
+      Lakebase branch ID. Overridden per-target:
+        * dev  → dev-${workspace.current_user.id} (one branch per developer,
+                 keyed on the SCIM user ID — always lowercase digits, valid
+                 for Lakebase's branch_id regex without sanitization).
+        * prod → production
+      Override via `--var "branch_id=foo"` if you need a custom branch.
+    default: "dev-${workspace.current_user.id}"
   database_path:
     description: |
       Full resource path of the auto-created Postgres database under the active
@@ -85,12 +69,12 @@ targets:
     mode: development
     default: true
     variables:
-      branch_id:
-        default: "dev-${var.dev_user}"
-      # Override app_name so dev + prod don't collide (DAB's `mode: development`
-      # name-mangling is skipped for resources with an explicit `name:` field).
+      # Override app_name so dev + prod don't collide. DAB's
+      # `mode: development` auto-mangling is skipped here because
+      # apps.gateway.name is explicitly set, so we encode the same
+      # uniqueness via user_id directly.
       app_name:
-        default: "dev-${var.dev_user}-genie-gateway"
+        default: "dev-${workspace.current_user.id}-genie-gateway"
     resources:
       postgres_projects:
         gateway:
