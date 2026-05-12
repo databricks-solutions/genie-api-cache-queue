@@ -73,6 +73,30 @@ async def initialize_storage():
     return _storage_backend
 
 
+async def close_storage():
+    """Tear down the default backend and any per-gateway secondary backends
+    created lazily by DynamicStorageService. Idempotent — safe on cold storage."""
+    global _storage_backend
+    if _storage_backend is None:
+        return
+    seen = set()
+    closers = []
+    default = getattr(_storage_backend, "default_backend", None)
+    if default is not None:
+        seen.add(id(default))
+        closers.append(default.close())
+    for backend in getattr(_storage_backend, "_pgvector_backends", {}).values():
+        if id(backend) in seen:
+            continue
+        seen.add(id(backend))
+        closers.append(backend.close())
+    for fut in closers:
+        try:
+            await fut
+        except Exception:  # noqa: BLE001
+            logger.exception("Storage backend close raised during shutdown")
+
+
 class DatabaseService:
     """Unified database service. All methods are async."""
 

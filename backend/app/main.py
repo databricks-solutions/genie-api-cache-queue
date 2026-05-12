@@ -57,8 +57,8 @@ async def lifespan(app: FastAPI):
     yield
 
     await stop_synthetic_sweep_task()
-    from app.services.storage_pgvector import _stop_token_refresh_task
-    await _stop_token_refresh_task()
+    from app.services.database import close_storage
+    await close_storage()
     from app.services.rbac import close_http_client
     from app.api.gateway_routes import close_discovery_client
     await close_http_client()
