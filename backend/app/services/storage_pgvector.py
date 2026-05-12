@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import time as _time
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timezone
 import numpy as np
@@ -14,6 +15,109 @@ import numpy as np
 from app.services.sql_identifier import quote_ident, quote_qualified
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Lakebase JWT cache + background refresh
+# ---------------------------------------------------------------------------
+#
+# asyncpg's `password=callable` is invoked synchronously every time a new
+# connection is established. Calling the Databricks SDK directly inside that
+# callback would block the event loop for the duration of the HTTPS round
+# trip (typically 100–500ms) on every new connection — under sustained load,
+# with the default `max_inactive_connection_lifetime=300s` cycling
+# connections every five minutes, that adds up.
+#
+# Instead we keep a process-wide cache of the most recently minted JWT and
+# refresh it on a background task well before its ~1h TTL. The sync callback
+# just reads the cache. If the SDK is failing transiently, the pool keeps
+# using the last good token until the refresher recovers.
+_token_cache: Dict[str, object] = {}
+_token_refresh_task: Optional[asyncio.Task] = None
+_TOKEN_REFRESH_INTERVAL_S = 30 * 60  # JWT lives ~1h; refresh well ahead
+_TOKEN_RETRY_BACKOFFS_S = (5, 10, 20, 40, 60)
+
+
+def _read_cached_token() -> str:
+    """Sync callback consumed by asyncpg on each new connection establishment.
+
+    Returns the process-wide cached Lakebase JWT. initialize() seeds the cache
+    with a fresh mint before creating the pool, so this should always have a
+    value in steady state. A missing token raises and lets asyncpg surface a
+    clear error instead of attempting auth with an empty password.
+    """
+    token = _token_cache.get("token")
+    if not token:
+        raise RuntimeError(
+            "Lakebase JWT cache is empty — refresh task has not seeded a token. "
+            "Did initialize() complete successfully?"
+        )
+    return token  # type: ignore[return-value]
+
+
+async def _mint_lakebase_jwt(ws_client, endpoint_path: str) -> str:
+    """Mint a fresh JWT off the event loop via the Databricks SDK."""
+    def _sync():
+        cred = ws_client.postgres.generate_database_credential(endpoint=endpoint_path)
+        return cred.token
+    return await asyncio.to_thread(_sync)
+
+
+async def _refresh_token_with_retry(ws_client, endpoint_path: str) -> bool:
+    """One refresh attempt followed by bounded retries on failure.
+
+    Returns True if the cache was updated, False otherwise. On failure the
+    previous cached token is left intact so existing pool consumers keep
+    working; the next refresh interval will try again.
+    """
+    try:
+        token = await _mint_lakebase_jwt(ws_client, endpoint_path)
+        _token_cache["token"] = token
+        _token_cache["minted_at"] = _time.monotonic()
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception(
+            "Lakebase JWT refresh failed; retrying with backoff. Pool will "
+            "continue using the previously cached token."
+        )
+    for backoff in _TOKEN_RETRY_BACKOFFS_S:
+        try:
+            await asyncio.sleep(backoff)
+            token = await _mint_lakebase_jwt(ws_client, endpoint_path)
+            _token_cache["token"] = token
+            _token_cache["minted_at"] = _time.monotonic()
+            logger.info("Lakebase JWT refresh recovered after %ds backoff", backoff)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Lakebase JWT refresh retry (backoff=%ds) failed", backoff)
+    return False
+
+
+async def _jwt_refresh_loop(ws_client, endpoint_path: str) -> None:
+    """Background task: refresh the cached JWT every _TOKEN_REFRESH_INTERVAL_S."""
+    while True:
+        try:
+            await asyncio.sleep(_TOKEN_REFRESH_INTERVAL_S)
+            await _refresh_token_with_retry(ws_client, endpoint_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — defensive: never let the loop die
+            logger.exception("Unexpected error in Lakebase JWT refresh loop iteration")
+
+
+async def _stop_token_refresh_task() -> None:
+    global _token_refresh_task
+    if _token_refresh_task is not None and not _token_refresh_task.done():
+        _token_refresh_task.cancel()
+        try:
+            await _token_refresh_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        _token_refresh_task = None
 
 
 def _to_utc_iso(dt) -> Optional[str]:
@@ -241,10 +345,12 @@ class PGVectorStorageService:
         via `valueFrom: postgres`. The Option C derivation logic is a no-op
         because the env vars are already populated.
 
-        Per-checkout JWT rotation: `password=` accepts a callable, which
-        asyncpg evaluates on each new connection establishment. Combined with
-        `max_inactive_connection_lifetime=300s` (the default) and an ~1h token
-        TTL, every connection in the pool is authenticated with a fresh token.
+        JWT rotation: a process-wide cache holds the latest Lakebase JWT,
+        seeded by `initialize()` and refreshed every ~30 min by a background
+        task. asyncpg's `password=` reads the cache synchronously on each new
+        connection establishment — the SDK mint never runs on the event-loop
+        hot path. If the refresh task is transiently failing, the pool keeps
+        using the previous cached token until recovery.
 
         Local dev / non-Apps fallback: if neither path produces a usable
         endpoint, we fall back to the legacy `connection_string` path (must
@@ -281,23 +387,25 @@ class PGVectorStorageService:
             from databricks.sdk import WorkspaceClient
             ws_client = WorkspaceClient()  # uses app's built-in SP
 
-            def _fresh_token():
-                # asyncpg accepts a sync callable here; it's invoked on each
-                # new connection establishment. The Lakebase SDK's
-                # `postgres.generate_database_credential` takes the endpoint
-                # resource path (`projects/<id>/branches/<id>/endpoints/<id>`)
-                # via the `endpoint=` kwarg.
-                cred = ws_client.postgres.generate_database_credential(
-                    endpoint=endpoint_path,
+            # Seed the cache with the first JWT BEFORE the pool is created so
+            # the very first connection has a valid password. Boot blocking
+            # here is acceptable — no event loop traffic yet.
+            first_token = await _mint_lakebase_jwt(ws_client, endpoint_path)
+            _token_cache["token"] = first_token
+            _token_cache["minted_at"] = _time.monotonic()
+
+            global _token_refresh_task
+            if _token_refresh_task is None or _token_refresh_task.done():
+                _token_refresh_task = asyncio.create_task(
+                    _jwt_refresh_loop(ws_client, endpoint_path)
                 )
-                return cred.token
 
             self.pool = await asyncpg.create_pool(
                 host=host,
                 port=port,
                 user=user,
                 database=database,
-                password=_fresh_token,
+                password=_read_cached_token,
                 ssl=ssl_context,
                 min_size=2,
                 max_size=10,
@@ -1090,7 +1198,8 @@ class PGVectorStorageService:
             return count
 
     async def close(self):
-        """Close the connection pool"""
+        """Close the connection pool and stop the JWT refresher."""
+        await _stop_token_refresh_task()
         if self.pool:
             await self.pool.close()
             logger.info("PGVector connection pool closed")

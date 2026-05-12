@@ -55,7 +55,12 @@ _synthetic_first_seen: dict[str, float] = {}
 _message_locks: dict[str, asyncio.Lock] = {}
 _sweep_lock = asyncio.Lock()
 _SYNTHETIC_MAX = 2000
-_SYNTHETIC_TTL_S = 600  # 10 min — well past the 150s dispatch poll timeout
+# 1h — generous enough for slow-polling Clone API consumers (mobile clients
+# backgrounded between polls, batch jobs) without making the size cap
+# meaningful in practice. The Clone API previously evicted only on the size
+# cap, so a TTL shorter than this would 404 valid IDs that the old behaviour
+# kept alive. Memory is still bounded by _SYNTHETIC_MAX.
+_SYNTHETIC_TTL_S = 3600
 _SWEEP_INTERVAL_S = 60
 _sweep_task: asyncio.Task | None = None
 

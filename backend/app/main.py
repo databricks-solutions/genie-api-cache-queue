@@ -29,9 +29,9 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize storage backend (creates connection pool if using Lakebase/PGVector).
-    # Lakebase JWT rotation is handled per-connection inside the pool via
-    # `password=callable` (see storage_pgvector.initialize) — no wall-clock
-    # refresh task is needed.
+    # Lakebase JWT rotation runs as a background task that refreshes a cached
+    # token before its ~1h TTL; asyncpg's `password=callable` reads from that
+    # cache, so the SDK mint never blocks the event loop on a hot path.
     from app.services.database import initialize_storage
     await initialize_storage()
 
@@ -57,6 +57,8 @@ async def lifespan(app: FastAPI):
     yield
 
     await stop_synthetic_sweep_task()
+    from app.services.storage_pgvector import _stop_token_refresh_task
+    await _stop_token_refresh_task()
     from app.services.rbac import close_http_client
     from app.api.gateway_routes import close_discovery_client
     await close_http_client()
