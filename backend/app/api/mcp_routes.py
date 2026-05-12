@@ -54,7 +54,11 @@ from app.api.genie_clone_routes import (
 # Router-MCP reuses the routing-decision + DAG-execution path from REST so the
 # MCP handler is a thin protocol adapter, not a second copy of the logic.
 from app.api.router_routes import _resolve_decision, _execute_dag
-from app.api.auth_helpers import require_role, resolve_user_token_optional
+from app.api.auth_helpers import (
+    extract_bearer_token_optional,
+    require_role,
+    resolve_user_token_optional,
+)
 from app.services import tracing
 
 # ── Protocol constants ────────────────────────────────────────────────
@@ -811,7 +815,13 @@ async def _handle_router_initialize(router_cfg: dict):
     }
 
 
-async def _handle_router_ask(router_cfg: dict, arguments: dict, token: str, identity: str) -> dict:
+async def _handle_router_ask(
+    router_cfg: dict,
+    arguments: dict,
+    token: str,
+    identity: str,
+    auth_mode: str = "user",
+) -> dict:
     """Run decompose → select → DAG-execute for one MCP ask call.
 
     Synchronous: blocks until ``_execute_dag`` finishes (which itself polls
@@ -844,6 +854,7 @@ async def _handle_router_ask(router_cfg: dict, arguments: dict, token: str, iden
         t0 = _time.monotonic()
         decision, meta = await _resolve_decision(
             router_cfg, question, hints, token, use_cache=True,
+            identity=identity,
         )
 
         if not decision.picks:
@@ -866,7 +877,7 @@ async def _handle_router_ask(router_cfg: dict, arguments: dict, token: str, iden
             }
             return _wrap_router_result(payload)
 
-        results, dag_stats = await _execute_dag(decision.picks, token, identity)
+        results, dag_stats = await _execute_dag(decision.picks, token, identity, auth_mode)
         elapsed_ms = int((_time.monotonic() - t0) * 1000)
         n_ok = sum(1 for r in results if r.get("status") == "COMPLETED")
         n_skipped = sum(1 for r in results if r.get("status") == "SKIPPED")
@@ -958,6 +969,7 @@ async def mcp_router_endpoint(router_id: str, request: Request):
     # Token used for downstream Genie/warehouse calls (allows SP fallback so
     # the router endpoint behaves consistently with `POST /routers/{id}/query`).
     token = resolve_user_token_optional(request)
+    auth_mode = "user" if extract_bearer_token_optional(request) else "service_principal"
     if not identity:
         identity = "mcp-user"
 
@@ -977,7 +989,7 @@ async def mcp_router_endpoint(router_id: str, request: Request):
 
         if tool_name == f"ask_{router_id}":
             try:
-                result = await _handle_router_ask(router_cfg, arguments, token, identity)
+                result = await _handle_router_ask(router_cfg, arguments, token, identity, auth_mode)
             except Exception as e:
                 logger.exception("Router MCP ask failed")
                 result = _wrap_router_result(

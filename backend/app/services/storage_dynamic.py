@@ -395,13 +395,34 @@ class DynamicStorageService:
     async def delete_router_member(self, router_id: str, gateway_id: str) -> bool:
         return await self.default_backend.delete_router_member(router_id, gateway_id)
 
-    async def lookup_routing_cache(self, router_id: str, query_embedding, threshold: float = 0.92):
+    async def lookup_routing_cache(
+        self,
+        router_id: str,
+        query_embedding,
+        threshold: float = 0.92,
+        identity: str = "",
+        shared_cache: bool = True,
+    ):
         await self._ensure_backend_healthy(self.default_backend)
-        return await self.default_backend.lookup_routing_cache(router_id, query_embedding, threshold)
+        return await self.default_backend.lookup_routing_cache(
+            router_id, query_embedding, threshold,
+            identity=identity, shared_cache=shared_cache,
+        )
 
-    async def save_routing_cache(self, router_id: str, question: str, query_embedding, decision: dict, ttl_hours: int) -> int:
+    async def save_routing_cache(
+        self,
+        router_id: str,
+        question: str,
+        query_embedding,
+        decision: dict,
+        ttl_hours: int,
+        identity: str = "",
+    ) -> int:
         await self._ensure_backend_healthy(self.default_backend)
-        return await self.default_backend.save_routing_cache(router_id, question, query_embedding, decision, ttl_hours)
+        return await self.default_backend.save_routing_cache(
+            router_id, question, query_embedding, decision, ttl_hours,
+            identity=identity,
+        )
 
     async def clear_routing_cache(self, router_id: str) -> int:
         return await self.default_backend.clear_routing_cache(router_id)

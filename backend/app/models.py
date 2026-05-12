@@ -257,6 +257,7 @@ class RouterConfig(BaseModel):
     selector_system_prompt: Optional[str] = None
     decompose_enabled: bool = True
     routing_cache_enabled: bool = True
+    shared_cache: bool = True  # True = global routing cache; False = per-identity
     similarity_threshold: float = 0.92
     cache_ttl_hours: int = 24
     mlflow_experiment_path: Optional[str] = None
@@ -292,6 +293,7 @@ class RouterCreateRequest(BaseModel):
     selector_system_prompt: Optional[str] = None
     decompose_enabled: Optional[bool] = None
     routing_cache_enabled: Optional[bool] = None
+    shared_cache: Optional[bool] = None
     similarity_threshold: Optional[float] = None
     cache_ttl_hours: Optional[int] = None
     mlflow_experiment_path: Optional[str] = None
@@ -306,6 +308,7 @@ class RouterUpdateRequest(BaseModel):
     selector_system_prompt: Optional[str] = None
     decompose_enabled: Optional[bool] = None
     routing_cache_enabled: Optional[bool] = None
+    shared_cache: Optional[bool] = None
     similarity_threshold: Optional[float] = None
     cache_ttl_hours: Optional[int] = None
     mlflow_experiment_path: Optional[str] = None

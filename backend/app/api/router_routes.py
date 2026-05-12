@@ -19,7 +19,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from app.api.auth_helpers import require_role, resolve_user_token_optional
+from app.api.auth_helpers import (
+    extract_bearer_token_optional,
+    require_role,
+    resolve_user_token_optional,
+)
 from app.api.genie_clone_routes import (
     _handle_query as _gateway_handle_query,
     _synthetic_messages as _gateway_synthetic_messages,
@@ -87,6 +91,7 @@ async def create_router(body: RouterCreateRequest, req: Request):
             "selector_system_prompt": body.selector_system_prompt or None,
             "decompose_enabled": body.decompose_enabled if body.decompose_enabled is not None else True,
             "routing_cache_enabled": body.routing_cache_enabled if body.routing_cache_enabled is not None else True,
+            "shared_cache": body.shared_cache if body.shared_cache is not None else True,
             "similarity_threshold": body.similarity_threshold if body.similarity_threshold is not None else 0.92,
             "cache_ttl_hours": body.cache_ttl_hours if body.cache_ttl_hours is not None else 24,
             "mlflow_experiment_path": mlflow_path,
@@ -311,6 +316,7 @@ async def _resolve_decision(
     hints: list[str] | None,
     token: str,
     use_cache: bool,
+    identity: str = "",
 ) -> tuple[RoutingDecision, dict]:
     """Return (decision, meta).
 
@@ -359,6 +365,8 @@ async def _resolve_decision(
                 try:
                     hit = await _db.db_service.lookup_routing_cache(
                         router_cfg["id"], embedding, router_cfg.get("similarity_threshold", 0.92),
+                        identity=identity,
+                        shared_cache=bool(router_cfg.get("shared_cache", True)),
                     )
                 except Exception as e:
                     logger.warning("Routing cache lookup failed: %s", e)
@@ -434,6 +442,7 @@ async def _resolve_decision(
             await _db.db_service.save_routing_cache(
                 router_cfg["id"], question, embedding,
                 decision.model_dump(), int(router_cfg.get("cache_ttl_hours") or 24),
+                identity=identity,
             )
         except Exception as e:
             logger.warning("Routing cache save failed: %s", e)
@@ -478,7 +487,7 @@ async def _poll_for_completion(msg_id: str, timeout_s: float = _DISPATCH_POLL_TI
     }
 
 
-async def _dispatch_pick(pick: RoomPick, token: str, identity: str) -> dict:
+async def _dispatch_pick(pick: RoomPick, token: str, identity: str, auth_mode: str = "user") -> dict:
     """Call the gateway's _handle_query in-process, wait for completion, return the final result.
 
     Returns a uniform source-dict with {gateway_id, sub_question, status,
@@ -520,7 +529,7 @@ async def _dispatch_pick(pick: RoomPick, token: str, identity: str) -> dict:
                 token=token,
                 identity=identity,
                 gateway=gw,
-                auth_mode="user" if token else "service_principal",
+                auth_mode=auth_mode,
             )
         except Exception as e:
             logger.exception("Router dispatch crashed for gateway=%s", pick.gateway_id)
@@ -921,6 +930,7 @@ async def _execute_dag(
     picks: list[RoomPick],
     token: str,
     identity: str,
+    auth_mode: str = "user",
 ) -> tuple[list[dict], dict]:
     """Run the decomposed plan as a DAG, resolving bindings between stages.
 
@@ -991,6 +1001,7 @@ async def _execute_dag(
                         ),
                         token,
                         identity,
+                        auth_mode,
                     )
                     for (p, rendered, _diag) in ready
                 ))
@@ -1023,6 +1034,7 @@ async def preview_routing(router_id: str, body: RouterQueryRequest, req: Request
             raise HTTPException(status_code=404, detail="Router not found")
 
         token = resolve_user_token_optional(req)
+        auth_mode = "user" if extract_bearer_token_optional(req) else "service_principal"
         identity = req.headers.get("X-Forwarded-Email") or "api-user"
 
         experiment_id = tracing.resolve_experiment_id(router_cfg.get("mlflow_experiment_path"))
@@ -1042,6 +1054,7 @@ async def preview_routing(router_id: str, body: RouterQueryRequest, req: Request
             t0 = time.monotonic()
             decision, meta = await _resolve_decision(
                 router_cfg, body.question, body.hints, token, use_cache=False,
+                identity=identity,
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             root.set_outputs({
@@ -1077,6 +1090,7 @@ async def router_query(router_id: str, body: RouterQueryRequest, req: Request):
             raise HTTPException(status_code=404, detail="Router not found")
 
         token = resolve_user_token_optional(req)
+        auth_mode = "user" if extract_bearer_token_optional(req) else "service_principal"
         identity = req.headers.get("X-Forwarded-Email") or "api-user"
 
         experiment_id = tracing.resolve_experiment_id(router_cfg.get("mlflow_experiment_path"))
@@ -1096,6 +1110,7 @@ async def router_query(router_id: str, body: RouterQueryRequest, req: Request):
             t0 = time.monotonic()
             decision, meta = await _resolve_decision(
                 router_cfg, body.question, body.hints, token, use_cache=True,
+                identity=identity,
             )
 
             if not decision.picks:
@@ -1119,7 +1134,7 @@ async def router_query(router_id: str, body: RouterQueryRequest, req: Request):
 
             # Execute the plan as a DAG — independent picks in parallel per stage,
             # dependent picks run after their upstreams with bindings rendered.
-            results, dag_stats = await _execute_dag(decision.picks, token, identity)
+            results, dag_stats = await _execute_dag(decision.picks, token, identity, auth_mode)
 
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             n_ok = sum(1 for r in results if r.get("status") == "COMPLETED")

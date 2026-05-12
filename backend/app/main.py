@@ -49,8 +49,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Tracing init raised unexpectedly: %s — continuing without tracing", e)
 
+    # Periodic background sweep keeps the in-memory synthetic-message store
+    # bounded even when no foreground requests trigger cache hit/miss paths.
+    from app.api.genie_clone_routes import start_synthetic_sweep_task, stop_synthetic_sweep_task
+    start_synthetic_sweep_task()
+
     yield
 
+    await stop_synthetic_sweep_task()
     from app.services.rbac import close_http_client
     from app.api.gateway_routes import close_discovery_client
     await close_http_client()

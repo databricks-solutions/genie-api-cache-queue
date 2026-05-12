@@ -35,6 +35,13 @@ env:
   #   projects/${LAKEBASE_PROJECT_ID}/branches/<derived>/endpoints/primary
   - name: LAKEBASE_PROJECT_ID
     value: genie-cache
+  # Legacy (pre-Autoscaling) Lakebase identifiers. Kept for backward compat
+  # with deploys that still set them via the Settings UI; ignored by the
+  # Autoscaling endpoint resolver in storage_pgvector.
+  - name: LAKEBASE_INSTANCE
+    value: ""
+  - name: LAKEBASE_CATALOG
+    value: ""
   - name: LAKEBASE_SCHEMA
     value: genie_gateway
   # Static PG params (PGHOST is resolved at startup; PGUSER comes from

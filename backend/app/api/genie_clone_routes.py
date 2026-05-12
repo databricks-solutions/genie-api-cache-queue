@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import logging
+import time as _time
 import uuid
 import asyncio
 import httpx
@@ -50,38 +51,98 @@ genie_clone_router = APIRouter()
 # In-memory store for synthetic (cache / queued) messages & attachments
 # ---------------------------------------------------------------------------
 _synthetic_messages: dict[str, dict] = {}
+_synthetic_first_seen: dict[str, float] = {}
 _message_locks: dict[str, asyncio.Lock] = {}
 _sweep_lock = asyncio.Lock()
 _SYNTHETIC_MAX = 2000
+_SYNTHETIC_TTL_S = 600  # 10 min — well past the 150s dispatch poll timeout
+_SWEEP_INTERVAL_S = 60
+_sweep_task: asyncio.Task | None = None
 
 CONV_PREFIX = "ccache_"
 MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
 
 
+def _evict_synthetic(k: str) -> None:
+    _synthetic_messages.pop(k, None)
+    _synthetic_first_seen.pop(k, None)
+    _message_locks.pop(k, None)
+
+
 async def _sweep_synthetic_messages():
-    """Evict oldest entries when the store exceeds _SYNTHETIC_MAX.
-    Acquires _sweep_lock to serialize access. Skips locked entries.
+    """Evict expired and overflow entries from the synthetic-message store.
+
+    Two-pass eviction:
+      1. Age-based: drop entries first seen more than _SYNTHETIC_TTL_S ago.
+         Guarantees memory doesn't accumulate under bursty router fanout when
+         the store hasn't exceeded the size cap. Locked entries are skipped
+         (they belong to in-flight requests).
+      2. Size-based: if still over _SYNTHETIC_MAX, evict in insertion order
+         until back under the cap.
+
+    First-seen times are recorded lazily during sweep, so insertion sites
+    don't need to be modified.
     """
-    overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
-    if overflow <= 0:
-        return
     async with _sweep_lock:
+        now = _time.monotonic()
+        # Lazily stamp first-seen timestamps for any key we haven't tracked yet.
+        for k in _synthetic_messages.keys():
+            _synthetic_first_seen.setdefault(k, now)
+
+        # Pass 1: age-based eviction.
+        for k in list(_synthetic_messages.keys()):
+            first_seen = _synthetic_first_seen.get(k, now)
+            if now - first_seen < _SYNTHETIC_TTL_S:
+                continue
+            lock = _message_locks.get(k)
+            if lock is not None and lock.locked():
+                continue
+            _evict_synthetic(k)
+
+        # Pass 2: size-based overflow (FIFO).
         overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
         if overflow <= 0:
             return
         evicted = 0
-        skipped_locked = []
         for k in list(_synthetic_messages.keys()):
             if evicted >= overflow:
                 break
             lock = _message_locks.get(k)
             if lock is not None and lock.locked():
-                skipped_locked.append(k)
                 continue
-            _synthetic_messages.pop(k, None)
-            _message_locks.pop(k, None)
+            _evict_synthetic(k)
             evicted += 1
+
+
+async def _synthetic_sweep_loop():
+    """Background task: run sweep on a fixed interval so memory is bounded
+    even when no foreground requests trigger cache hit/miss codepaths."""
+    while True:
+        try:
+            await asyncio.sleep(_SWEEP_INTERVAL_S)
+            await _sweep_synthetic_messages()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Synthetic-message sweep loop iteration failed")
+
+
+def start_synthetic_sweep_task() -> None:
+    global _sweep_task
+    if _sweep_task is None or _sweep_task.done():
+        _sweep_task = asyncio.create_task(_synthetic_sweep_loop())
+
+
+async def stop_synthetic_sweep_task() -> None:
+    global _sweep_task
+    if _sweep_task is not None and not _sweep_task.done():
+        _sweep_task.cancel()
+        try:
+            await _sweep_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        _sweep_task = None
 
 
 # ---------------------------------------------------------------------------

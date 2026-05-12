@@ -729,6 +729,7 @@ class PGVectorStorageService:
                 selector_system_prompt TEXT,
                 decompose_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 routing_cache_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                shared_cache BOOLEAN NOT NULL DEFAULT TRUE,
                 similarity_threshold REAL NOT NULL DEFAULT 0.92,
                 cache_ttl_hours INTEGER NOT NULL DEFAULT 24,
                 mlflow_experiment_path TEXT,
@@ -737,6 +738,14 @@ class PGVectorStorageService:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Migration for tables created before the shared_cache column existed.
+        try:
+            await conn.execute(
+                f"ALTER TABLE {self.q_routers_table} "
+                "ADD COLUMN IF NOT EXISTS shared_cache BOOLEAN NOT NULL DEFAULT TRUE"
+            )
+        except Exception as e:
+            logger.warning("Routers shared_cache migration skipped: %s", e)
         logger.info("Routers table '%s' initialized", self.routers_table_name)
 
     async def _ensure_router_members_table(self, conn):
@@ -773,11 +782,13 @@ class PGVectorStorageService:
         logger.info("Router members table '%s' initialized", self.router_members_table_name)
 
     async def _ensure_routing_cache_table(self, conn):
-        """Create the routing_cache table (question → decision, scoped per router)."""
+        """Create the routing_cache table (question → decision, scoped per router
+        and — when the router has shared_cache=False — also per caller identity)."""
         await conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {self.q_routing_cache_table} (
                 id BIGSERIAL PRIMARY KEY,
                 router_id TEXT NOT NULL REFERENCES {self.q_routers_table}(id) ON DELETE CASCADE,
+                identity TEXT NOT NULL DEFAULT '',
                 question TEXT NOT NULL,
                 question_embedding vector(1024) NOT NULL,
                 decision_json JSONB NOT NULL,
@@ -786,10 +797,19 @@ class PGVectorStorageService:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        # Migration for tables created before the identity column existed.
+        try:
+            await conn.execute(
+                f"ALTER TABLE {self.q_routing_cache_table} "
+                "ADD COLUMN IF NOT EXISTS identity TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception as e:
+            logger.warning("Routing cache identity migration skipped: %s", e)
         idx_base = self.routing_cache_table_name.replace('.', '_')
         for idx_sql in [
             f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.q_routing_cache_table} USING ivfflat (question_embedding vector_cosine_ops) WITH (lists = 50)",
             f"CREATE INDEX IF NOT EXISTS {idx_base}_router_idx ON {self.q_routing_cache_table} (router_id)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx ON {self.q_routing_cache_table} (router_id, identity)",
             f"CREATE INDEX IF NOT EXISTS {idx_base}_ttl_idx ON {self.q_routing_cache_table} (ttl_expires)",
         ]:
             try:
@@ -1543,6 +1563,7 @@ class PGVectorStorageService:
             ("selector_system_prompt", config.get("selector_system_prompt")),
             ("decompose_enabled", config.get("decompose_enabled", True)),
             ("routing_cache_enabled", config.get("routing_cache_enabled", True)),
+            ("shared_cache", config.get("shared_cache", True)),
             ("similarity_threshold", config.get("similarity_threshold", 0.92)),
             ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
             ("mlflow_experiment_path", config.get("mlflow_experiment_path")),
@@ -1597,7 +1618,7 @@ class PGVectorStorageService:
         allowed = {
             "name", "description", "status",
             "selector_model", "selector_system_prompt",
-            "decompose_enabled", "routing_cache_enabled",
+            "decompose_enabled", "routing_cache_enabled", "shared_cache",
             "similarity_threshold", "cache_ttl_hours",
             "mlflow_experiment_path",
         }
@@ -1742,8 +1763,16 @@ class PGVectorStorageService:
         router_id: str,
         query_embedding: List[float],
         threshold: float = 0.92,
+        identity: str = "",
+        shared_cache: bool = True,
     ) -> Optional[dict]:
         """Cosine-search the routing cache for the nearest question within threshold.
+
+        When shared_cache=False, results are filtered by `identity` so a routing
+        decision is only served back to the caller who originally produced it.
+        Prevents leaking the prior asker's verbatim `cached_question` into
+        another user's diagnostics. When shared_cache=True, the identity filter
+        is dropped and all rows for the router are eligible.
 
         Returns {id, question, decision, similarity} or None. Only returns rows
         whose ttl_expires is still in the future — expired rows stay in the
@@ -1755,16 +1784,29 @@ class PGVectorStorageService:
         embedding_array = np.array(query_embedding, dtype=np.float32)
         async with self.pool.acquire() as conn:
             await register_vector(conn)
-            row = await conn.fetchrow(
-                f"""SELECT id, question, decision_json,
-                           1 - (question_embedding <=> $1::vector) AS similarity
-                    FROM {self.q_routing_cache_table}
-                    WHERE router_id = $2
-                      AND ttl_expires > NOW()
-                    ORDER BY question_embedding <=> $1::vector ASC
-                    LIMIT 1""",
-                embedding_array, router_id,
-            )
+            if shared_cache:
+                row = await conn.fetchrow(
+                    f"""SELECT id, question, decision_json,
+                               1 - (question_embedding <=> $1::vector) AS similarity
+                        FROM {self.q_routing_cache_table}
+                        WHERE router_id = $2
+                          AND ttl_expires > NOW()
+                        ORDER BY question_embedding <=> $1::vector ASC
+                        LIMIT 1""",
+                    embedding_array, router_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    f"""SELECT id, question, decision_json,
+                               1 - (question_embedding <=> $1::vector) AS similarity
+                        FROM {self.q_routing_cache_table}
+                        WHERE router_id = $2
+                          AND identity = $3
+                          AND ttl_expires > NOW()
+                        ORDER BY question_embedding <=> $1::vector ASC
+                        LIMIT 1""",
+                    embedding_array, router_id, identity or "",
+                )
             if not row:
                 return None
             if row["similarity"] < threshold:
@@ -1805,8 +1847,10 @@ class PGVectorStorageService:
         query_embedding: List[float],
         decision: dict,
         ttl_hours: int,
+        identity: str = "",
     ) -> int:
-        """Persist a routing decision for later reuse."""
+        """Persist a routing decision for later reuse. `identity` is stored on
+        every row so lookups under shared_cache=False can isolate per caller."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
         import json as _json
@@ -1816,10 +1860,10 @@ class PGVectorStorageService:
             await register_vector(conn)
             row = await conn.fetchrow(
                 f"""INSERT INTO {self.q_routing_cache_table}
-                    (router_id, question, question_embedding, decision_json, ttl_expires, created_at)
-                    VALUES ($1, $2, $3::vector, $4::jsonb, NOW() + INTERVAL '{expires_interval}', NOW())
+                    (router_id, identity, question, question_embedding, decision_json, ttl_expires, created_at)
+                    VALUES ($1, $2, $3, $4::vector, $5::jsonb, NOW() + INTERVAL '{expires_interval}', NOW())
                     RETURNING id""",
-                router_id, question, embedding_array, _json.dumps(decision),
+                router_id, identity or "", question, embedding_array, _json.dumps(decision),
             )
             return int(row["id"])
 
@@ -1850,6 +1894,7 @@ class PGVectorStorageService:
             "selector_system_prompt": row["selector_system_prompt"],
             "decompose_enabled": row["decompose_enabled"],
             "routing_cache_enabled": row["routing_cache_enabled"],
+            "shared_cache": row["shared_cache"] if "shared_cache" in keys else True,
             "similarity_threshold": row["similarity_threshold"],
             "cache_ttl_hours": row["cache_ttl_hours"],
             "mlflow_experiment_path": row["mlflow_experiment_path"] if "mlflow_experiment_path" in keys else None,

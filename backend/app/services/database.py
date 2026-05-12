@@ -192,11 +192,32 @@ class DatabaseService:
     async def delete_router_member(self, router_id: str, gateway_id: str) -> bool:
         return await self.backend.delete_router_member(router_id, gateway_id)
 
-    async def lookup_routing_cache(self, router_id: str, query_embedding, threshold: float = 0.92):
-        return await self.backend.lookup_routing_cache(router_id, query_embedding, threshold)
+    async def lookup_routing_cache(
+        self,
+        router_id: str,
+        query_embedding,
+        threshold: float = 0.92,
+        identity: str = "",
+        shared_cache: bool = True,
+    ):
+        return await self.backend.lookup_routing_cache(
+            router_id, query_embedding, threshold,
+            identity=identity, shared_cache=shared_cache,
+        )
 
-    async def save_routing_cache(self, router_id: str, question: str, query_embedding, decision: dict, ttl_hours: int) -> int:
-        return await self.backend.save_routing_cache(router_id, question, query_embedding, decision, ttl_hours)
+    async def save_routing_cache(
+        self,
+        router_id: str,
+        question: str,
+        query_embedding,
+        decision: dict,
+        ttl_hours: int,
+        identity: str = "",
+    ) -> int:
+        return await self.backend.save_routing_cache(
+            router_id, question, query_embedding, decision, ttl_hours,
+            identity=identity,
+        )
 
     async def clear_routing_cache(self, router_id: str) -> int:
         return await self.backend.clear_routing_cache(router_id)

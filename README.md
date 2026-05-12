@@ -15,7 +15,7 @@ Genie translates natural language to SQL. The Gateway caches that translation so
 Caller (OAuth)
     |
     v
-App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/ or /api/routers/)
+App (/api/2.0/genie/* or /api/2.0/mcp/* or /api/v1/ or /api/gateways/ or /api/v1/routers/)
     |
     +-- Gateway Config (DB)         <-- name, space_id, warehouse_id, settings
     +-- Embedding Service           <-- caller's OAuth (semantic similarity)
@@ -30,7 +30,7 @@ When a Router is in front of N gateways:
 Caller (OAuth)
     |
     v
-Router (/api/routers/{id}/query)
+Router (/api/v1/routers/{id}/query)
     |
     +-- Selector LLM                <-- picks members + decomposes into sub-questions
     +-- Routing Cache (PGVector)    <-- (question → decision), per router
@@ -227,7 +227,7 @@ Then open the new router and use the **Members** tab to attach gateways one by o
 import requests
 
 r = requests.post(
-    f"{APP_HOST}/api/routers/{ROUTER_ID}/query",
+    f"{APP_HOST}/api/v1/routers/{ROUTER_ID}/query",
     headers={"Authorization": f"Bearer {TOKEN}"},
     json={"question": "Top donors and the projects they fund?"},
 )
@@ -473,17 +473,17 @@ Roles: `use` for list/get/preview/query, `manage` for member edits and routing-c
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/routers` | List all routers (members not hydrated) |
-| POST | `/api/routers` | Create a router |
-| GET | `/api/routers/{id}` | Get router with hydrated members |
-| PUT | `/api/routers/{id}` | Update router fields |
-| DELETE | `/api/routers/{id}` | Delete a router (cascades to members + routing cache) |
-| POST | `/api/routers/{id}/members` | Add a gateway as a member |
-| PUT | `/api/routers/{id}/members/{gateway_id}` | Update member catalog metadata |
-| DELETE | `/api/routers/{id}/members/{gateway_id}` | Remove a member |
-| DELETE | `/api/routers/{id}/cache` | Flush the routing cache for this router |
-| POST | `/api/routers/{id}/preview` | Resolve the routing decision without dispatching |
-| POST | `/api/routers/{id}/query` | Resolve and execute the full DAG; returns one source per pick |
+| GET | `/api/v1/routers` | List all routers (members not hydrated) |
+| POST | `/api/v1/routers` | Create a router |
+| GET | `/api/v1/routers/{id}` | Get router with hydrated members |
+| PUT | `/api/v1/routers/{id}` | Update router fields |
+| DELETE | `/api/v1/routers/{id}` | Delete a router (cascades to members + routing cache) |
+| POST | `/api/v1/routers/{id}/members` | Add a gateway as a member |
+| PUT | `/api/v1/routers/{id}/members/{gateway_id}` | Update member catalog metadata |
+| DELETE | `/api/v1/routers/{id}/members/{gateway_id}` | Remove a member |
+| DELETE | `/api/v1/routers/{id}/cache` | Flush the routing cache for this router |
+| POST | `/api/v1/routers/{id}/preview` | Resolve the routing decision without dispatching |
+| POST | `/api/v1/routers/{id}/query` | Resolve and execute the full DAG; returns one source per pick |
 
 ---
 

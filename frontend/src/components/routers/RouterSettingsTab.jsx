@@ -11,6 +11,7 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
     selector_system_prompt: routerCfg.selector_system_prompt || '',
     decompose_enabled: !!routerCfg.decompose_enabled,
     routing_cache_enabled: !!routerCfg.routing_cache_enabled,
+    shared_cache: routerCfg.shared_cache !== false,
     similarity_threshold: routerCfg.similarity_threshold ?? 0.92,
     cache_ttl_hours: routerCfg.cache_ttl_hours ?? 24,
     mlflow_experiment_path: routerCfg.mlflow_experiment_path || '',
@@ -36,6 +37,7 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
         selector_system_prompt: form.selector_system_prompt,
         decompose_enabled: form.decompose_enabled,
         routing_cache_enabled: form.routing_cache_enabled,
+        shared_cache: form.shared_cache,
         similarity_threshold: Number(form.similarity_threshold),
         cache_ttl_hours: Math.round(Number(form.cache_ttl_hours)),
         mlflow_experiment_path: (form.mlflow_experiment_path || '').trim(),
@@ -126,13 +128,21 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
       </Section>
 
       <Section title="Routing cache">
-        <label className="flex items-center gap-2 text-[13px] text-dbx-text mb-3">
+        <label className="flex items-center gap-2 text-[13px] text-dbx-text mb-2">
           <input
             type="checkbox"
             checked={form.routing_cache_enabled}
             onChange={(e) => setField('routing_cache_enabled', e.target.checked)}
           />
           Cache routing decisions (question → gateway pick)
+        </label>
+        <label className="flex items-center gap-2 text-[13px] text-dbx-text mb-3">
+          <input
+            type="checkbox"
+            checked={form.shared_cache}
+            onChange={(e) => setField('shared_cache', e.target.checked)}
+          />
+          Shared cache across all users (when off, decisions are scoped per caller identity)
         </label>
         <Field label="Similarity threshold">
           <input
