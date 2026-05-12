@@ -35,9 +35,12 @@ env:
   #   projects/${LAKEBASE_PROJECT_ID}/branches/<derived>/endpoints/primary
   - name: LAKEBASE_PROJECT_ID
     value: genie-cache
-  # Legacy (pre-Autoscaling) Lakebase identifiers. Kept for backward compat
-  # with deploys that still set them via the Settings UI; ignored by the
-  # Autoscaling endpoint resolver in storage_pgvector.
+  # Legacy (pre-Autoscaling) Lakebase identifiers. They are NOT used by the
+  # Autoscaling endpoint resolver in storage_pgvector, but config.py still
+  # reads them: lakebase_instance feeds the connection_string fallback (used
+  # only when the Autoscaling path can't resolve PGHOST), and lakebase_catalog
+  # appears in full_table_name + gateway/proxy API responses surfaced to the
+  # Settings UI. Leave EMPTY unless you intentionally want the legacy path.
   - name: LAKEBASE_INSTANCE
     value: ""
   - name: LAKEBASE_CATALOG

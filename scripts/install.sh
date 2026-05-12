@@ -880,8 +880,14 @@ content = open('$PROJECT_DIR/app.yaml').read()
 content = re.sub(r'^(name:).*\$', r'\1 $APP_NAME', content, flags=re.MULTILINE)
 replacements = {
     'STORAGE_BACKEND': '$STORAGE_BACKEND',
-    'LAKEBASE_INSTANCE': '$LAKEBASE_INSTANCE',
-    'LAKEBASE_CATALOG': '$LAKEBASE_CATALOG',
+    # The shell variable LAKEBASE_INSTANCE holds the Autoscaling *project name*,
+    # which the runtime now reads from LAKEBASE_PROJECT_ID under the Option C
+    # endpoint-resolution path in storage_pgvector. The legacy LAKEBASE_INSTANCE
+    # env var (used by config.py's postgres_connection_string fallback) is left
+    # empty to avoid mistaking the project name for a hostname.
+    'LAKEBASE_PROJECT_ID': '$LAKEBASE_INSTANCE',
+    'LAKEBASE_INSTANCE': '',
+    'LAKEBASE_CATALOG': '',
     'LAKEBASE_SCHEMA': '$LAKEBASE_SCHEMA',
     'MLFLOW_EXPERIMENT_NAME': '$MLFLOW_EXPERIMENT_NAME',
 }

@@ -64,6 +64,18 @@ MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
 
 
+def _remember_synthetic(msg_id: str, value: dict) -> None:
+    """Insert/replace a synthetic-message entry and stamp its first-seen time.
+
+    Use this instead of `_synthetic_messages[msg_id] = value` for new entries
+    so the TTL clock starts when the entry actually lands. In-place field
+    mutations on an existing entry don't refresh the stamp.
+    """
+    _synthetic_messages[msg_id] = value
+    if msg_id not in _synthetic_first_seen:
+        _synthetic_first_seen[msg_id] = _time.monotonic()
+
+
 def _evict_synthetic(k: str) -> None:
     _synthetic_messages.pop(k, None)
     _synthetic_first_seen.pop(k, None)
@@ -81,12 +93,14 @@ async def _sweep_synthetic_messages():
       2. Size-based: if still over _SYNTHETIC_MAX, evict in insertion order
          until back under the cap.
 
-    First-seen times are recorded lazily during sweep, so insertion sites
-    don't need to be modified.
+    First-seen stamps are written by `_remember_synthetic` at insertion time
+    so the TTL window is honest; the sweep stamps any unstamped key
+    defensively (e.g. a future call site that wrote directly).
     """
     async with _sweep_lock:
         now = _time.monotonic()
-        # Lazily stamp first-seen timestamps for any key we haven't tracked yet.
+        # Defensive: stamp any untracked key so it eventually expires even if
+        # an insertion site bypassed _remember_synthetic.
         for k in _synthetic_messages.keys():
             _synthetic_first_seen.setdefault(k, now)
 
@@ -402,11 +416,11 @@ async def _process_genie_background(
                     "auth_mode": auth_mode,
                 }
                 async with _get_message_lock(msg_id):
-                    _synthetic_messages[msg_id] = completed
-                    _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                    _remember_synthetic(msg_id, completed)
+                    _remember_synthetic(att_id, {"sql_query": sql_query, "token": token, "space_id": space_id})
                     for _att in completed.get("attachments", []):
                         if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
-                            _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                            _remember_synthetic(_att["attachment_id"], {"sql_query": sql_query, "token": token, "space_id": space_id})
 
                 # Execute SQL FIRST (poll arriving here sees stage=processing_genie, not received)
                 # so the write-time validator can see row_count + columns + warehouse status
@@ -544,14 +558,14 @@ async def _process_genie_background(
 
             # Non-COMPLETED terminal status
             async with _get_message_lock(msg_id):
-                _synthetic_messages[msg_id] = {
+                _remember_synthetic(msg_id, {
                     "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                     "message_id": msg_id,
                     "status": result.get("status", "FAILED"),
                     "attachments": [],
                     "error": result.get("error"),
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-                }
+                })
             return
 
         except GenieRateLimitError as e:
@@ -563,14 +577,14 @@ async def _process_genie_background(
         except GenieConfigError as e:
             logger.error("Non-retryable Genie error %d for msg_id=%s: %s", e.status_code, msg_id, e.detail)
             async with _get_message_lock(msg_id):
-                _synthetic_messages[msg_id] = {
+                _remember_synthetic(msg_id, {
                     "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                     "message_id": msg_id,
                     "status": "FAILED",
                     "attachments": [],
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-                }
+                })
             return
         except Exception as e:
             last_error = str(e)
@@ -585,14 +599,14 @@ async def _process_genie_background(
     # Fallback: all retries exhausted — ALWAYS set FAILED so client stops polling
     logger.error("Background processing failed for msg_id=%s: %s", msg_id, last_error)
     async with _get_message_lock(msg_id):
-        _synthetic_messages[msg_id] = {
+        _remember_synthetic(msg_id, {
             "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
             "message_id": msg_id,
             "status": "FAILED",
             "attachments": [],
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
             "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-        }
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -702,8 +716,8 @@ async def _handle_query(
         proxy_stage = response["_proxy"]["stage"]
         await _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
-            _synthetic_messages[msg_id] = response
-            _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+            _remember_synthetic(msg_id, response)
+            _remember_synthetic(att_id, {"sql_query": sql_query, "token": token, "space_id": space_id})
 
         try:
             await _db.db_service.save_query_log(
@@ -726,7 +740,7 @@ async def _handle_query(
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode}
     await _sweep_synthetic_messages()
     async with _get_message_lock(msg_id):
-        _synthetic_messages[msg_id] = response
+        _remember_synthetic(msg_id, response)
 
     task = asyncio.create_task(_process_genie_background(
         space_id=space_id,
@@ -747,14 +761,14 @@ async def _handle_query(
         exc = t.exception() if not t.cancelled() else None
         if exc:
             logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
-            _synthetic_messages[msg_id] = {
+            _remember_synthetic(msg_id, {
                 "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                 "message_id": msg_id,
                 "status": "FAILED",
                 "attachments": [],
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
                 "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-            }
+            })
         _release_message_lock(msg_id)
 
     task.add_done_callback(_on_task_done)
