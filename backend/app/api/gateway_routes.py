@@ -102,6 +102,15 @@ def _build_gateway_config_from_body(body: GatewayCreateRequest, user_email: str 
       .strip() check resolve to the env default.
     """
     sql_warehouse_id = body.sql_warehouse_id or get_effective_setting("sql_warehouse_id") or ""
+
+    # Smart-feature toggles default to False on create so a fresh gateway runs
+    # with a minimal, predictable baseline. The runtime resolver falls back to
+    # the global setting (often True) on NULL, which would silently enable
+    # features the operator didn't opt into and cause the list view (renders
+    # NULL as OFF) to disagree with the Settings tab. Persisting explicit
+    # booleans keeps every view consistent and matches operator intent.
+    _default_off = lambda v: False if v is None else v  # noqa: E731
+
     return {
         "id": str(uuid.uuid4()),
         "name": body.name,
@@ -110,17 +119,17 @@ def _build_gateway_config_from_body(body: GatewayCreateRequest, user_email: str 
         "similarity_threshold": body.similarity_threshold,
         "max_queries_per_minute": body.max_queries_per_minute,
         "cache_ttl_hours": body.cache_ttl_hours,
-        "question_normalization_enabled": body.question_normalization_enabled,
-        "cache_validation_enabled": body.cache_validation_enabled,
-        "cache_write_validation_enabled": body.cache_write_validation_enabled,
+        "question_normalization_enabled": _default_off(body.question_normalization_enabled),
+        "cache_validation_enabled": _default_off(body.cache_validation_enabled),
+        "cache_write_validation_enabled": _default_off(body.cache_write_validation_enabled),
         "caching_enabled": body.caching_enabled,
         "embedding_provider": _unset_if_blank(body.embedding_provider),
         "databricks_embedding_endpoint": _unset_if_blank(body.databricks_embedding_endpoint),
-        "shared_cache": body.shared_cache,
+        "shared_cache": _default_off(body.shared_cache),
         "normalization_model": _unset_if_blank(body.normalization_model),
         "validation_model": _unset_if_blank(body.validation_model),
         "intent_split_model": _unset_if_blank(body.intent_split_model),
-        "intent_split_enabled": body.intent_split_enabled,
+        "intent_split_enabled": _default_off(body.intent_split_enabled),
         "status": "active",
         "created_by": user_email,
         "description": body.description or "",

@@ -127,18 +127,23 @@ class TestBuildGatewayConfigFromBody:
         return mod._build_gateway_config_from_body(body, user_email="u@x", now=now)
 
     def test_unset_numeric_fields_become_none(self, gateway_routes):
-        """A minimal body stores NULL for every optional numeric/boolean.
-        _build_runtime_settings will resolve NULL → current global dynamically."""
+        """A minimal body stores NULL for optional numerics and for
+        caching_enabled so _build_runtime_settings can resolve them against
+        the current global. Smart-feature toggles + shared_cache are pinned to
+        explicit False on create so a fresh gateway runs with a minimal,
+        predictable baseline and so the home list and Settings tab agree on
+        the displayed state."""
         mod, _ = gateway_routes
         config = self._build(mod)
         assert config["similarity_threshold"] is None
         assert config["max_queries_per_minute"] is None
         assert config["cache_ttl_hours"] is None
-        assert config["shared_cache"] is None
-        assert config["question_normalization_enabled"] is None
-        assert config["cache_validation_enabled"] is None
         assert config["caching_enabled"] is None
-        assert config["intent_split_enabled"] is None
+        assert config["shared_cache"] is False
+        assert config["question_normalization_enabled"] is False
+        assert config["cache_validation_enabled"] is False
+        assert config["cache_write_validation_enabled"] is False
+        assert config["intent_split_enabled"] is False
 
     def test_caching_enabled_preserved_when_set(self, gateway_routes):
         """A user who explicitly disables semantic caching at create time must
