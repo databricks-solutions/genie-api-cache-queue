@@ -171,7 +171,7 @@ export default function RouterSettingsTab({ routerCfg, onUpdate }) {
             type="text"
             value={form.mlflow_experiment_path}
             onChange={(e) => setField('mlflow_experiment_path', e.target.value)}
-            placeholder="/Users/you@databricks.com/router-traces"
+            placeholder="/Users/<your-username>/router-traces"
             className="w-full h-8 px-2 border border-dbx-border-input rounded text-[13px] bg-dbx-bg font-mono"
           />
         </Field>

@@ -54,57 +54,34 @@ Two caches stack: the **routing cache** skips the selector LLM on repeat questio
 
 ### 1. Deploy with the Asset Bundle
 
-The repo ships a Databricks Asset Bundle (`databricks.yml`) plus a Makefile and post-deploy hook. One command does the full chain:
+The repo ships a pure-DAB single-deploy pattern (Option C — see `docs/dab_chicken_egg_findings.md`). No `make` wrapper, no `install.sh`, no `resolve_database.sh`, no DB-ID lookup — just `databricks bundle …` directly.
 
 ```bash
-make deploy
+# First-time setup for a target (run all three in order):
+databricks bundle deploy --target dev --profile fevm                   # builds frontend + uploads + provisions
+databricks bundle run init_lakebase_role --target dev --profile fevm   # bootstraps SP role + grants + schema
+databricks bundle run gateway --target dev --profile fevm              # triggers app source rollout
+
+# Prod: same three commands with --target prod
 ```
 
-Which runs, in **this order** (the order is load-bearing):
+The bundle deploys under `/Workspace/apps/.bundle/${bundle.name}/${bundle.target}` — DAB creates the parent directories on first deploy. Optionally grant the relevant group `CAN_MANAGE` on `/Workspace/apps` if multiple developers will deploy.
 
-1. **`make build`** — `cd frontend && npm install && npm run build`, plus a git-derived `backend/app/_version.py`.
-2. **`make bundle-deploy`** — `databricks bundle deploy --target fevm`. Creates the Lakebase `database_instance` and the Databricks App with OAuth scopes. The app is intentionally created **without** a Lakebase resource attachment — see the gotcha below.
-3. **`make post-deploy`** — `python3 scripts/post_deploy.py`. Reads the app's SP UUID, grants the SP `CAN_MANAGE` on the instance, connects to Postgres as the deployer (via ephemeral creds), runs `databricks_create_role` + `GRANT CONNECT, CREATE`, resolves a schema fallback if needed, then PATCHes the Lakebase resource attachment onto the app.
-4. **`make bundle-run`** — `databricks bundle run gateway`. Triggers the app source rollout. By now the SP role + resource attachment exist, so the app boots cleanly into ACTIVE.
+**What each command does:**
 
-**Why post-deploy comes before bundle-run, not after:** if the app is started with the Lakebase resource attachment but the SP's Postgres role doesn't yet exist in the instance, the apps service tries to `GRANT CAN_CONNECT_AND_CREATE` on a non-existent role and the app lands in `ERROR` with `Role <uuid> not found in instance`. Creating the role first sidesteps the chicken-and-egg.
+1. **`databricks bundle deploy`** — Runs `scripts/build.sh` automatically via the `experimental.scripts.predeploy` hook in `databricks.yml` (vite build + `git describe` → `backend/app/_version.py`), then uploads files and provisions the Lakebase project + branch (dev only — prod uses the auto-created `production` branch), the Databricks App with OAuth scopes, and the `init_lakebase_role` job.
+2. **`databricks bundle run init_lakebase_role`** — Runs `setup_notebooks/init_lakebase_role` on serverless: grants the app SP `CAN_MANAGE` on the project, creates the SP's Postgres role + grants, creates the cache schema with `AUTHORIZATION <sp>`. Idempotent — only needs to re-run if you rotated the SP (destroy + recreate) or changed `schema_name`.
+3. **`databricks bundle run gateway`** — Triggers the app source rollout. By now the SP role + schema exist, so the app boots cleanly.
 
-Iterative dev loop after the first full deploy:
+**Why init is a separate `bundle run`:** Lakebase Autoscaling's auto-created `databricks_postgres` database has a non-deterministic resource ID, which DAB cannot reference (`${resources.postgres_branches.X.default_database_id}` doesn't exist).
+
+**Iterative dev loop after the first full deploy:**
 
 ```bash
-make build && make bundle-deploy && make bundle-run   # source change
-make bundle-deploy && make bundle-run                 # config-only change
+databricks bundle deploy --target dev --profile fevm && \
+    databricks bundle run gateway --target dev --profile fevm        # source change
+databricks bundle deploy --target dev --profile fevm                 # config-only change (no app restart)
 ```
-
-`make post-deploy` only needs to re-run if you rotated the SP (delete + recreate the app) or changed `LAKEBASE_SCHEMA` in `app.yaml`.
-
-> **OAuth scope reminder:** the bundle requests `sql`, `serving.serving-endpoints`, `dashboards.genie`. If you update scopes on a running app, sign out and back in — OAuth tokens already issued to your browser do not retroactively gain new scopes.
-
-**Other targets:**
-
-| Command | What it does |
-|---|---|
-| `make validate` | `databricks bundle validate --target fevm` — schema check, no deploy |
-| `make logs` | Tail app logs via `databricks apps logs --follow` |
-| `make destroy` | `databricks bundle destroy` — tear down the v2 stack (Lakebase name then sits in a soft-delete reservation window of ~1–2 minutes) |
-
-**MLflow tracing:** there is no install-time experiment. Open the v2 app, edit a router, set **MLflow experiment path** in the Settings tab; the app creates the experiment lazily via `tracing.ensure_experiment()` on save and grants itself permission to append runs.
-
-**Names:** the bundle deploys under `genie-gateway-v2` (app + Lakebase instance) and `genie_cache_v2` (schema). To run multiple stacks in parallel (e.g. dev + prod), override the variables: `databricks bundle deploy --target fevm --var=app_name=genie-gateway-mine ...`.
-
-#### Deploy gotchas (verified on FEVM, 2026-05-05)
-
-These are real footguns we hit while shipping the bundle. Each one is now handled by the Makefile / `post_deploy.py`, but if you customize the bundle, keep them in mind.
-
-| # | Gotcha | Fix in this repo |
-|---|---|---|
-| 1 | Default bundle engine fails downloading Terraform (`openpgp: key expired`). | Makefile sets `DATABRICKS_BUNDLE_ENGINE=direct` so the CLI talks to resource APIs directly without Terraform. |
-| 2 | `resources.apps.gateway.config` (command + env) is silently dropped by the direct engine — debug log says `unknown field: config`. | `app.yaml` at the source root is the source of truth for command + env. `databricks.yml` deliberately omits `config`. |
-| 3 | Apps `PATCH /api/2.0/apps/{name}` has **no** `update_mask`. Sending a partial body **clears** other top-level fields (e.g. PATCHing only `config` wipes `user_api_scopes` and `resources`). | `post_deploy.py` always sends the full `user_api_scopes` + `resources` payload together when it patches. |
-| 4 | Lakebase credential API moved. The legacy `/api/2.0/postgres/credentials {endpoint:<n>}` rejects v2 instance names with `Endpoint name expects 'projects/.../endpoints/...' format`. | `post_deploy.py` calls `/api/2.0/database/credentials {instance_names: […], request_id: <uuid>}` first, falls back to legacy. |
-| 5 | First `bundle deploy` after a prior `destroy` can fail with `Instance name is not unique` for ~1–2 minutes (Lakebase soft-delete reservation). | Wait, then re-run `make bundle-deploy`. The Makefile does not auto-retry — diagnose, don't loop blindly. |
-| 6 | Attaching `database` to an app at create time fails if the SP's Postgres role doesn't exist yet — app stuck in `ERROR: Role <uuid> not found in instance`. | `databricks.yml` deliberately omits the app's `resources:` block; `post_deploy.py` PATCHes it on after creating the SP role. |
-| 7 | If something connects to Lakebase as the deployer before the SP role exists, schemas are created under deployer ownership. Subsequent post-deploy detects this and falls back to `<schema>_<sp-prefix>` — but `app.yaml` is static so the new schema name doesn't take effect. | `post_deploy.py` logs an ERROR with the resolved name and tells you to update `app.yaml` and re-run. Alternatively, drop the misowned schema manually: `DROP SCHEMA <name> CASCADE`. |
 
 ### 2. Create a Gateway
 
@@ -204,7 +181,7 @@ The router never introspects the caller's bearer — it forwards the token uncha
 
 From the **Routers** entry in the sidebar, click **+** to create one:
 
-> **TODO:** add screenshot at `docs/screenshots/11-router-list.png`.
+![Router List](docs/screenshots/11-router-list.png)
 
 | Field | Description |
 |-------|-------------|
@@ -216,14 +193,18 @@ Then open the new router and use the **Members** tab to attach gateways one by o
 
 ### Router tabs
 
-> **TODO:** add screenshots at `docs/screenshots/12-router-overview.png`, `13-router-members.png`, `14-router-preview.png`.
-
 | Tab | What it does |
 |-----|--------------|
 | **Overview** | Description, owner, decompose / routing-cache toggles, selector model, MLflow experiment path. |
 | **Members** | Add/edit/remove gateways. Per-member fields: `title`, `when_to_use` (instructional hint the selector reads — include "use for…" *and* "NOT for…" clauses), `tables` (one per line), `sample_questions` (one per line), `disabled`. |
 | **Preview** | Run the selector without dispatching. Quick way to iterate on `when_to_use` hints without burning warehouse or Genie quota. |
 | **Settings** | Identity, selector model + system-prompt overrides, decompose toggle, routing-cache toggle, similarity threshold, cache TTL, MLflow experiment path, and a flush-routing-cache button. |
+
+![Router Overview](docs/screenshots/12-router-overview.png)
+
+![Router Members](docs/screenshots/13-router-members.png)
+
+![Router Preview](docs/screenshots/14-router-preview.png)
 
 ### Router configuration reference
 
@@ -298,7 +279,7 @@ Global settings are persisted to Lakebase (the `global_settings` table in the ap
 
 Lakebase (pgvector) is the storage backend for all cached queries. Inside Databricks Apps, the app automatically uses its **built-in Service Principal** — no manual credential configuration required.
 
-> **Tip:** If you deployed with `make deploy`, Lakebase provisioning is handled by the bundle (`databricks.yml`) and SP grants + PostgreSQL role creation are handled by `scripts/post_deploy.py`. The steps below are only needed for manual deployments or troubleshooting.
+> **Tip:** If you deployed via the bundle commands above, Lakebase provisioning is handled by `databricks.yml` and SP grants + PostgreSQL role creation are handled by `setup_notebooks/init_lakebase_role` (run via `databricks bundle run init_lakebase_role --target <T>`). The steps below are only needed for manual deployments or troubleshooting.
 
 ### 1. Grant the App's SP Access to Lakebase
 
@@ -541,12 +522,15 @@ The notebook auto-detects your username and loads the `.env` from there.
 ## Continuous Deployment
 
 ```bash
-# Re-deploy after code changes
-make build && make bundle-deploy && make bundle-run
+# Re-deploy after code changes (build runs automatically via the predeploy hook)
+databricks bundle deploy --target dev --profile dev
+databricks bundle run gateway --target dev --profile dev
 
-# View logs
-make logs
-# or: databricks apps logs genie-gateway-v2 --profile fevm --follow
+# View logs (the script resolves the deployed app name from `bundle summary`)
+TARGET=dev PROFILE=dev ./scripts/logs.sh
+TARGET=prod PROFILE=prod ./scripts/logs.sh
+# or directly: databricks apps logs genie-gateway --profile fevm --follow        # prod
+#               databricks apps logs dev-gateway-<friendly> --profile fevm --follow  # dev
 ```
 
 ## Credits

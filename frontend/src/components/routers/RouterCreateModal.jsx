@@ -58,7 +58,7 @@ export default function RouterCreateModal({ open, onClose, onCreated }) {
           type="text"
           value={mlflowPath}
           onChange={(e) => setMlflowPath(e.target.value)}
-          placeholder="/Users/you@databricks.com/router-traces"
+          placeholder="/Users/<your-username>/router-traces"
           className="w-full h-9 px-3 border border-dbx-border-input rounded text-[13px] text-dbx-text focus:outline-none focus:border-dbx-blue bg-dbx-bg font-mono"
         />
         <div className="text-[12px] text-dbx-text-secondary mt-1">

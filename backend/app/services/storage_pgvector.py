@@ -24,6 +24,115 @@ def _to_utc_iso(dt) -> Optional[str]:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat() + 'Z'
 
+
+def _derive_endpoint_path() -> Optional[str]:
+    """Compose Lakebase endpoint resource path at startup.
+
+    Format: projects/{project}/branches/{branch}/endpoints/primary
+
+    Inputs (in priority order):
+      1. LAKEBASE_ENDPOINT — explicit override (used by the future Option A
+         migration once LKB-11750 ships and the platform binds the resource
+         again, restoring `valueFrom: postgres`).
+      2. LAKEBASE_PROJECT_ID + DATABRICKS_APP_NAME — the Option C path:
+         project_id is hardcoded in app.yaml; the branch is parsed from the
+         Apps-runtime-injected app name following the bundle's naming convention:
+           - 'dev-gateway-<friendly>' → branch 'dev-<friendly>'
+                                        (friendly = domain_friendly_name)
+           - 'genie-gateway'          → branch 'production'
+    """
+    direct = os.environ.get("LAKEBASE_ENDPOINT")
+    if direct:
+        return direct
+    project = os.environ.get("LAKEBASE_PROJECT_ID")
+    app_name = os.environ.get("DATABRICKS_APP_NAME")
+    if not project or not app_name:
+        return None
+    if app_name.startswith("dev-gateway-"):
+        # 'dev-gateway-<friendly>' → 'dev-<friendly>'
+        friendly = app_name[len("dev-gateway-"):]
+        branch = f"dev-{friendly}"
+    elif app_name == "genie-gateway":
+        branch = "production"
+    else:
+        # Unknown shape — log and bail; caller will hit the connection_string
+        # fallback or raise a clearer error.
+        logger.warning(
+            "DATABRICKS_APP_NAME=%r doesn't match expected dev/prod naming; "
+            "falling back to no endpoint",
+            app_name,
+        )
+        return None
+    return f"projects/{project}/branches/{branch}/endpoints/primary"
+
+
+def _resolve_endpoint_host(ws_client, endpoint_path: str) -> Optional[str]:
+    """Resolve PGHOST for the given Lakebase endpoint resource path.
+
+    The Lakebase Autoscaling SDK is in flux. Try the typed API first, then fall
+    back to a raw GET on /api/2.0/postgres/projects/{p}/branches/{b}/endpoints
+    (mirrors the pattern used by scripts/install.sh:610-639).
+    """
+    # Typed SDK path — preferred when available.
+    try:
+        endpoint = ws_client.postgres.endpoints.get(endpoint_path)
+    except AttributeError:
+        endpoint = None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("postgres.endpoints.get(%s) failed: %s — trying raw API", endpoint_path, e)
+        endpoint = None
+
+    if endpoint is not None:
+        # Various SDK shapes seen in the wild — accept any of them.
+        for path in (
+            ("status", "hosts", "host"),
+            ("status", "host"),
+            ("hosts", "host"),
+            ("read_write_dns",),
+        ):
+            target = endpoint
+            for attr in path:
+                target = getattr(target, attr, None)
+                if target is None:
+                    break
+            if isinstance(target, str) and target:
+                return target
+
+    # Raw API fallback — parse out a host field.
+    try:
+        # endpoint_path = projects/<p>/branches/<b>/endpoints/<id>
+        parts = endpoint_path.split("/")
+        if len(parts) < 6 or parts[0] != "projects" or parts[2] != "branches":
+            logger.error("Unexpected endpoint path shape: %s", endpoint_path)
+            return None
+        project = parts[1]
+        branch = parts[3]
+        resp = ws_client.api_client.do(
+            "GET",
+            f"/api/2.0/postgres/projects/{project}/branches/{branch}/endpoints",
+        )
+        endpoints = resp.get("endpoints", []) if isinstance(resp, dict) else []
+        for ep in endpoints:
+            # Match by full resource path or by trailing endpoint ID.
+            if ep.get("name") == endpoint_path or ep.get("name", "").endswith("/" + parts[-1]):
+                status = ep.get("status", {}) or {}
+                hosts = status.get("hosts", {}) or {}
+                host = hosts.get("host") or status.get("host") or ep.get("read_write_dns")
+                if host:
+                    return host
+        # If no exact match, try the first endpoint (single-endpoint branches).
+        if endpoints:
+            ep = endpoints[0]
+            status = ep.get("status", {}) or {}
+            hosts = status.get("hosts", {}) or {}
+            host = hosts.get("host") or status.get("host") or ep.get("read_write_dns")
+            if host:
+                logger.info("Endpoint name didn't match %s exactly; using first endpoint host=%s", endpoint_path, host)
+                return host
+    except Exception as e:  # noqa: BLE001
+        logger.error("Raw endpoint host lookup failed for %s: %s", endpoint_path, e)
+    return None
+
 # Lazy imports - only load when actually used to avoid dependency errors
 asyncpg = None
 register_vector = None
@@ -116,20 +225,31 @@ class PGVectorStorageService:
     async def initialize(self):
         """Initialize connection pool and ensure tables exist.
 
-        Lakebase Autoscaling on Databricks Apps: PGHOST / PGUSER / PGDATABASE
-        are auto-injected by the platform when an `apps.resources[].postgres`
-        block is declared in the bundle. LAKEBASE_ENDPOINT is bound to the
-        endpoint resource path (`projects/<id>/branches/<id>/endpoints/<id>`)
-        via `valueFrom: postgres` in app.yaml.
+        Two boot paths:
+
+        **Option C (current — pure-DAB without `apps.resources[].postgres`):**
+        The bundle does NOT declare a postgres resource on the app, so the
+        platform does NOT auto-inject PGHOST/PGUSER/PGDATABASE/LAKEBASE_ENDPOINT.
+        The app composes LAKEBASE_ENDPOINT from LAKEBASE_PROJECT_ID +
+        DATABRICKS_APP_NAME, resolves PGHOST via the Lakebase API, and reads
+        PGUSER (the SP UUID) from DATABRICKS_CLIENT_ID. PGDATABASE comes from
+        app.yaml. See docs/dab_chicken_egg_findings.md.
+
+        **Option A (future — post-2026-05-21, after LKB-11750):**
+        With `apps.resources[].postgres` restored, the platform auto-injects
+        PGHOST/PGUSER/PGDATABASE/PGPORT/PGSSLMODE and binds LAKEBASE_ENDPOINT
+        via `valueFrom: postgres`. The Option C derivation logic is a no-op
+        because the env vars are already populated.
 
         Per-checkout JWT rotation: `password=` accepts a callable, which
         asyncpg evaluates on each new connection establishment. Combined with
         `max_inactive_connection_lifetime=300s` (the default) and an ~1h token
         TTL, every connection in the pool is authenticated with a fresh token.
 
-        Local dev / non-Apps fallback: if the env vars aren't set, we fall back
-        to the legacy `connection_string` path (must include credentials). This
-        keeps unit tests and pure-Postgres local dev working.
+        Local dev / non-Apps fallback: if neither path produces a usable
+        endpoint, we fall back to the legacy `connection_string` path (must
+        include credentials). This keeps unit tests and pure-Postgres local dev
+        working.
         """
         _ensure_imports()
         import ssl as ssl_module
@@ -142,7 +262,20 @@ class PGVectorStorageService:
         user = os.environ.get("PGUSER")
         database = os.environ.get("PGDATABASE")
         port = int(os.environ.get("PGPORT", "5432"))
-        endpoint_path = os.environ.get("LAKEBASE_ENDPOINT")
+        endpoint_path = os.environ.get("LAKEBASE_ENDPOINT") or _derive_endpoint_path()
+
+        # Option C path: resolve missing PGHOST/PGUSER ourselves.
+        if endpoint_path and not host:
+            from databricks.sdk import WorkspaceClient
+            host = _resolve_endpoint_host(WorkspaceClient(), endpoint_path)
+            if host:
+                logger.info("Resolved PGHOST=%s from endpoint %s", host, endpoint_path)
+            else:
+                logger.error("Could not resolve PGHOST from endpoint %s", endpoint_path)
+        if endpoint_path and not user:
+            user = os.environ.get("DATABRICKS_CLIENT_ID")
+            if user:
+                logger.info("Using DATABRICKS_CLIENT_ID as PGUSER: %s", user)
 
         if host and user and database and endpoint_path:
             from databricks.sdk import WorkspaceClient

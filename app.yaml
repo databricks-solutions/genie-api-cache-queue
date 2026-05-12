@@ -1,14 +1,17 @@
-# Databricks Apps runtime config.
+# Databricks Apps runtime config — source of truth for command + env.
 #
-# This file is the source of truth for `command` and `env`. The bundle's
-# resources.apps.gateway.config block in databricks.yml is silently dropped
-# during `bundle deploy` (the direct engine warns "unknown field: config"),
-# so we cannot rely on the bundle to inject env vars.
+# This file is uploaded as part of the bundle's source_code_path and read by
+# the Apps runtime at container start. The bundle's resources.apps.gateway.config
+# block is silently dropped on CLI v0.295.0 (direct deploy engine warns
+# "unknown field: config"), so all env values live here.
 #
-# OAuth scopes + the attached Lakebase resource live in the bundle. On Lakebase
-# Autoscaling, declaring `apps.resources[].postgres` in the bundle triggers the
-# platform to auto-inject PGHOST / PGUSER / PGDATABASE / PGPORT / PGSSLMODE
-# and to bind the LAKEBASE_ENDPOINT env var below to the endpoint resource path.
+# The app does NOT declare apps.resources[].postgres in databricks.yml under
+# the Option C pattern (see docs/dab_chicken_egg_findings.md). Consequently
+# the platform does NOT auto-inject PGHOST/PGUSER/PGDATABASE/PGPORT/PGSSLMODE.
+# storage_pgvector.initialize() composes LAKEBASE_ENDPOINT from
+# LAKEBASE_PROJECT_ID + DATABRICKS_APP_NAME and resolves PGHOST via the
+# Lakebase API at startup. PGUSER is read from DATABRICKS_CLIENT_ID
+# (auto-injected by the Apps runtime).
 
 name: genie-gateway
 display_name: "Genie Gateway"
@@ -27,11 +30,20 @@ command:
 env:
   - name: STORAGE_BACKEND
     value: pgvector
-  # Endpoint resource path (`projects/<id>/branches/<id>/endpoints/<id>`) for
-  # WorkspaceClient.postgres.generate_database_credential().
-  - name: LAKEBASE_ENDPOINT
-    valueFrom: postgres
+  # Lakebase Autoscaling project ID — same for dev + prod (shared project).
+  # storage_pgvector composes the full endpoint path:
+  #   projects/${LAKEBASE_PROJECT_ID}/branches/<derived>/endpoints/primary
+  - name: LAKEBASE_PROJECT_ID
+    value: genie-cache
   - name: LAKEBASE_SCHEMA
-    value: genie_cache
+    value: genie_gateway
+  # Static PG params (PGHOST is resolved at startup; PGUSER comes from
+  # DATABRICKS_CLIENT_ID which the Apps runtime injects automatically).
+  - name: PGDATABASE
+    value: databricks_postgres
+  - name: PGPORT
+    value: "5432"
+  - name: PGSSLMODE
+    value: require
   - name: TRACING_ENABLED
     value: "true"
