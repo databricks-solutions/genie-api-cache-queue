@@ -80,6 +80,7 @@ _SETTING_TYPES: dict[str, Callable[[Any], Any]] = {
     "shared_cache": _coerce_bool,
     "question_normalization_enabled": _coerce_bool,
     "cache_validation_enabled": _coerce_bool,
+    "cache_write_validation_enabled": _coerce_bool,
     "intent_split_enabled": _coerce_bool,
     "caching_enabled": _coerce_bool,
     "embedding_provider": str,

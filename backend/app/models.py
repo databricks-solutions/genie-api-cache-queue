@@ -44,6 +44,7 @@ class RuntimeConfig(BaseModel):
     # Feature flags
     question_normalization_enabled: Optional[bool] = None  # LLM-based question normalization
     cache_validation_enabled: Optional[bool] = None  # LLM-based cache hit validation
+    cache_write_validation_enabled: Optional[bool] = None  # Heuristic write-time validation
     caching_enabled: Optional[bool] = None  # Enable/disable semantic cache entirely
     intent_split_enabled: Optional[bool] = None  # LLM-based intent split
 
@@ -165,6 +166,7 @@ class GatewayConfig(BaseModel):
     cache_ttl_hours: float = 24
     question_normalization_enabled: bool = False
     cache_validation_enabled: bool = False
+    cache_write_validation_enabled: bool = True
     caching_enabled: bool = True
     embedding_provider: str = "databricks"
     databricks_embedding_endpoint: str = "databricks-gte-large-en"
@@ -192,6 +194,7 @@ class GatewayCreateRequest(BaseModel):
     cache_ttl_hours: Optional[float] = None
     question_normalization_enabled: Optional[bool] = None
     cache_validation_enabled: Optional[bool] = None
+    cache_write_validation_enabled: Optional[bool] = None
     caching_enabled: Optional[bool] = None
     embedding_provider: Optional[str] = None
     databricks_embedding_endpoint: Optional[str] = None
@@ -210,6 +213,7 @@ class GatewayUpdateRequest(BaseModel):
     cache_ttl_hours: Optional[float] = None
     question_normalization_enabled: Optional[bool] = None
     cache_validation_enabled: Optional[bool] = None
+    cache_write_validation_enabled: Optional[bool] = None
     caching_enabled: Optional[bool] = None
     embedding_provider: Optional[str] = None
     databricks_embedding_endpoint: Optional[str] = None
@@ -221,3 +225,97 @@ class GatewayUpdateRequest(BaseModel):
     validation_model: Optional[str] = None
     intent_split_model: Optional[str] = None
     intent_split_enabled: Optional[bool] = None
+
+
+# --- Router CRUD models ---
+
+class RouterMember(BaseModel):
+    """A (router, gateway) edge carrying the catalog metadata the selector sees.
+
+    `when_to_use` is the critical routing hint and belongs on the edge (not the
+    gateway) so one gateway can play different roles in different routers.
+    """
+    router_id: str
+    gateway_id: str
+    ordinal: int = 0
+    title: str
+    when_to_use: str
+    tables: List[str] = []
+    sample_questions: List[str] = []
+    disabled: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class RouterConfig(BaseModel):
+    """Router configuration stored in the `routers` table."""
+    id: str
+    name: str
+    description: str = ""
+    status: str = "active"
+    selector_model: Optional[str] = None
+    selector_system_prompt: Optional[str] = None
+    decompose_enabled: bool = True
+    routing_cache_enabled: bool = True
+    shared_cache: bool = True  # True = global routing cache; False = per-identity
+    similarity_threshold: float = 0.92
+    cache_ttl_hours: int = 24
+    mlflow_experiment_path: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    members: Optional[List[RouterMember]] = None  # hydrated on GET /routers/{id}
+
+
+class RouterMemberCreateRequest(BaseModel):
+    gateway_id: str
+    title: Optional[str] = None  # defaults to gateway.name server-side if omitted
+    when_to_use: str
+    ordinal: Optional[int] = None
+    tables: Optional[List[str]] = None
+    sample_questions: Optional[List[str]] = None
+    disabled: Optional[bool] = None
+
+
+class RouterMemberUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    when_to_use: Optional[str] = None
+    ordinal: Optional[int] = None
+    tables: Optional[List[str]] = None
+    sample_questions: Optional[List[str]] = None
+    disabled: Optional[bool] = None
+
+
+class RouterCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    selector_model: Optional[str] = None
+    selector_system_prompt: Optional[str] = None
+    decompose_enabled: Optional[bool] = None
+    routing_cache_enabled: Optional[bool] = None
+    shared_cache: Optional[bool] = None
+    similarity_threshold: Optional[float] = None
+    cache_ttl_hours: Optional[int] = None
+    mlflow_experiment_path: Optional[str] = None
+    members: Optional[List[RouterMemberCreateRequest]] = None  # optional initial members
+
+
+class RouterUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    selector_model: Optional[str] = None
+    selector_system_prompt: Optional[str] = None
+    decompose_enabled: Optional[bool] = None
+    routing_cache_enabled: Optional[bool] = None
+    shared_cache: Optional[bool] = None
+    similarity_threshold: Optional[float] = None
+    cache_ttl_hours: Optional[int] = None
+    mlflow_experiment_path: Optional[str] = None
+
+
+class RouterQueryRequest(BaseModel):
+    """Body for POST /routers/{id}/query and /preview (Phase 2 endpoints)."""
+    question: str
+    hints: Optional[List[str]] = None
+    session_id: Optional[str] = None

@@ -1,0 +1,219 @@
+# Databricks Asset Bundle for Genie Gateway.
+#
+# Pure-DAB single-deploy pattern (Option C from docs/dab_chicken_egg_findings.md).
+# Three pure-DAB commands replace the legacy two-stage install.sh chain:
+#
+#   databricks bundle deploy --target dev
+#   databricks bundle run init_lakebase_role --target dev   (one-time per branch)
+#   databricks bundle run gateway --target dev
+#
+# What this bundle owns:
+#   - postgres_projects.gateway              (dev target only; shared across both targets)
+#   - postgres_branches.gateway_branch       (dev target only — per-developer branch)
+#   - apps.gateway                           (per-target; no resources[].postgres binding)
+#   - jobs.init_lakebase_role                (per-target; runs notebook to bootstrap SP role + grants + schema)
+#
+# Why no `apps.resources[].postgres`:
+#   Lakebase Autoscaling auto-creates the default `databricks_postgres` database with
+#   a non-deterministic resource ID (e.g. `db-ayzn-8qdqwvabqp`). DAB cannot reference
+#   it (no `${resources.postgres_branches.X.default_database_id}` interpolation).
+#   LKB-11750 ships a stable hyphenated name (`databricks-postgres`) on 2026-05-21 —
+#   after that we'll migrate to Option A (restore the binding + drop the init job).
+#
+# How the app finds Postgres without the binding:
+#   - LAKEBASE_PROJECT_ID is hardcoded in app.yaml (`genie-cache`).
+#   - Branch is derived from DATABRICKS_APP_NAME at startup
+#     (`dev-gateway-<friendly>` → `dev-<friendly>`; bare `genie-gateway` → `production`).
+#   - PGHOST is resolved via the Lakebase API at startup (see storage_pgvector.initialize).
+#   - PGUSER is the SP UUID, read from DATABRICKS_CLIENT_ID (auto-injected).
+#   - JWT mint via WorkspaceClient.postgres.generate_database_credential() rotates per connection.
+#
+# Targets (no `mode: development` / `mode: production` — both enforce
+# username-in-path on `workspace.root_path`, incompatible with the centralized
+# `/Workspace/apps/` layout below):
+#   - dev:  per-developer branch keyed on ${workspace.current_user.domain_friendly_name}.
+#   - prod: shared `production` branch (auto-created with the project).
+#
+# Bundle workspace layout (centralized — not in user home dirs):
+#   /Workspace/apps/                            ← parent (group-permissionable)
+#     .bundle/genie-gateway/
+#       prod/                                   ← prod target (single shared state)
+#       dev/<domain_friendly_name>/             ← per-developer dev state (avoids
+#                                                 cross-deployer rename bulldoze
+#                                                 since apps.gateway resource key
+#                                                 is shared)
+# DAB auto-creates the parent dirs on first deploy (verified empirically with
+# `bundle sync` 2026-05-11). Optionally grant a group `CAN_MANAGE` on
+# `/Workspace/apps` afterwards if multiple developers will deploy.
+
+bundle:
+  name: genie-gateway
+  engine: direct
+
+
+
+# Lifecycle hook: experimental scripts block (CLI ≥0.295; hook names per
+# bundle/config/experimental.go in databricks/cli). Marked experimental in
+# the CLI source, so the semantics may shift — fall back to a manual
+# `./scripts/build.sh && databricks bundle deploy ...` if a future CLI
+# upgrade breaks it.
+experimental:
+  scripts:
+    # Frontend build (npm install + vite build + git-version inject) runs
+    # automatically before `databricks bundle deploy` uploads files. Output
+    # lands in frontend/dist/, which the sync block below includes in the upload.
+    predeploy: ./scripts/build.sh
+
+# Centralized bundle root — out of /Workspace/Users/ so multiple developers can
+# deploy without binding state to one person's home. Dev target overrides this
+# with a per-developer subdir; prod inherits as-is.
+workspace:
+  root_path: /Workspace/apps/.bundle/${bundle.name}/${bundle.target}
+
+# .gitignore excludes `frontend/dist/` (it's a build output), but the deployed
+# app serves the bundled frontend from there. Override the gitignore for
+# bundle sync so the predeploy hook's build outputs are uploaded.
+sync:
+  include:
+    - frontend/dist/**
+
+variables:
+  app_name:
+    description: "Name of the Databricks App. Used as resource name + URL slug."
+    default: genie-gateway
+  project_id:
+    description: "Lakebase Autoscaling project ID. Lowercase + hyphens, 1-63 chars."
+    default: genie-cache
+  schema_name:
+    description: "Postgres schema for cache tables. Owned by the app SP."
+    default: genie_gateway
+  branch_id:
+    description: |
+      Lakebase branch ID. Overridden per-target:
+        * dev  → dev-${workspace.current_user.domain_friendly_name}
+                 (e.g. `dev-alex-witt`; domain_friendly_name is already
+                 lowercase-hyphenated so it satisfies Lakebase's branch_id
+                 regex without sanitization).
+        * prod → production
+      Override via `--var "branch_id=foo"` if you need a custom branch.
+    default: "dev-${workspace.current_user.domain_friendly_name}"
+
+# Project is owned by dev target only. DAB tracks resource state per-target, so
+# declaring the same `postgres_projects` resource in both targets errors with
+# "project already exists" on whichever target deploys second. Prod references
+# the project by string path (`projects/${var.project_id}/...`) and uses the
+# auto-created `production` branch.
+
+targets:
+  dev:
+    # No `mode: development`: that mode enforces `root_path` to start with `~/`
+    # or include the deployer's email, which is incompatible with our centralized
+    # `/Workspace/apps/` layout. We get the equivalent guarantees explicitly:
+    # the per-developer subdir below isolates state, and `app_name` already
+    # carries an explicit `dev-gateway-<friendly>` namespace.
+    default: true
+    # Per-developer subdir under the shared /Workspace/apps/ parent. Required
+    # because the bundle resource key `apps.gateway` is shared across deploys:
+    # if two developers shared a single dev workspace path, DAB would see
+    # ${var.app_name} resolve to a new value on each deployer's deploy and
+    # plan a RENAME of the previous developer's running app. Per-developer
+    # state isolation prevents that bulldoze.
+    workspace:
+      root_path: /Workspace/apps/.bundle/${bundle.name}/${bundle.target}/${workspace.current_user.domain_friendly_name}
+    variables:
+      # App names have a 30-char max. The `dev-gateway-` prefix is 12 chars,
+      # leaving 18 chars for ${domain_friendly_name} (e.g. `alex-witt` = 9).
+      # `genie-` is dropped from the dev prefix as redundant — the bundle is
+      # already named genie-gateway and prod's app is `genie-gateway`, so
+      # `dev-gateway-<friendly>` is unambiguous.
+      app_name:
+        default: "dev-gateway-${workspace.current_user.domain_friendly_name}"
+    resources:
+      postgres_projects:
+        gateway:
+          project_id: ${var.project_id}
+          display_name: "Genie Cache"
+          pg_version: 17
+      postgres_branches:
+        gateway_branch:
+          parent: ${resources.postgres_projects.gateway.id}
+          branch_id: ${var.branch_id}
+          # no_expiry keeps the branch alive across redeploys; without this,
+          # idle branches can be auto-pruned.
+          no_expiry: true
+      apps:
+        gateway:
+          name: ${var.app_name}
+          description: "Genie Gateway: cache + queue + router fronting Genie API"
+          source_code_path: ${workspace.file_path}
+          user_api_scopes:
+            - sql
+            - serving.serving-endpoints
+            - dashboards.genie
+      jobs:
+        init_lakebase_role:
+          name: ${var.app_name}-init-lakebase-role
+          description: "Bootstrap Lakebase SP role + grants + schema for the gateway app. Idempotent."
+          # Serverless compute via job environments (notebook task references
+          # environment_key below). Avoids a 5-minute classic-cluster cold start
+          # for a 30-second bootstrap notebook.
+          environments:
+            - environment_key: serverless
+              spec:
+                client: "2"
+          tasks:
+            - task_key: init
+              environment_key: serverless
+              notebook_task:
+                notebook_path: ${workspace.file_path}/setup_notebooks/init_lakebase_role
+                base_parameters:
+                  project_id: ${var.project_id}
+                  branch_id: ${var.branch_id}
+                  app_name: ${var.app_name}
+                  schema_name: ${var.schema_name}
+
+  prod:
+    # No `mode: production`: that mode requires `root_path` to include the
+    # deployer's username, conflicting with our shared-state prod layout under
+    # `/Workspace/apps/`. The explicit `permissions:` block below provides the
+    # access control that `mode: production` would have asserted.
+    variables:
+      branch_id:
+        default: production
+    # No postgres_projects / postgres_branches declared — prod uses dev-target's
+    # project and the auto-created `production` branch.
+    resources:
+      apps:
+        gateway:
+          name: ${var.app_name}
+          description: "Genie Gateway: cache + queue + router fronting Genie API"
+          source_code_path: ${workspace.file_path}
+          user_api_scopes:
+            - sql
+            - serving.serving-endpoints
+            - dashboards.genie
+      jobs:
+        init_lakebase_role:
+          name: ${var.app_name}-init-lakebase-role
+          description: "Bootstrap Lakebase SP role + grants + schema for the gateway app. Idempotent."
+          environments:
+            - environment_key: serverless
+              spec:
+                client: "2"
+          tasks:
+            - task_key: init
+              environment_key: serverless
+              notebook_task:
+                notebook_path: ${workspace.file_path}/setup_notebooks/init_lakebase_role
+                base_parameters:
+                  project_id: ${var.project_id}
+                  branch_id: production
+                  app_name: ${var.app_name}
+                  schema_name: ${var.schema_name}
+    permissions:
+      - user_name: ${workspace.current_user.userName}
+        level: CAN_MANAGE
+    # workspace.root_path inherits the top-level default:
+    #   /Workspace/apps/.bundle/${bundle.name}/prod
+    # Single shared state for prod is intentional — one source of truth for
+    # the production deploy regardless of which deployer runs `bundle deploy`.

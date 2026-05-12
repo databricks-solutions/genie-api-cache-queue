@@ -25,6 +25,9 @@ docs/
 notebooks/
 scripts/
 
+# Sibling router app (has its own install.sh / deploy flow)
+router/
+
 # Development files
 docker-compose.pgvector.yml
 .env

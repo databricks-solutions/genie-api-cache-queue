@@ -10,13 +10,14 @@ returns only the portion belonging to the latest intent, so downstream embedding
 and cache lookup operates on a single coherent question.
 """
 
-import json
 import logging
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 
 from app.config import get_settings
+from app.services import tracing
+from app.services.llm_json import JSON_INSTRUCTION, invoke_json, parse_json_content
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -43,6 +44,7 @@ verbatim as the latest intent.
 
 Respond ONLY with a JSON object matching exactly this schema:
 {{"latest_intent": "<the portion of the conversation belonging to the latest intent, verbatim>"}}
+{json_instruction}
 
 {space_context}
 
@@ -70,20 +72,12 @@ def _get_workspace_client(runtime_settings=None) -> tuple[WorkspaceClient, str]:
     return client, endpoint
 
 
-def _parse_latest_intent(content: str) -> str | None:
-    """Parse the LLM response and extract the `latest_intent` field.
+def _extract_latest_intent(parsed) -> str | None:
+    """Extract `latest_intent` from an already-parsed dict.
 
-    Returns the trimmed string on success, or None on any parse failure
-    (invalid JSON, missing key, non-string value, empty after strip).
+    Returns the trimmed string on success, or None on missing/non-string/
+    empty value.
     """
-    if not isinstance(content, str):
-        return None
-
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-
     if not isinstance(parsed, dict):
         return None
 
@@ -93,6 +87,23 @@ def _parse_latest_intent(content: str) -> str | None:
 
     result = result.strip()
     return result or None
+
+
+def _parse_latest_intent(content: str) -> str | None:
+    """Parse a JSON string from the LLM response and extract `latest_intent`.
+
+    Tolerates ```json fences (Claude-style). Returns None on any parse
+    failure or non-coercible value.
+    """
+    if not isinstance(content, str):
+        return None
+
+    try:
+        parsed = parse_json_content(content)
+    except ValueError:
+        return None
+
+    return _extract_latest_intent(parsed)
 
 
 async def split_by_intent(context_text: str, runtime_settings=None, space_context: str = "") -> str:
@@ -105,27 +116,52 @@ async def split_by_intent(context_text: str, runtime_settings=None, space_contex
     try:
         client, endpoint = _get_workspace_client(runtime_settings)
 
-        prompt = _INTENT_SPLIT_PROMPT_TEMPLATE.format(context_text=context_text, space_context=space_context)
-
-        response = client.api_client.do(
-            "POST",
-            f"/serving-endpoints/{endpoint}/invocations",
-            body={
-                "messages": [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"},
-            },
+        prompt = _INTENT_SPLIT_PROMPT_TEMPLATE.format(
+            context_text=context_text,
+            space_context=space_context,
+            json_instruction=JSON_INSTRUCTION,
         )
 
-        content = response["choices"][0]["message"]["content"]
-        result = _parse_latest_intent(content)
+        with tracing.span(
+            "gateway.intent_split",
+            span_type="LLM",
+            inputs={"context_text": context_text},
+            attributes={"model": endpoint},
+        ) as s:
+            try:
+                parsed = invoke_json(
+                    client,
+                    endpoint,
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                )
+            except ValueError as parse_err:
+                s.set_outputs({
+                    "result": None,
+                    "fallback": "parse_failed",
+                    "raw": str(parse_err)[:200],
+                })
+                logger.warning(
+                    "Intent splitter: unparseable response — returning original context (%s)",
+                    parse_err,
+                )
+                return context_text
 
-        if result is None:
-            preview = content[:120] if isinstance(content, str) else content
-            logger.warning(
-                "Intent splitter: unparseable response %r — returning original context",
-                preview,
-            )
-            return context_text
+            result = _extract_latest_intent(parsed)
+
+            if result is None:
+                s.set_outputs({
+                    "result": None,
+                    "fallback": "parse_failed",
+                    "raw": parsed,
+                })
+                logger.warning(
+                    "Intent splitter: unrecognized response shape %r — returning original context",
+                    parsed,
+                )
+                return context_text
+
+            s.set_outputs({"result": result})
 
         logger.info(
             "Intent splitter: original=%r... result=%r...",

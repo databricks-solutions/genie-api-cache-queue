@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import logging
+import time as _time
 import uuid
 import asyncio
 import httpx
@@ -29,8 +30,14 @@ from app.utils import exponential_backoff
 from app.services.intent_splitter import split_by_intent
 from app.services.question_normalizer import normalize_question
 from app.services.cache_validator import validate_cache_entry
+from app.services.cache_write_validator import evaluate_cache_write
 from app.services.prompt_enricher import get_space_context
 from app.services.rate_limiter import get_rate_limiter as _get_rate_limiter
+from app.services import tracing
+from app.api.cache_hit_helpers import (
+    classify_cache_hit_exec as _classify_cache_hit_exec,
+    build_cache_hit_response as _build_cache_hit_response,
+)
 import app.services.database as _db
 
 _rate_limiter = _get_rate_limiter()
@@ -44,38 +51,117 @@ genie_clone_router = APIRouter()
 # In-memory store for synthetic (cache / queued) messages & attachments
 # ---------------------------------------------------------------------------
 _synthetic_messages: dict[str, dict] = {}
+_synthetic_first_seen: dict[str, float] = {}
 _message_locks: dict[str, asyncio.Lock] = {}
 _sweep_lock = asyncio.Lock()
 _SYNTHETIC_MAX = 2000
+# 1h — generous enough for slow-polling Clone API consumers (mobile clients
+# backgrounded between polls, batch jobs) without making the size cap
+# meaningful in practice. The Clone API previously evicted only on the size
+# cap, so a TTL shorter than this would 404 valid IDs that the old behaviour
+# kept alive. Memory is still bounded by _SYNTHETIC_MAX.
+_SYNTHETIC_TTL_S = 3600
+_SWEEP_INTERVAL_S = 60
+_sweep_task: asyncio.Task | None = None
 
 CONV_PREFIX = "ccache_"
 MSG_PREFIX = "mcache_"
 ATT_PREFIX = "acache_"
 
 
-async def _sweep_synthetic_messages():
-    """Evict oldest entries when the store exceeds _SYNTHETIC_MAX.
-    Acquires _sweep_lock to serialize access. Skips locked entries.
+def _remember_synthetic(msg_id: str, value: dict) -> None:
+    """Insert/replace a synthetic-message entry and stamp its first-seen time.
+
+    Use this instead of `_synthetic_messages[msg_id] = value` for new entries
+    so the TTL clock starts when the entry actually lands. In-place field
+    mutations on an existing entry don't refresh the stamp.
     """
-    overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
-    if overflow <= 0:
-        return
+    _synthetic_messages[msg_id] = value
+    if msg_id not in _synthetic_first_seen:
+        _synthetic_first_seen[msg_id] = _time.monotonic()
+
+
+def _evict_synthetic(k: str) -> None:
+    _synthetic_messages.pop(k, None)
+    _synthetic_first_seen.pop(k, None)
+    _message_locks.pop(k, None)
+
+
+async def _sweep_synthetic_messages():
+    """Evict expired and overflow entries from the synthetic-message store.
+
+    Two-pass eviction:
+      1. Age-based: drop entries first seen more than _SYNTHETIC_TTL_S ago.
+         Guarantees memory doesn't accumulate under bursty router fanout when
+         the store hasn't exceeded the size cap. Locked entries are skipped
+         (they belong to in-flight requests).
+      2. Size-based: if still over _SYNTHETIC_MAX, evict in insertion order
+         until back under the cap.
+
+    First-seen stamps are written by `_remember_synthetic` at insertion time
+    so the TTL window is honest; the sweep stamps any unstamped key
+    defensively (e.g. a future call site that wrote directly).
+    """
     async with _sweep_lock:
+        now = _time.monotonic()
+        # Defensive: stamp any untracked key so it eventually expires even if
+        # an insertion site bypassed _remember_synthetic.
+        for k in _synthetic_messages.keys():
+            _synthetic_first_seen.setdefault(k, now)
+
+        # Pass 1: age-based eviction.
+        for k in list(_synthetic_messages.keys()):
+            first_seen = _synthetic_first_seen.get(k, now)
+            if now - first_seen < _SYNTHETIC_TTL_S:
+                continue
+            lock = _message_locks.get(k)
+            if lock is not None and lock.locked():
+                continue
+            _evict_synthetic(k)
+
+        # Pass 2: size-based overflow (FIFO).
         overflow = len(_synthetic_messages) - _SYNTHETIC_MAX
         if overflow <= 0:
             return
         evicted = 0
-        skipped_locked = []
         for k in list(_synthetic_messages.keys()):
             if evicted >= overflow:
                 break
             lock = _message_locks.get(k)
             if lock is not None and lock.locked():
-                skipped_locked.append(k)
                 continue
-            _synthetic_messages.pop(k, None)
-            _message_locks.pop(k, None)
+            _evict_synthetic(k)
             evicted += 1
+
+
+async def _synthetic_sweep_loop():
+    """Background task: run sweep on a fixed interval so memory is bounded
+    even when no foreground requests trigger cache hit/miss codepaths."""
+    while True:
+        try:
+            await asyncio.sleep(_SWEEP_INTERVAL_S)
+            await _sweep_synthetic_messages()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("Synthetic-message sweep loop iteration failed")
+
+
+def start_synthetic_sweep_task() -> None:
+    global _sweep_task
+    if _sweep_task is None or _sweep_task.done():
+        _sweep_task = asyncio.create_task(_synthetic_sweep_loop())
+
+
+async def stop_synthetic_sweep_task() -> None:
+    global _sweep_task
+    if _sweep_task is not None and not _sweep_task.done():
+        _sweep_task.cancel()
+        try:
+            await _sweep_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        _sweep_task = None
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +259,7 @@ def _build_runtime_settings(token: str, space_id: str, gateway: dict = None):
         shared_cache=_coalesce(gw.get("shared_cache"), get_effective_setting("shared_cache")),
         question_normalization_enabled=_coalesce(gw.get("question_normalization_enabled"), get_effective_setting("question_normalization_enabled")),
         cache_validation_enabled=_coalesce(gw.get("cache_validation_enabled"), get_effective_setting("cache_validation_enabled")),
+        cache_write_validation_enabled=_coalesce(gw.get("cache_write_validation_enabled"), get_effective_setting("cache_write_validation_enabled")),
         caching_enabled=_coalesce(gw.get("caching_enabled"), get_effective_setting("caching_enabled")),
         intent_split_enabled=_coalesce(gw.get("intent_split_enabled"), get_effective_setting("intent_split_enabled")),
         normalization_model=_coalesce_model(gw.get("normalization_model"), get_effective_setting("normalization_model")),
@@ -291,35 +378,32 @@ async def _process_genie_background(
         # normalized form is only used for cache key / embedding.
         genie_query = original_query_text or query_text
         try:
-            if conversation_id and not conversation_id.startswith(CONV_PREFIX):
-                try:
-                    result = await genie_service.send_message(space_id, conversation_id, genie_query, rs)
-                except GenieConfigError:
-                    raise
-                except Exception:
-                    logger.warning("send_message failed, falling back to start_conversation")
+            with tracing.span(
+                "gateway.genie.start_conversation",
+                span_type="CHAIN",
+                inputs={"genie_query": genie_query, "space_id": space_id},
+                attributes={"conversation_id": conversation_id, "attempt": attempt},
+            ) as g_span:
+                if conversation_id and not conversation_id.startswith(CONV_PREFIX):
+                    try:
+                        result = await genie_service.send_message(space_id, conversation_id, genie_query, rs)
+                    except GenieConfigError:
+                        raise
+                    except Exception:
+                        logger.warning("send_message failed, falling back to start_conversation")
+                        result = await genie_service.start_conversation(space_id, genie_query, rs)
+                else:
                     result = await genie_service.start_conversation(space_id, genie_query, rs)
-            else:
-                result = await genie_service.start_conversation(space_id, genie_query, rs)
+                g_span.set_outputs({
+                    "status": result.get("status"),
+                    "has_sql": bool(result.get("sql_query")),
+                })
 
 
             if result.get("status") == "COMPLETED":
                 sql_query = result.get("sql_query", "")
-
-                if sql_query and query_embedding is not None:
-                    try:
-                        cache_id = await _db.db_service.save_query_cache(
-                            query_text, query_embedding, sql_query,
-                            identity, gateway_id or space_id, rs,
-                            original_query_text=original_query_text,
-                            genie_space_id=space_id,
-                        )
-                        logger.info("Background cache SAVED id=%s query=%s", cache_id, query_text[:50])
-                    except Exception as e:
-                        logger.error("Background cache save FAILED: %s", e, exc_info=True)
-                else:
-                    logger.warning("Background cache SKIPPED: sql=%s embedding=%s",
-                                   bool(sql_query), query_embedding is not None)
+                genie_text = result.get("genie_text")
+                genie_description = result.get("genie_description")
 
                 conv_id = CONV_PREFIX + msg_id[len(MSG_PREFIX):]
                 completed = _format_completed_response(conv_id, msg_id, att_id, sql_query)
@@ -337,23 +421,37 @@ async def _process_genie_background(
                     "auth_mode": auth_mode,
                 }
                 async with _get_message_lock(msg_id):
-                    _synthetic_messages[msg_id] = completed
-                    _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                    _remember_synthetic(msg_id, completed)
+                    _remember_synthetic(att_id, {"sql_query": sql_query, "token": token, "space_id": space_id})
                     for _att in completed.get("attachments", []):
                         if isinstance(_att, dict) and _att.get("query") and _att.get("attachment_id"):
-                            _synthetic_messages[_att["attachment_id"]] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+                            _remember_synthetic(_att["attachment_id"], {"sql_query": sql_query, "token": token, "space_id": space_id})
 
-                # Now execute SQL (poll arriving here sees stage=processing_genie, not received)
+                # Execute SQL FIRST (poll arriving here sees stage=processing_genie, not received)
+                # so the write-time validator can see row_count + columns + warehouse status
+                # before deciding whether to persist (question, SQL) into the pgvector cache.
                 actual_result = None
+                exec_succeeded = False
                 if sql_query:
                     try:
-                        sql_exec = await genie_service.execute_sql(sql_query, rs)
-                        if sql_exec.get("status") == "SUCCEEDED":
-                            actual_result = sql_exec.get("result")
+                        with tracing.span(
+                            "gateway.warehouse.execute_sql",
+                            span_type="CHAIN",
+                            inputs={"sql_query": sql_query},
+                        ) as wh_span:
+                            sql_exec = await genie_service.execute_sql(sql_query, rs)
+                            wh_status = sql_exec.get("status") if isinstance(sql_exec, dict) else None
+                            if wh_status == "SUCCEEDED":
+                                actual_result = sql_exec.get("result")
+                                exec_succeeded = True
+                            wh_span.set_outputs({
+                                "status": wh_status,
+                                "row_count": (actual_result or {}).get("row_count") if isinstance(actual_result, dict) else None,
+                            })
                     except Exception as e:
                         logger.warning("execute_sql after cache miss failed: %s", e)
 
-                # Update _proxy to final state
+                # Update _proxy to final state — caller's response is now ready.
                 async with _get_message_lock(msg_id):
                     _synthetic_messages[msg_id]["_proxy"] = {
                         "stage": "completed",
@@ -363,7 +461,90 @@ async def _process_genie_background(
                         "auth_mode": auth_mode,
                     }
 
-                # Save query log
+                # Cache-write decision. Only persist if the warehouse actually
+                # ran the SQL successfully AND the heuristic validator approves
+                # (non-empty rows, no Genie refusal text, output columns match
+                # the user's requested target if any).
+                cache_skip_reason: str | None = None
+                row_count: int | None = None
+                result_columns: list[str] | None = None
+                if isinstance(actual_result, dict):
+                    rc = actual_result.get("row_count")
+                    if isinstance(rc, int):
+                        row_count = rc
+                    cols = actual_result.get("columns")
+                    if isinstance(cols, list):
+                        result_columns = [
+                            c.get("name") if isinstance(c, dict) else c
+                            for c in cols
+                            if (isinstance(c, dict) and c.get("name")) or isinstance(c, str)
+                        ]
+
+                if not sql_query:
+                    cache_skip_reason = "no_sql"
+                elif query_embedding is None:
+                    cache_skip_reason = "no_embedding"
+                elif not exec_succeeded:
+                    cache_skip_reason = "exec_failed"
+                else:
+                    with tracing.span(
+                        "gateway.cache.write_validate",
+                        span_type="CHAIN",
+                        inputs={
+                            "question": original_query_text or query_text,
+                            "row_count": row_count,
+                            "columns": result_columns,
+                        },
+                        attributes={"enabled": rs.cache_write_validation_enabled},
+                    ) as wv_span:
+                        decision = evaluate_cache_write(
+                            question=original_query_text or query_text,
+                            sql_query=sql_query,
+                            row_count=row_count,
+                            columns=result_columns,
+                            genie_text=genie_text,
+                            enabled=rs.cache_write_validation_enabled,
+                        )
+                        wv_span.set_outputs({
+                            "should_write": decision.should_write,
+                            "reason": decision.reason,
+                            "detail": decision.detail,
+                        })
+                    if not decision.should_write:
+                        cache_skip_reason = decision.reason
+                        logger.warning(
+                            "cache_write SKIPPED reason=%s detail=%s query=%s",
+                            decision.reason, decision.detail, (original_query_text or query_text)[:80],
+                        )
+
+                if cache_skip_reason is None:
+                    try:
+                        with tracing.span(
+                            "gateway.cache.write",
+                            span_type="RETRIEVER",
+                            inputs={"query_text": query_text, "sql_query": sql_query},
+                            attributes={
+                                "gateway_id": gateway_id,
+                                "row_count": row_count,
+                            },
+                        ) as cw_span:
+                            cache_id = await _db.db_service.save_query_cache(
+                                query_text, query_embedding, sql_query,
+                                identity, gateway_id or space_id, rs,
+                                original_query_text=original_query_text,
+                                genie_space_id=space_id,
+                                row_count=row_count,
+                                result_columns=result_columns,
+                                genie_text=genie_text,
+                                genie_description=genie_description,
+                            )
+                            cw_span.set_outputs({"cache_id": cache_id})
+                            logger.info("Background cache SAVED id=%s row_count=%s query=%s",
+                                        cache_id, row_count, query_text[:50])
+                    except Exception as e:
+                        logger.error("Background cache save FAILED: %s", e, exc_info=True)
+
+                # Save query log — record skip reason + row_count for observability.
                 try:
                     await _db.db_service.save_query_log(
                         query_id=msg_id,
@@ -373,6 +554,8 @@ async def _process_genie_background(
                         from_cache=False,
                         gateway_id=gateway_id,
                         runtime_settings=rs,
+                        row_count=row_count,
+                        cache_skip_reason=cache_skip_reason,
                     )
                 except Exception as e:
                     logger.warning("Failed to save cache miss query log: %s", e)
@@ -380,14 +563,14 @@ async def _process_genie_background(
 
             # Non-COMPLETED terminal status
             async with _get_message_lock(msg_id):
-                _synthetic_messages[msg_id] = {
+                _remember_synthetic(msg_id, {
                     "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                     "message_id": msg_id,
                     "status": result.get("status", "FAILED"),
                     "attachments": [],
                     "error": result.get("error"),
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-                }
+                })
             return
 
         except GenieRateLimitError as e:
@@ -399,14 +582,14 @@ async def _process_genie_background(
         except GenieConfigError as e:
             logger.error("Non-retryable Genie error %d for msg_id=%s: %s", e.status_code, msg_id, e.detail)
             async with _get_message_lock(msg_id):
-                _synthetic_messages[msg_id] = {
+                _remember_synthetic(msg_id, {
                     "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                     "message_id": msg_id,
                     "status": "FAILED",
                     "attachments": [],
                     "error": {"error": e.detail, "type": "CONFIG_ERROR"},
                     "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-                }
+                })
             return
         except Exception as e:
             last_error = str(e)
@@ -421,14 +604,14 @@ async def _process_genie_background(
     # Fallback: all retries exhausted — ALWAYS set FAILED so client stops polling
     logger.error("Background processing failed for msg_id=%s: %s", msg_id, last_error)
     async with _get_message_lock(msg_id):
-        _synthetic_messages[msg_id] = {
+        _remember_synthetic(msg_id, {
             "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
             "message_id": msg_id,
             "status": "FAILED",
             "attachments": [],
             "error": {"error": last_error or "All retries exhausted", "type": "INTERNAL_ERROR"},
             "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-        }
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -463,13 +646,27 @@ async def _handle_query(
     query_embedding = None
     cached = None
     try:
-        query_embedding = embedding_service.get_embedding(query_text, rs)
-        logger.info("Embedding generated: len=%s for query=%s", len(query_embedding) if query_embedding else None, query_text[:40])
-        cache_namespace = gateway.get("id") if gateway else space_id
-        cached = await _db.db_service.search_similar_query(
-            query_embedding, identity, rs.similarity_threshold,
-            cache_namespace, rs, shared_cache=rs.shared_cache,
-        )
+        with tracing.span(
+            "gateway.cache.lookup",
+            span_type="RETRIEVER",
+            inputs={"query_text": query_text},
+            attributes={
+                "gateway_id": gateway.get("id") if gateway else None,
+                "similarity_threshold": rs.similarity_threshold,
+                "shared_cache": rs.shared_cache,
+            },
+        ) as cl_span:
+            query_embedding = embedding_service.get_embedding(query_text, rs)
+            logger.info("Embedding generated: len=%s for query=%s", len(query_embedding) if query_embedding else None, query_text[:40])
+            cache_namespace = gateway.get("id") if gateway else space_id
+            cached = await _db.db_service.search_similar_query(
+                query_embedding, identity, rs.similarity_threshold,
+                cache_namespace, rs, shared_cache=rs.shared_cache,
+            )
+            cl_span.set_outputs({
+                "hit": cached is not None,
+                "similarity": cached[3] if cached else None,
+            })
     except Exception as e:
         logger.warning("Cache lookup failed: %s — proceeding without cache", e)
 
@@ -487,62 +684,52 @@ async def _handle_query(
 
         conv_id, msg_id, att_id = _make_synthetic_ids()
 
-        # Execute the cached SQL to get fresh data
         sql_result = None
+        exec_error = None
         try:
-            sql_result = await genie_service.execute_sql(sql_query, rs)
+            with tracing.span(
+                "gateway.cache.hit.execute_sql",
+                span_type="CHAIN",
+                inputs={"sql_query": sql_query},
+                attributes={"similarity": similarity},
+            ) as hit_span:
+                sql_result = await genie_service.execute_sql(sql_query, rs)
+                hit_span.set_outputs({
+                    "status": (sql_result or {}).get("status"),
+                    "row_count": ((sql_result or {}).get("result") or {}).get("row_count"),
+                })
         except Exception as e:
             logger.warning("Cache hit SQL execution failed: %s", e)
+            exec_error = {"error": f"Cache hit SQL execution failed: {e}", "type": "EXEC_EXCEPTION"}
 
-        statement_id = sql_result.get("statement_id") if sql_result else None
-        row_count = 0
-        if sql_result and sql_result.get("result"):
-            row_count = sql_result["result"].get("row_count", 0)
+        # Surface non-SUCCEEDED warehouse status as FAILED. Without this we'd
+        # silently return row_count=0 COMPLETED — catches warehouse-side errors
+        # like syntax/permission failures, TEMPORARILY_UNAVAILABLE concurrency
+        # throttles, etc.
+        if exec_error is None:
+            exec_error = _classify_cache_hit_exec(sql_result)
 
-        response = {
-            "conversation_id": conv_id,
-            "message_id": msg_id,
-            "status": "COMPLETED",
-            "attachments": [
-                {
-                    "attachment_id": att_id,
-                    "query": {
-                        "query": sql_query,
-                        "description": "Cached query — SQL re-executed against warehouse.",
-                        **({"statement_id": statement_id} if statement_id else {}),
-                        "query_result_metadata": {"row_count": row_count},
-                    },
-                },
-                {
-                    "attachment_id": f"{ATT_PREFIX}txt_{uuid.uuid4().hex[:16]}",
-                    "text": {"content": "This result was served from the semantic cache."},
-                },
-            ],
-        }
-        # Extract inner result (same format as cache miss)
-        actual_result = None
-        if sql_result and sql_result.get("status") == "SUCCEEDED":
-            actual_result = sql_result.get("result")
-
-        response["_proxy"] = {
-            "stage": "completed",
-            "from_cache": True,
-            "sql_query": sql_query,
-            "result": actual_result,
-            "auth_mode": auth_mode,
-        }
+        response = _build_cache_hit_response(
+            sql_query=sql_query,
+            sql_result=sql_result,
+            exec_error=exec_error,
+            conv_id=conv_id,
+            msg_id=msg_id,
+            att_id=att_id,
+            auth_mode=auth_mode,
+        )
+        proxy_stage = response["_proxy"]["stage"]
         await _sweep_synthetic_messages()
         async with _get_message_lock(msg_id):
-            _synthetic_messages[msg_id] = response
-            _synthetic_messages[att_id] = {"sql_query": sql_query, "token": token, "space_id": space_id}
+            _remember_synthetic(msg_id, response)
+            _remember_synthetic(att_id, {"sql_query": sql_query, "token": token, "space_id": space_id})
 
-        # Save query log
         try:
             await _db.db_service.save_query_log(
                 query_id=msg_id,
                 query_text=original_query_text,
                 identity=identity,
-                stage="completed",
+                stage=proxy_stage,
                 from_cache=True,
                 gateway_id=gateway.get("id") if gateway else None,
                 runtime_settings=rs,
@@ -558,7 +745,7 @@ async def _handle_query(
     response["_proxy"] = {"stage": "cache_miss", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode}
     await _sweep_synthetic_messages()
     async with _get_message_lock(msg_id):
-        _synthetic_messages[msg_id] = response
+        _remember_synthetic(msg_id, response)
 
     task = asyncio.create_task(_process_genie_background(
         space_id=space_id,
@@ -579,14 +766,14 @@ async def _handle_query(
         exc = t.exception() if not t.cancelled() else None
         if exc:
             logger.error("Background task CRASHED for msg_id=%s: %s", msg_id, exc, exc_info=exc)
-            _synthetic_messages[msg_id] = {
+            _remember_synthetic(msg_id, {
                 "conversation_id": CONV_PREFIX + msg_id[len(MSG_PREFIX):],
                 "message_id": msg_id,
                 "status": "FAILED",
                 "attachments": [],
                 "error": {"error": f"Background task crashed: {exc}", "type": "INTERNAL_ERROR"},
                 "_proxy": {"stage": "failed", "from_cache": False, "sql_query": None, "result": None, "auth_mode": auth_mode},
-            }
+            })
         _release_message_lock(msg_id)
 
     task.add_done_callback(_on_task_done)

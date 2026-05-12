@@ -19,6 +19,7 @@ from app.api.genie_clone_routes import genie_clone_router
 from app.api.gateway_routes import gateway_router
 from app.api.mcp_routes import mcp_router
 from app.api.rbac_routes import rbac_router
+from app.api.router_routes import router_router
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -27,9 +28,12 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize storage backend (creates connection pool if using Lakebase/PGVector)
+    # Initialize storage backend (creates connection pool if using Lakebase/PGVector).
+    # Lakebase JWT rotation runs as a background task that refreshes a cached
+    # token before its ~1h TTL; asyncpg's `password=callable` reads from that
+    # cache, so the SDK mint never blocks the event loop on a hot path.
     from app.services.database import initialize_storage
-    storage = await initialize_storage()
+    await initialize_storage()
 
     # Hydrate global settings from Lakebase so they survive redeploys
     try:
@@ -38,35 +42,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Global settings hydrate failed (continuing with env defaults): %s", e)
 
-    # Start periodic JWT refresh for all Lakebase backends
-    refresh_task = None
-    if settings.storage_backend in ("lakebase", "pgvector") and settings.lakebase_instance:
-        async def _token_refresh_loop():
-            while True:
-                await asyncio.sleep(30 * 60)  # Every 30 minutes
-                try:
-                    logger.info("Background JWT refresh: checking all backends")
-                    await storage.refresh_all_backends()
-                except Exception as e:
-                    logger.error("Background JWT refresh failed: %s", e)
+    # Initialize MLflow tracing. Gated on TRACING_ENABLED env; no-op when off.
+    try:
+        from app.services.tracing import init_tracing
+        await init_tracing()
+    except Exception as e:
+        logger.warning("Tracing init raised unexpectedly: %s — continuing without tracing", e)
 
-        refresh_task = asyncio.create_task(_token_refresh_loop())
-        logger.info("Started background JWT refresh task (every 30 min)")
+    # Periodic background sweep keeps the in-memory synthetic-message store
+    # bounded even when no foreground requests trigger cache hit/miss paths.
+    from app.api.genie_clone_routes import start_synthetic_sweep_task, stop_synthetic_sweep_task
+    start_synthetic_sweep_task()
 
     yield
 
-    if refresh_task:
-        refresh_task.cancel()
-    try:
-        tasks = ([refresh_task] if refresh_task else [])
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        from app.services.rbac import close_http_client
-        from app.api.gateway_routes import close_discovery_client
-        await close_http_client()
-        await close_discovery_client()
+    await stop_synthetic_sweep_task()
+    from app.services.database import close_storage
+    await close_storage()
+    from app.services.rbac import close_http_client
+    from app.api.gateway_routes import close_discovery_client
+    await close_http_client()
+    await close_discovery_client()
 
 
 from app.version import __version__ as APP_VERSION
@@ -94,6 +90,7 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 app.include_router(gateway_router, prefix="/api")
 app.include_router(rbac_router, prefix="/api")
+app.include_router(router_router, prefix="/api/v1")
 app.include_router(genie_clone_router, prefix="/api/2.0/genie")
 app.include_router(mcp_router, prefix="/api/2.0/mcp")
 

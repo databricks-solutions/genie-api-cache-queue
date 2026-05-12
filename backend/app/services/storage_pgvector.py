@@ -3,12 +3,49 @@ PostgreSQL + PGVector storage backend for efficient vector similarity search.
 Uses pgvector extension for fast cosine similarity operations.
 """
 
+import asyncio
+import json
 import logging
+import os
+import time as _time
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timezone
 import numpy as np
 
+from app.services.sql_identifier import quote_ident, quote_qualified
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Lakebase JWT minting helpers
+# ---------------------------------------------------------------------------
+#
+# asyncpg's `password=callable` is invoked synchronously every time a new
+# connection is established. Calling the Databricks SDK directly inside that
+# callback would block the event loop for the duration of the HTTPS round
+# trip (typically 100–500ms) on every new connection — under sustained load,
+# with `max_inactive_connection_lifetime=300s` cycling connections every five
+# minutes, that adds up.
+#
+# Instead each PGVectorStorageService instance keeps its own JWT cache and
+# refreshes it on a background task well before the ~1h TTL. The sync
+# callback just reads the per-instance cache. If the SDK is failing
+# transiently, the pool keeps using the last good token until the refresher
+# recovers. Per-instance state (rather than module globals) means multiple
+# backends pointing at different Lakebase endpoints — e.g. a per-gateway
+# secondary backend in storage_dynamic — never overwrite each other's
+# tokens.
+_TOKEN_REFRESH_INTERVAL_S = 30 * 60  # JWT lives ~1h; refresh well ahead
+_TOKEN_RETRY_BACKOFFS_S = (5, 10, 20, 40, 60)
+
+
+async def _mint_lakebase_jwt(ws_client, endpoint_path: str) -> str:
+    """Mint a fresh JWT off the event loop via the Databricks SDK."""
+    def _sync():
+        cred = ws_client.postgres.generate_database_credential(endpoint=endpoint_path)
+        return cred.token
+    return await asyncio.to_thread(_sync)
 
 
 def _to_utc_iso(dt) -> Optional[str]:
@@ -18,6 +55,115 @@ def _to_utc_iso(dt) -> Optional[str]:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat() + 'Z'
+
+
+def _derive_endpoint_path() -> Optional[str]:
+    """Compose Lakebase endpoint resource path at startup.
+
+    Format: projects/{project}/branches/{branch}/endpoints/primary
+
+    Inputs (in priority order):
+      1. LAKEBASE_ENDPOINT — explicit override (used by the future Option A
+         migration once LKB-11750 ships and the platform binds the resource
+         again, restoring `valueFrom: postgres`).
+      2. LAKEBASE_PROJECT_ID + DATABRICKS_APP_NAME — the Option C path:
+         project_id is hardcoded in app.yaml; the branch is parsed from the
+         Apps-runtime-injected app name following the bundle's naming convention:
+           - 'dev-gateway-<friendly>' → branch 'dev-<friendly>'
+                                        (friendly = domain_friendly_name)
+           - 'genie-gateway'          → branch 'production'
+    """
+    direct = os.environ.get("LAKEBASE_ENDPOINT")
+    if direct:
+        return direct
+    project = os.environ.get("LAKEBASE_PROJECT_ID")
+    app_name = os.environ.get("DATABRICKS_APP_NAME")
+    if not project or not app_name:
+        return None
+    if app_name.startswith("dev-gateway-"):
+        # 'dev-gateway-<friendly>' → 'dev-<friendly>'
+        friendly = app_name[len("dev-gateway-"):]
+        branch = f"dev-{friendly}"
+    elif app_name == "genie-gateway":
+        branch = "production"
+    else:
+        # Unknown shape — log and bail; caller will hit the connection_string
+        # fallback or raise a clearer error.
+        logger.warning(
+            "DATABRICKS_APP_NAME=%r doesn't match expected dev/prod naming; "
+            "falling back to no endpoint",
+            app_name,
+        )
+        return None
+    return f"projects/{project}/branches/{branch}/endpoints/primary"
+
+
+def _resolve_endpoint_host(ws_client, endpoint_path: str) -> Optional[str]:
+    """Resolve PGHOST for the given Lakebase endpoint resource path.
+
+    The Lakebase Autoscaling SDK is in flux. Try the typed API first, then fall
+    back to a raw GET on /api/2.0/postgres/projects/{p}/branches/{b}/endpoints
+    (mirrors the pattern used by scripts/install.sh:610-639).
+    """
+    # Typed SDK path — preferred when available.
+    try:
+        endpoint = ws_client.postgres.endpoints.get(endpoint_path)
+    except AttributeError:
+        endpoint = None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("postgres.endpoints.get(%s) failed: %s — trying raw API", endpoint_path, e)
+        endpoint = None
+
+    if endpoint is not None:
+        # Various SDK shapes seen in the wild — accept any of them.
+        for path in (
+            ("status", "hosts", "host"),
+            ("status", "host"),
+            ("hosts", "host"),
+            ("read_write_dns",),
+        ):
+            target = endpoint
+            for attr in path:
+                target = getattr(target, attr, None)
+                if target is None:
+                    break
+            if isinstance(target, str) and target:
+                return target
+
+    # Raw API fallback — parse out a host field.
+    try:
+        # endpoint_path = projects/<p>/branches/<b>/endpoints/<id>
+        parts = endpoint_path.split("/")
+        if len(parts) < 6 or parts[0] != "projects" or parts[2] != "branches":
+            logger.error("Unexpected endpoint path shape: %s", endpoint_path)
+            return None
+        project = parts[1]
+        branch = parts[3]
+        resp = ws_client.api_client.do(
+            "GET",
+            f"/api/2.0/postgres/projects/{project}/branches/{branch}/endpoints",
+        )
+        endpoints = resp.get("endpoints", []) if isinstance(resp, dict) else []
+        for ep in endpoints:
+            # Match by full resource path or by trailing endpoint ID.
+            if ep.get("name") == endpoint_path or ep.get("name", "").endswith("/" + parts[-1]):
+                status = ep.get("status", {}) or {}
+                hosts = status.get("hosts", {}) or {}
+                host = hosts.get("host") or status.get("host") or ep.get("read_write_dns")
+                if host:
+                    return host
+        # If no exact match, try the first endpoint (single-endpoint branches).
+        if endpoints:
+            ep = endpoints[0]
+            status = ep.get("status", {}) or {}
+            hosts = status.get("hosts", {}) or {}
+            host = hosts.get("host") or status.get("host") or ep.get("read_write_dns")
+            if host:
+                logger.info("Endpoint name didn't match %s exactly; using first endpoint host=%s", endpoint_path, host)
+                return host
+    except Exception as e:  # noqa: BLE001
+        logger.error("Raw endpoint host lookup failed for %s: %s", endpoint_path, e)
+    return None
 
 # Lazy imports - only load when actually used to avoid dependency errors
 asyncpg = None
@@ -47,7 +193,7 @@ class PGVectorStorageService:
 
     def __init__(
         self,
-        connection_string: str,
+        connection_string: str = "",
         table_name: str = "cached_queries",
         query_log_table_name: str = "query_logs",
         lakebase_service_token: str = None,
@@ -57,17 +203,22 @@ class PGVectorStorageService:
     ):
         self.connection_string = connection_string
         self.table_name = self._normalize_table_name(table_name)
+        # Kept for back-compat with storage_dynamic / config plumbing — not used
+        # by initialize() anymore (Autoscaling reads PGHOST/PGUSER/PGDATABASE +
+        # LAKEBASE_ENDPOINT directly from the environment).
         self.lakebase_service_token = lakebase_service_token
-        # Ensure host has https:// prefix
         self.databricks_host = databricks_host
         if self.databricks_host and not self.databricks_host.startswith("http"):
             self.databricks_host = f"https://{self.databricks_host}"
         self.lakebase_instance_name = lakebase_instance_name
         self.cache_ttl_hours = cache_ttl_hours
         self.pool = None
-        self.oauth_token = None
-        self.jwt_expires_at = 0  # epoch timestamp when the current JWT expires
         self._schema_ensured = False
+        # JWT cache and background refresher are per-instance so each backend
+        # (one per Lakebase endpoint) tracks its own token. asyncpg's `password=`
+        # callback closes over `self._jwt_cache` for this specific pool.
+        self._jwt_cache: Dict[str, object] = {}
+        self._jwt_refresh_task: Optional[asyncio.Task] = None
         schema_prefix = self.table_name.rsplit('.', 1)[0]
         self.schema_name = schema_prefix
         log_base = self._normalize_table_name(query_log_table_name).rsplit('.', 1)[-1]
@@ -76,6 +227,27 @@ class PGVectorStorageService:
         self.user_roles_table_name = f"{schema_prefix}.user_roles"
         self.group_roles_table_name = f"{schema_prefix}.group_roles"
         self.global_settings_table_name = f"{schema_prefix}.global_settings"
+        self.routers_table_name = f"{schema_prefix}.routers"
+        self.router_members_table_name = f"{schema_prefix}.router_members"
+        self.routing_cache_table_name = f"{schema_prefix}.routing_cache"
+        self._refresh_quoted_identifiers()
+
+    def _refresh_quoted_identifiers(self):
+        """Recompute pre-quoted identifier strings.
+
+        Called from __init__ and again from _ensure_schema_with_fallback if the
+        SP-rotation fallback flips us onto a different schema name.
+        """
+        self.q_schema = quote_ident(self.schema_name)
+        self.q_table = quote_qualified(self.table_name)
+        self.q_query_log_table = quote_qualified(self.query_log_table_name)
+        self.q_gateway_table = quote_qualified(self.gateway_table_name)
+        self.q_user_roles_table = quote_qualified(self.user_roles_table_name)
+        self.q_group_roles_table = quote_qualified(self.group_roles_table_name)
+        self.q_global_settings_table = quote_qualified(self.global_settings_table_name)
+        self.q_routers_table = quote_qualified(self.routers_table_name)
+        self.q_router_members_table = quote_qualified(self.router_members_table_name)
+        self.q_routing_cache_table = quote_qualified(self.routing_cache_table_name)
 
     def _normalize_table_name(self, table_name: str) -> str:
         """Convert Databricks catalog.schema.table to PostgreSQL schema.table format."""
@@ -87,111 +259,125 @@ class PGVectorStorageService:
         else:
             return f"public.{table_name}"
 
-    def is_token_expiring_soon(self, buffer_seconds: int = 600) -> bool:
-        """Check if the Lakebase JWT will expire within buffer_seconds."""
-        if self.jwt_expires_at == 0:
-            return False  # no JWT tracking (non-Lakebase or unknown TTL)
-        import time
-        return (self.jwt_expires_at - time.time()) < buffer_seconds
-
-    async def reinitialize(self):
-        """Generate a fresh JWT and create a new connection pool.
-        Atomic swap: new pool is created before old pool is closed.
-        _schema_ensured stays True: schema is persistent and only needs
-        to be verified once per process lifetime."""
-        old_pool = self.pool
-        logger.info("Reinitializing Lakebase pool (JWT expiring soon)")
-        await self.initialize()
-        if old_pool and old_pool is not self.pool:
-            try:
-                await old_pool.close()
-            except Exception:
-                pass
-
     async def initialize(self):
-        """Initialize connection pool and ensure table exists"""
+        """Initialize connection pool and ensure tables exist.
+
+        Two boot paths:
+
+        **Option C (current — pure-DAB without `apps.resources[].postgres`):**
+        The bundle does NOT declare a postgres resource on the app, so the
+        platform does NOT auto-inject PGHOST/PGUSER/PGDATABASE/LAKEBASE_ENDPOINT.
+        The app composes LAKEBASE_ENDPOINT from LAKEBASE_PROJECT_ID +
+        DATABRICKS_APP_NAME, resolves PGHOST via the Lakebase API, and reads
+        PGUSER (the SP UUID) from DATABRICKS_CLIENT_ID. PGDATABASE comes from
+        app.yaml. See docs/dab_chicken_egg_findings.md.
+
+        **Option A (future — post-2026-05-21, after LKB-11750):**
+        With `apps.resources[].postgres` restored, the platform auto-injects
+        PGHOST/PGUSER/PGDATABASE/PGPORT/PGSSLMODE and binds LAKEBASE_ENDPOINT
+        via `valueFrom: postgres`. The Option C derivation logic is a no-op
+        because the env vars are already populated.
+
+        JWT rotation: a process-wide cache holds the latest Lakebase JWT,
+        seeded by `initialize()` and refreshed every ~30 min by a background
+        task. asyncpg's `password=` reads the cache synchronously on each new
+        connection establishment — the SDK mint never runs on the event-loop
+        hot path. If the refresh task is transiently failing, the pool keeps
+        using the previous cached token until recovery.
+
+        Local dev / non-Apps fallback: if neither path produces a usable
+        endpoint, we fall back to the legacy `connection_string` path (must
+        include credentials). This keeps unit tests and pure-Postgres local dev
+        working.
+        """
         _ensure_imports()
-
-        if self.lakebase_service_token and self.databricks_host and self.lakebase_instance_name:
-            logger.info("Lakebase mode: getting instance details for %s", self.lakebase_instance_name)
-
-            try:
-                import uuid
-                from urllib.parse import quote_plus
-
-                instance_name = self.lakebase_instance_name
-                is_hostname = ".database." in instance_name
-                # Normalize project name: "projects/foo" → "foo"
-                is_autoscaling = instance_name.startswith("projects/") or (not is_hostname and "/" not in instance_name)
-                project_id = instance_name.replace("projects/", "") if instance_name.startswith("projects/") else instance_name
-
-                if is_hostname:
-                    # Direct hostname provided — generate credentials via Provisioned API
-                    logger.info("Using direct hostname: %s", instance_name)
-                    hostname = instance_name
-                    connection_string = await self._build_connection_string_with_creds(
-                        hostname, quote_plus, uuid
-                    )
-                elif is_autoscaling:
-                    # Lakebase Autoscaling: use SDK postgres.generate_database_credential
-                    logger.info("Lakebase Autoscaling project: %s", project_id)
-                    hostname, endpoint_name = self._resolve_autoscaling_endpoint(project_id)
-                    logger.info("Autoscaling endpoint: %s (%s)", hostname, endpoint_name)
-                    connection_string = self._build_autoscaling_connection_string(
-                        hostname, endpoint_name, quote_plus
-                    )
-                else:
-                    # Lakebase Provisioned: resolve hostname via Database API
-                    logger.info("Lakebase Provisioned instance: %s", instance_name)
-                    hostname = await self._resolve_provisioned_hostname(instance_name)
-                    logger.info("Provisioned instance hostname: %s", hostname)
-                    connection_string = await self._build_connection_string_with_creds(
-                        hostname, quote_plus, uuid
-                    )
-
-            except Exception as e:
-                logger.exception("Failed to get Lakebase details")
-                raise ValueError(f"Cannot initialize Lakebase connection: {e}. Please check your instance name and credentials.")
-        else:
-            connection_string = self.connection_string
-
-        # SSL configuration
-        connection_string = connection_string.replace('?sslmode=require', '').replace('&sslmode=require', '')
-
         import ssl as ssl_module
+
         ssl_context = ssl_module.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl_module.CERT_NONE
 
-        self.pool = await asyncpg.create_pool(
-            connection_string,
-            min_size=2,
-            max_size=10,
-            command_timeout=60,
-            ssl=ssl_context
-        )
+        host = os.environ.get("PGHOST")
+        user = os.environ.get("PGUSER")
+        database = os.environ.get("PGDATABASE")
+        port = int(os.environ.get("PGPORT", "5432"))
+        endpoint_path = os.environ.get("LAKEBASE_ENDPOINT") or _derive_endpoint_path()
 
-        logger.info("Connection pool created with SSL")
+        # Option C path: resolve missing PGHOST/PGUSER ourselves.
+        if endpoint_path and not host:
+            from databricks.sdk import WorkspaceClient
+            host = _resolve_endpoint_host(WorkspaceClient(), endpoint_path)
+            if host:
+                logger.info("Resolved PGHOST=%s from endpoint %s", host, endpoint_path)
+            else:
+                logger.error("Could not resolve PGHOST from endpoint %s", endpoint_path)
+        if endpoint_path and not user:
+            user = os.environ.get("DATABRICKS_CLIENT_ID")
+            if user:
+                logger.info("Using DATABRICKS_CLIENT_ID as PGUSER: %s", user)
+
+        if host and user and database and endpoint_path:
+            from databricks.sdk import WorkspaceClient
+            ws_client = WorkspaceClient()  # uses app's built-in SP
+
+            # Seed the per-instance cache with the first JWT BEFORE the pool
+            # is created so the very first connection has a valid password.
+            # Boot blocking here is acceptable — no event loop traffic yet.
+            first_token = await _mint_lakebase_jwt(ws_client, endpoint_path)
+            self._jwt_cache["token"] = first_token
+            self._jwt_cache["minted_at"] = _time.monotonic()
+
+            if self._jwt_refresh_task is None or self._jwt_refresh_task.done():
+                self._jwt_refresh_task = asyncio.create_task(
+                    self._jwt_refresh_loop(ws_client, endpoint_path)
+                )
+
+            def _read_token() -> str:
+                t = self._jwt_cache.get("token")
+                if not t:
+                    raise RuntimeError(
+                        "Lakebase JWT cache is empty — refresh task has not "
+                        "seeded a token. Did initialize() complete successfully?"
+                    )
+                return t  # type: ignore[return-value]
+
+            self.pool = await asyncpg.create_pool(
+                host=host,
+                port=port,
+                user=user,
+                database=database,
+                password=_read_token,
+                ssl=ssl_context,
+                min_size=2,
+                max_size=10,
+                command_timeout=60,
+            )
+            logger.info(
+                "Lakebase Autoscaling pool created (host=%s user=%s db=%s endpoint=%s)",
+                host, user, database, endpoint_path,
+            )
+        else:
+            # Legacy / local-dev path: connection_string must carry credentials.
+            if not self.connection_string:
+                raise RuntimeError(
+                    "No Lakebase env (PGHOST/PGUSER/PGDATABASE/LAKEBASE_ENDPOINT) and "
+                    "no connection_string fallback. Run inside a Databricks App with a "
+                    "postgres resource attached, or supply a local connection_string."
+                )
+            connection_string = self.connection_string.replace(
+                "?sslmode=require", "").replace("&sslmode=require", "")
+            self.pool = await asyncpg.create_pool(
+                connection_string,
+                min_size=2,
+                max_size=10,
+                command_timeout=60,
+                ssl=ssl_context,
+            )
+            logger.info("Local PG pool created from connection_string")
 
         async with self.pool.acquire() as conn:
-            if self.schema_name != 'public' and not self._schema_ensured:
-                safe_schema = self.schema_name.replace('"', '""')
-                try:
-                    await conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{safe_schema}"')
-                    logger.info("Ensured schema '%s' exists", self.schema_name)
-                except Exception as e:
-                    # Check if schema exists despite the error (e.g., owned by another role)
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
-                        self.schema_name
-                    )
-                    if exists:
-                        logger.info("Schema '%s' already exists (owned by another role)", self.schema_name)
-                    else:
-                        raise RuntimeError(
-                            f"Schema '{self.schema_name}' does not exist and could not be created: {e}. "
-                            f"Ensure the SP has CAN_MANAGE on the Lakebase project, or create the schema manually."
-                        ) from e
+            if not self._schema_ensured:
+                await self._ensure_schema_with_fallback(conn)
                 self._schema_ensured = True
             await self._ensure_extension(conn)
             await register_vector(conn)
@@ -201,10 +387,145 @@ class PGVectorStorageService:
             await self._ensure_user_roles_table(conn)
             await self._ensure_group_roles_table(conn)
             await self._ensure_global_settings_table(conn)
+            await self._ensure_routers_table(conn)
+            await self._ensure_router_members_table(conn)
+            await self._ensure_routing_cache_table(conn)
             await self._migrate_genie_space_id_columns(conn)
             await self._migrate_original_query_text(conn)
             await self._migrate_caching_enabled(conn)
             await self._migrate_gateway_llm_models(conn)
+            await self._migrate_cache_write_signals(conn)
+            await self._migrate_query_log_skip_reason(conn)
+            await self._migrate_routers_mlflow_path(conn)
+
+    async def _refresh_jwt_with_retry(self, ws_client, endpoint_path: str) -> bool:
+        """One refresh attempt followed by bounded retries on failure.
+
+        Returns True if the per-instance cache was updated, False otherwise.
+        On failure the previously cached token is left intact so existing pool
+        consumers keep authenticating; the next refresh interval tries again.
+        """
+        try:
+            token = await _mint_lakebase_jwt(ws_client, endpoint_path)
+            self._jwt_cache["token"] = token
+            self._jwt_cache["minted_at"] = _time.monotonic()
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Lakebase JWT refresh failed for endpoint=%s; retrying with "
+                "backoff. Pool keeps the previously cached token.",
+                endpoint_path,
+            )
+        for backoff in _TOKEN_RETRY_BACKOFFS_S:
+            try:
+                await asyncio.sleep(backoff)
+                token = await _mint_lakebase_jwt(ws_client, endpoint_path)
+                self._jwt_cache["token"] = token
+                self._jwt_cache["minted_at"] = _time.monotonic()
+                logger.info(
+                    "Lakebase JWT refresh recovered for endpoint=%s after %ds backoff",
+                    endpoint_path, backoff,
+                )
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Lakebase JWT refresh retry (backoff=%ds, endpoint=%s) failed",
+                    backoff, endpoint_path,
+                )
+        return False
+
+    async def _jwt_refresh_loop(self, ws_client, endpoint_path: str) -> None:
+        """Background loop: refresh this instance's cached JWT periodically."""
+        while True:
+            try:
+                await asyncio.sleep(_TOKEN_REFRESH_INTERVAL_S)
+                await self._refresh_jwt_with_retry(ws_client, endpoint_path)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — defensive: keep the loop alive
+                logger.exception(
+                    "Unexpected error in Lakebase JWT refresh loop (endpoint=%s)",
+                    endpoint_path,
+                )
+
+    async def _stop_jwt_refresh_task(self) -> None:
+        """Cancel the per-instance JWT refresh task. Safe to call multiple times."""
+        task = self._jwt_refresh_task
+        if task is None or task.done():
+            self._jwt_refresh_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            logger.exception("Lakebase JWT refresh task raised during shutdown")
+        self._jwt_refresh_task = None
+
+    async def _ensure_schema_with_fallback(self, conn):
+        """Create the configured schema, falling back to a per-SP variant if
+        the desired name is owned by a stale SP (post-destroy/recreate cycle).
+
+        On Lakebase Autoscaling the platform creates the SP's role
+        automatically when the bundle attaches the resource at app-create
+        time, so the SP can usually own its own schema cleanly. The fallback
+        only fires if a previous deploy of this app left a same-named schema
+        owned by an earlier SP UUID.
+        """
+        if self.schema_name == "public":
+            return
+
+        current_user = await conn.fetchval("SELECT current_user")
+        owner = await conn.fetchval(
+            "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = $1",
+            self.schema_name,
+        )
+
+        if owner is None:
+            # Schema doesn't exist — create it (we become owner).
+            try:
+                await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.q_schema}")
+                logger.info("Created schema %s (owner=%s)", self.schema_name, current_user)
+            except Exception as e:
+                # Race: someone else created it in between. Fall through.
+                logger.info("Schema create raced (%s) — re-checking ownership", e)
+                owner = await conn.fetchval(
+                    "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = $1",
+                    self.schema_name,
+                )
+                if owner is None:
+                    raise RuntimeError(
+                        f"Could not create schema '{self.schema_name}' and it does "
+                        f"not exist after retry: {e}"
+                    ) from e
+
+        if owner is not None and owner != current_user:
+            # Stale SP owns the schema. Switch to a per-SP fallback.
+            sp_prefix = current_user.replace("-", "")[:16] if current_user else "fallback"
+            fallback_schema = f"{self.schema_name}_{sp_prefix}"
+            logger.warning(
+                "Schema '%s' owned by stale SP '%s'; switching to fallback '%s'",
+                self.schema_name, owner, fallback_schema,
+            )
+            # Recompute table names in the fallback schema.
+            self.schema_name = fallback_schema
+            self.table_name = f"{fallback_schema}.{self.table_name.rsplit('.', 1)[-1]}"
+            self.gateway_table_name = f"{fallback_schema}.gateway_configs"
+            self.query_log_table_name = f"{fallback_schema}.{self.query_log_table_name.rsplit('.', 1)[-1]}"
+            self.user_roles_table_name = f"{fallback_schema}.user_roles"
+            self.group_roles_table_name = f"{fallback_schema}.group_roles"
+            self.global_settings_table_name = f"{fallback_schema}.global_settings"
+            self.routers_table_name = f"{fallback_schema}.routers"
+            self.router_members_table_name = f"{fallback_schema}.router_members"
+            self.routing_cache_table_name = f"{fallback_schema}.routing_cache"
+            self._refresh_quoted_identifiers()
+            await conn.execute(f"CREATE SCHEMA IF NOT EXISTS {self.q_schema}")
+            logger.info("Created fallback schema %s", fallback_schema)
 
     async def _migrate_genie_space_id_columns(self, conn):
         """Migration: ensure both gateway_id and genie_space_id columns exist.
@@ -268,7 +589,7 @@ class PGVectorStorageService:
                 schema, tbl
             )
             if not exists:
-                await conn.execute(f'ALTER TABLE {self.table_name} ADD COLUMN original_query_text TEXT')
+                await conn.execute(f'ALTER TABLE {self.q_table} ADD COLUMN original_query_text TEXT')
                 logger.info("Added original_query_text column to %s", self.table_name)
         except Exception as e:
             logger.warning("Could not add original_query_text to %s: %s", self.table_name, e)
@@ -284,10 +605,59 @@ class PGVectorStorageService:
                 schema, tbl
             )
             if not exists:
-                await conn.execute(f'ALTER TABLE {self.gateway_table_name} ADD COLUMN caching_enabled BOOLEAN DEFAULT true')
+                await conn.execute(f'ALTER TABLE {self.q_gateway_table} ADD COLUMN caching_enabled BOOLEAN DEFAULT true')
                 logger.info("Added caching_enabled column to %s", self.gateway_table_name)
         except Exception as e:
             logger.warning("Could not add caching_enabled to %s: %s", self.gateway_table_name, e)
+
+    async def _migrate_cache_write_signals(self, conn):
+        """Migration: add columns capturing what the warehouse + Genie returned at write time.
+
+        These let the write-time validator (services/cache_write_validator.py) record
+        why a row was kept, and let post-hoc analysis answer "did Genie tell us this
+        SQL was bad?" without re-running the query.
+        """
+        parts = self.table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        additions = [
+            ("row_count", "INTEGER"),
+            ("result_columns", "JSONB"),
+            ("genie_text", "TEXT"),
+            ("genie_description", "TEXT"),
+        ]
+        for column, coltype in additions:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                    schema, tbl, column
+                )
+                if not exists:
+                    await conn.execute(f'ALTER TABLE {self.q_table} ADD COLUMN {column} {coltype}')
+                    logger.info("Added %s column to %s", column, self.table_name)
+            except Exception as e:
+                logger.warning("Could not add %s to %s: %s", column, self.table_name, e)
+
+    async def _migrate_query_log_skip_reason(self, conn):
+        """Migration: surface cache-write skip decisions in query_logs."""
+        parts = self.query_log_table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        additions = [
+            ("row_count", "INTEGER"),
+            ("cache_skip_reason", "TEXT"),
+        ]
+        for column, coltype in additions:
+            try:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                    schema, tbl, column
+                )
+                if not exists:
+                    await conn.execute(f'ALTER TABLE {self.q_query_log_table} ADD COLUMN {column} {coltype}')
+                    logger.info("Added %s column to %s", column, self.query_log_table_name)
+            except Exception as e:
+                logger.warning("Could not add %s to %s: %s", column, self.query_log_table_name, e)
 
     async def _migrate_gateway_llm_models(self, conn):
         """Migration: add per-gateway LLM model overrides + intent_split_enabled flag."""
@@ -299,6 +669,7 @@ class PGVectorStorageService:
             ("validation_model", "TEXT"),
             ("intent_split_model", "TEXT"),
             ("intent_split_enabled", "BOOLEAN DEFAULT true"),
+            ("cache_write_validation_enabled", "BOOLEAN DEFAULT true"),
         ]
         for column, coltype in additions:
             try:
@@ -307,137 +678,27 @@ class PGVectorStorageService:
                     schema, tbl, column
                 )
                 if not exists:
-                    await conn.execute(f'ALTER TABLE {self.gateway_table_name} ADD COLUMN {column} {coltype}')
+                    await conn.execute(f'ALTER TABLE {self.q_gateway_table} ADD COLUMN {column} {coltype}')
                     logger.info("Added %s column to %s", column, self.gateway_table_name)
             except Exception as e:
                 logger.warning("Could not add %s to %s: %s", column, self.gateway_table_name, e)
 
-    async def _build_connection_string_with_creds(self, hostname, quote_plus, uuid):
-        """Generate OAuth credentials and build connection string for a Lakebase hostname."""
-        import httpx
-
-        oauth_token = None
-        username = None
-
-        async with httpx.AsyncClient() as http_client:
-            # Try to generate a database-specific credential
-            try:
-                cred_url = f"{self.databricks_host}/api/2.0/database/credentials/generate"
-                response = await http_client.post(
-                    cred_url,
-                    headers={"Authorization": f"Bearer {self.lakebase_service_token}"},
-                    json={"request_id": str(uuid.uuid4())}
-                )
-                response.raise_for_status()
-                cred_data = response.json()
-                oauth_token = cred_data.get("token")
-                logger.info("Database credential generated (expires in %ds)", cred_data.get("expires_in", 3600))
-            except Exception as e:
-                # Credential generation failed (e.g. token lacks database scope).
-                # Use the provided token directly — works with Autoscaling Lakebase.
-                logger.info("Credential generation failed (%s), using token directly as password", e)
-                oauth_token = self.lakebase_service_token
-
-            # Get current username
-            try:
-                user_url = f"{self.databricks_host}/api/2.0/preview/scim/v2/Me"
-                response = await http_client.get(
-                    user_url,
-                    headers={"Authorization": f"Bearer {self.lakebase_service_token}"}
-                )
-                response.raise_for_status()
-                username = response.json().get("userName")
-            except Exception as e:
-                logger.warning("Failed to get username via SCIM (%s), using connection_string user", e)
-                # Extract user from the existing connection string if available
-                if self.connection_string and "@" in self.connection_string:
-                    from urllib.parse import urlparse, unquote
-                    parsed = urlparse(self.connection_string)
-                    username = unquote(parsed.username) if parsed.username else None
-
-        if not username:
-            raise ValueError("Cannot determine username for Lakebase connection")
-
-        return f"postgresql://{quote_plus(username)}:{quote_plus(oauth_token)}@{hostname}:5432/databricks_postgres"
-
-    def _get_lakebase_sdk_client(self):
-        """Create a Databricks SDK WorkspaceClient for Lakebase operations.
-
-        Inside Databricks Apps: uses the app's built-in SP, auto-detected from
-        DATABRICKS_CLIENT_ID/SECRET env vars. The caller's proxy token
-        (X-Forwarded-Access-Token) is NOT used for Lakebase.
-
-        Local development: uses the lakebase_service_token from Settings
-        (SP client_id:client_secret format).
-
-        The SP must have CAN_MANAGE on the Lakebase project and a PostgreSQL
-        role created via databricks_create_role().
-        """
-        from databricks.sdk import WorkspaceClient
-        from databricks.sdk.core import Config
-        import os
-
-        if os.getenv("DATABRICKS_CLIENT_ID"):
-            logger.info("Lakebase auth: app built-in SP (DATABRICKS_CLIENT_ID)")
-            return WorkspaceClient()
-
-        # Local dev: use the configured lakebase_service_token
-        token = self.lakebase_service_token or ""
-        if ":" in token and not token.startswith("dapi") and not token.startswith("eyJ"):
-            client_id, client_secret = token.split(":", 1)
-            logger.info("Lakebase auth: SP OAuth (client_id=%s...)", client_id[:12])
-            config = Config(
-                host=self.databricks_host,
-                client_id=client_id,
-                client_secret=client_secret,
-                auth_type="oauth-m2m",
+    async def _migrate_routers_mlflow_path(self, conn):
+        """Migration: add mlflow_experiment_path to routers (NULL = tracing disabled)."""
+        parts = self.routers_table_name.split('.')
+        schema = parts[-2] if len(parts) >= 2 else 'public'
+        tbl = parts[-1]
+        column = "mlflow_experiment_path"
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 AND column_name=$3",
+                schema, tbl, column
             )
-            return WorkspaceClient(config=config)
-
-        raise ValueError(
-            "No Lakebase credentials available. "
-            "Set DATABRICKS_CLIENT_ID/SECRET or provide SP client_id:client_secret."
-        )
-
-    def _resolve_autoscaling_endpoint(self, project_id: str) -> tuple:
-        """Resolve Lakebase Autoscaling project to (hostname, endpoint_name)."""
-        client = self._get_lakebase_sdk_client()
-        endpoints = client.api_client.do(
-            'GET',
-            f'/api/2.0/postgres/projects/{project_id}/branches/production/endpoints'
-        )
-        eps = endpoints.get("endpoints", [])
-        if not eps:
-            raise ValueError(f"No endpoints found for Autoscaling project '{project_id}'")
-        ep = eps[0]
-        return ep["status"]["hosts"]["host"], ep["name"]
-
-    def _build_autoscaling_connection_string(self, hostname: str, endpoint_name: str, quote_plus) -> str:
-        """Generate JWT credential for Autoscaling Lakebase and build connection string."""
-        import time
-        client = self._get_lakebase_sdk_client()
-        cred = client.postgres.generate_database_credential(endpoint=endpoint_name)
-        username = client.current_user.me().user_name
-
-        expires_in = getattr(cred, 'expires_in', None) or 3600
-        self.jwt_expires_at = time.time() + expires_in
-        logger.info("Autoscaling JWT generated for %s (expires_in=%ds)", username, expires_in)
-
-        return f"postgresql://{quote_plus(username)}:{quote_plus(cred.token)}@{hostname}:5432/databricks_postgres"
-
-    async def _resolve_provisioned_hostname(self, instance_name: str) -> str:
-        """Resolve Lakebase Provisioned instance to its hostname."""
-        import httpx
-
-        async with httpx.AsyncClient() as http_client:
-            url = f"{self.databricks_host}/api/2.0/database/instances/{instance_name}"
-            response = await http_client.get(
-                url,
-                headers={"Authorization": f"Bearer {self.lakebase_service_token}"}
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("read_write_dns") or data.get("host")
+            if not exists:
+                await conn.execute(f'ALTER TABLE {self.q_routers_table} ADD COLUMN {column} TEXT')
+                logger.info("Added %s column to %s", column, self.routers_table_name)
+        except Exception as e:
+            logger.warning("Could not add %s to %s: %s", column, self.routers_table_name, e)
 
     async def _ensure_extension(self, conn):
         """Ensure pgvector extension is installed"""
@@ -447,7 +708,7 @@ class PGVectorStorageService:
         """Create the cached_queries table and indexes.
         Index creation is best-effort — skipped if the current role lacks ownership."""
         await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.table_name} (
+            CREATE TABLE IF NOT EXISTS {self.q_table} (
                 id SERIAL PRIMARY KEY,
                 query_text TEXT NOT NULL,
                 original_query_text TEXT,
@@ -463,9 +724,9 @@ class PGVectorStorageService:
 
         idx_base = self.table_name.replace('.', '_')
         for idx_sql in [
-            f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.table_name} USING ivfflat (query_embedding vector_cosine_ops) WITH (lists = 100)",
-            f"CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx ON {self.table_name} (identity)",
-            f"CREATE INDEX IF NOT EXISTS {idx_base}_space_idx ON {self.table_name} (gateway_id)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.q_table} USING ivfflat (query_embedding vector_cosine_ops) WITH (lists = 100)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx ON {self.q_table} (identity)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_space_idx ON {self.q_table} (gateway_id)",
         ]:
             try:
                 await conn.execute(idx_sql)
@@ -478,7 +739,7 @@ class PGVectorStorageService:
         """Create the query_logs table and indexes.
         Index creation is best-effort — skipped if the current role lacks ownership."""
         await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.query_log_table_name} (
+            CREATE TABLE IF NOT EXISTS {self.q_query_log_table} (
                 id SERIAL PRIMARY KEY,
                 query_id VARCHAR(255) NOT NULL UNIQUE,
                 query_text TEXT NOT NULL,
@@ -493,8 +754,8 @@ class PGVectorStorageService:
 
         log_idx_base = self.query_log_table_name.replace('.', '_')
         for idx_sql in [
-            f"CREATE INDEX IF NOT EXISTS {log_idx_base}_identity_idx ON {self.query_log_table_name} (identity)",
-            f"CREATE INDEX IF NOT EXISTS {log_idx_base}_created_idx ON {self.query_log_table_name} (created_at DESC)",
+            f"CREATE INDEX IF NOT EXISTS {log_idx_base}_identity_idx ON {self.q_query_log_table} (identity)",
+            f"CREATE INDEX IF NOT EXISTS {log_idx_base}_created_idx ON {self.q_query_log_table} (created_at DESC)",
         ]:
             try:
                 await conn.execute(idx_sql)
@@ -506,7 +767,7 @@ class PGVectorStorageService:
     async def _ensure_user_roles_table(self, conn):
         """Create the user_roles table if it does not exist."""
         await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.user_roles_table_name} (
+            CREATE TABLE IF NOT EXISTS {self.q_user_roles_table} (
                 identity TEXT PRIMARY KEY,
                 role TEXT NOT NULL,
                 granted_by TEXT,
@@ -518,7 +779,7 @@ class PGVectorStorageService:
     async def _ensure_group_roles_table(self, conn):
         """Create the group_roles table if it does not exist."""
         await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.group_roles_table_name} (
+            CREATE TABLE IF NOT EXISTS {self.q_group_roles_table} (
                 group_name TEXT PRIMARY KEY,
                 role TEXT NOT NULL,
                 granted_by TEXT,
@@ -530,7 +791,7 @@ class PGVectorStorageService:
     async def _ensure_gateway_table(self, conn):
         """Create the gateway_configs table if it does not exist."""
         await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.gateway_table_name} (
+            CREATE TABLE IF NOT EXISTS {self.q_gateway_table} (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 genie_space_id TEXT NOT NULL,
@@ -551,6 +812,7 @@ class PGVectorStorageService:
                 validation_model TEXT,
                 intent_split_model TEXT,
                 intent_split_enabled BOOLEAN DEFAULT true,
+                cache_write_validation_enabled BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             )
@@ -560,7 +822,7 @@ class PGVectorStorageService:
     async def _ensure_global_settings_table(self, conn):
         """Create the global_settings table (key/value JSONB) if it does not exist."""
         await conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {self.global_settings_table_name} (
+            CREATE TABLE IF NOT EXISTS {self.q_global_settings_table} (
                 key TEXT PRIMARY KEY,
                 value JSONB NOT NULL,
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -568,6 +830,111 @@ class PGVectorStorageService:
             )
         """)
         logger.info("Global settings table '%s' initialized", self.global_settings_table_name)
+
+    async def _ensure_routers_table(self, conn):
+        """Create the routers table if it does not exist.
+
+        A router groups several gateways as a selectable catalog. The query path
+        lives in Phase 2 — this is the storage shape.
+        """
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.q_routers_table} (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                selector_model TEXT,
+                selector_system_prompt TEXT,
+                decompose_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                routing_cache_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                shared_cache BOOLEAN NOT NULL DEFAULT TRUE,
+                similarity_threshold REAL NOT NULL DEFAULT 0.92,
+                cache_ttl_hours INTEGER NOT NULL DEFAULT 24,
+                mlflow_experiment_path TEXT,
+                created_by TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        # Migration for tables created before the shared_cache column existed.
+        try:
+            await conn.execute(
+                f"ALTER TABLE {self.q_routers_table} "
+                "ADD COLUMN IF NOT EXISTS shared_cache BOOLEAN NOT NULL DEFAULT TRUE"
+            )
+        except Exception as e:
+            logger.warning("Routers shared_cache migration skipped: %s", e)
+        logger.info("Routers table '%s' initialized", self.routers_table_name)
+
+    async def _ensure_router_members_table(self, conn):
+        """Create the router_members edge table (router ↔ gateway + catalog metadata).
+
+        when_to_use / tables / sample_questions live HERE rather than on the
+        gateway row so one gateway can play different roles in different
+        routers. ON DELETE CASCADE from routers cleans up members on router
+        deletion. No FK to gateway_configs — gateway hard-delete is allowed
+        and a dangling member row is a detectable recoverable state.
+        """
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.q_router_members_table} (
+                router_id TEXT NOT NULL REFERENCES {self.q_routers_table}(id) ON DELETE CASCADE,
+                gateway_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL DEFAULT 0,
+                title TEXT NOT NULL,
+                when_to_use TEXT NOT NULL,
+                tables TEXT[],
+                sample_questions TEXT[],
+                disabled BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (router_id, gateway_id)
+            )
+        """)
+        idx_base = self.router_members_table_name.replace('.', '_')
+        try:
+            await conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_base}_router_idx ON {self.q_router_members_table} (router_id, ordinal)"
+            )
+        except Exception as e:
+            logger.warning("Index creation skipped: %s", e)
+        logger.info("Router members table '%s' initialized", self.router_members_table_name)
+
+    async def _ensure_routing_cache_table(self, conn):
+        """Create the routing_cache table (question → decision, scoped per router
+        and — when the router has shared_cache=False — also per caller identity)."""
+        await conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.q_routing_cache_table} (
+                id BIGSERIAL PRIMARY KEY,
+                router_id TEXT NOT NULL REFERENCES {self.q_routers_table}(id) ON DELETE CASCADE,
+                identity TEXT NOT NULL DEFAULT '',
+                question TEXT NOT NULL,
+                question_embedding vector(1024) NOT NULL,
+                decision_json JSONB NOT NULL,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                ttl_expires TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        # Migration for tables created before the identity column existed.
+        try:
+            await conn.execute(
+                f"ALTER TABLE {self.q_routing_cache_table} "
+                "ADD COLUMN IF NOT EXISTS identity TEXT NOT NULL DEFAULT ''"
+            )
+        except Exception as e:
+            logger.warning("Routing cache identity migration skipped: %s", e)
+        idx_base = self.routing_cache_table_name.replace('.', '_')
+        for idx_sql in [
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_embedding_idx ON {self.q_routing_cache_table} USING ivfflat (question_embedding vector_cosine_ops) WITH (lists = 50)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_router_idx ON {self.q_routing_cache_table} (router_id)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_identity_idx ON {self.q_routing_cache_table} (router_id, identity)",
+            f"CREATE INDEX IF NOT EXISTS {idx_base}_ttl_idx ON {self.q_routing_cache_table} (ttl_expires)",
+        ]:
+            try:
+                await conn.execute(idx_sql)
+            except Exception as e:
+                logger.warning("Index creation skipped: %s", e)
+        logger.info("Routing cache table '%s' initialized", self.routing_cache_table_name)
 
     async def search_similar_query(
         self,
@@ -632,7 +999,7 @@ class PGVectorStorageService:
                     original_query_text,
                     sql_query,
                     1 - (query_embedding <=> $1::vector) AS similarity
-                FROM {self.table_name}
+                FROM {self.q_table}
                 WHERE {where_clause}
                 ORDER BY query_embedding <=> $1::vector
                 LIMIT 1
@@ -650,11 +1017,11 @@ class PGVectorStorageService:
                 return (row['id'], row['query_text'], row['sql_query'], float(row['similarity']), row['original_query_text'])
 
             # Log closest available match for diagnostics
-            count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
+            count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.q_table}")
             if count > 0:
                 best = await conn.fetchrow(f"""
                     SELECT id, query_text, 1 - (query_embedding <=> $1::vector) AS sim
-                    FROM {self.table_name} ORDER BY query_embedding <=> $1::vector LIMIT 1
+                    FROM {self.q_table} ORDER BY query_embedding <=> $1::vector LIMIT 1
                 """, embedding_array)
                 if best:
                     logger.info("Cache MISS: %d entries, best_sim=%.3f best_query=%s (threshold=%.2f ttl=%s)",
@@ -668,7 +1035,7 @@ class PGVectorStorageService:
     async def _update_usage(self, conn, cache_id: int):
         """Update last_used and use_count for a cache entry"""
         await conn.execute(f"""
-            UPDATE {self.table_name}
+            UPDATE {self.q_table}
             SET
                 last_used = CURRENT_TIMESTAMP,
                 use_count = use_count + 1
@@ -684,26 +1051,36 @@ class PGVectorStorageService:
         gateway_id: str,
         original_query_text: str = None,
         genie_space_id: str = None,  # audit/reference only
+        row_count: Optional[int] = None,
+        result_columns: Optional[List[str]] = None,
+        genie_text: Optional[str] = None,
+        genie_description: Optional[str] = None,
     ) -> int:
         """Save a new query to the cache."""
         if not self.pool:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
 
         embedding_array = np.array(query_embedding, dtype=np.float32)
+        result_columns_json = json.dumps(result_columns) if result_columns is not None else None
 
         async with self.pool.acquire() as conn:
             await register_vector(conn)
 
             row = await conn.fetchrow(f"""
-                INSERT INTO {self.table_name}
+                INSERT INTO {self.q_table}
                 (query_text, original_query_text, query_embedding, sql_query, identity, gateway_id, genie_space_id,
+                 row_count, result_columns, genie_text, genie_description,
                  created_at, last_used, use_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7,
+                        $8, $9::jsonb, $10, $11,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
                 RETURNING id
-            """, query_text, original_query_text, embedding_array, sql_query, identity, gateway_id, genie_space_id)
+            """, query_text, original_query_text, embedding_array, sql_query, identity, gateway_id, genie_space_id,
+               row_count, result_columns_json, genie_text, genie_description)
 
             cache_id = row['id']
-            logger.info("Saved to cache id=%d", cache_id)
+            logger.info("Saved to cache id=%d row_count=%s cols=%s", cache_id, row_count,
+                        len(result_columns) if result_columns else 0)
             return cache_id
 
     async def get_all_cached_queries(
@@ -738,7 +1115,7 @@ class PGVectorStorageService:
                 SELECT
                     id, query_text, sql_query, identity, gateway_id,
                     created_at, last_used, use_count
-                FROM {self.table_name}
+                FROM {self.q_table}
                 {where_sql}
                 ORDER BY last_used DESC
                 LIMIT ${param_idx}
@@ -774,7 +1151,7 @@ class PGVectorStorageService:
                     SUM(use_count) as total_uses,
                     AVG(use_count) as avg_uses_per_query,
                     MAX(last_used) as most_recent_use
-                FROM {self.table_name}
+                FROM {self.q_table}
             """)
 
             return dict(stats)
@@ -786,7 +1163,7 @@ class PGVectorStorageService:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(f"""
                 SELECT COALESCE(gateway_id, 'unknown') as space_id, COUNT(*) as count
-                FROM {self.table_name}
+                FROM {self.q_table}
                 GROUP BY gateway_id
             """)
             total = sum(r['count'] for r in rows)
@@ -801,11 +1178,11 @@ class PGVectorStorageService:
             return 0
         async with self.pool.acquire() as conn:
             count = await conn.fetchval(
-                f"SELECT COUNT(*) FROM {self.table_name} WHERE id = ANY($1::int[]) AND gateway_id = $2",
+                f"SELECT COUNT(*) FROM {self.q_table} WHERE id = ANY($1::int[]) AND gateway_id = $2",
                 entry_ids, gateway_id,
             )
             await conn.execute(
-                f"DELETE FROM {self.table_name} WHERE id = ANY($1::int[]) AND gateway_id = $2",
+                f"DELETE FROM {self.q_table} WHERE id = ANY($1::int[]) AND gateway_id = $2",
                 entry_ids, gateway_id,
             )
             logger.info("Deleted %d cache entries for gateway %s from %s", count, gateway_id, self.table_name)
@@ -818,20 +1195,21 @@ class PGVectorStorageService:
         async with self.pool.acquire() as conn:
             if gateway_id:
                 count = await conn.fetchval(
-                    f"SELECT COUNT(*) FROM {self.table_name} WHERE gateway_id = $1", gateway_id
+                    f"SELECT COUNT(*) FROM {self.q_table} WHERE gateway_id = $1", gateway_id
                 )
                 await conn.execute(
-                    f"DELETE FROM {self.table_name} WHERE gateway_id = $1", gateway_id
+                    f"DELETE FROM {self.q_table} WHERE gateway_id = $1", gateway_id
                 )
                 logger.info("Cache cleared for space %s: %d entries deleted from %s", gateway_id, count, self.table_name)
             else:
-                count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.table_name}")
-                await conn.execute(f"DELETE FROM {self.table_name}")
+                count = await conn.fetchval(f"SELECT COUNT(*) FROM {self.q_table}")
+                await conn.execute(f"DELETE FROM {self.q_table}")
                 logger.info("Cache cleared: %d entries deleted from %s", count, self.table_name)
             return count
 
     async def close(self):
-        """Close the connection pool"""
+        """Close the connection pool and stop this instance's JWT refresher."""
+        await self._stop_jwt_refresh_task()
         if self.pool:
             await self.pool.close()
             logger.info("PGVector connection pool closed")
@@ -845,6 +1223,8 @@ class PGVectorStorageService:
         from_cache: bool = False,
         gateway_id: Optional[str] = None,
         genie_space_id: Optional[str] = None,  # audit/reference only
+        row_count: Optional[int] = None,
+        cache_skip_reason: Optional[str] = None,
     ) -> int:
         """Save a query log entry"""
         if not self.pool:
@@ -852,20 +1232,24 @@ class PGVectorStorageService:
 
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(f"""
-                INSERT INTO {self.query_log_table_name}
-                (query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7,
+                INSERT INTO {self.q_query_log_table}
+                (query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id,
+                 row_count, cache_skip_reason, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                         CURRENT_TIMESTAMP AT TIME ZONE 'UTC',
                         CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
                 ON CONFLICT (query_id)
                 DO UPDATE SET
                     stage = EXCLUDED.stage,
                     from_cache = EXCLUDED.from_cache,
-                    gateway_id = COALESCE(EXCLUDED.gateway_id, {self.query_log_table_name}.gateway_id),
-                    genie_space_id = COALESCE(EXCLUDED.genie_space_id, {self.query_log_table_name}.genie_space_id),
+                    gateway_id = COALESCE(EXCLUDED.gateway_id, {self.q_query_log_table}.gateway_id),
+                    genie_space_id = COALESCE(EXCLUDED.genie_space_id, {self.q_query_log_table}.genie_space_id),
+                    row_count = COALESCE(EXCLUDED.row_count, {self.q_query_log_table}.row_count),
+                    cache_skip_reason = COALESCE(EXCLUDED.cache_skip_reason, {self.q_query_log_table}.cache_skip_reason),
                     updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
                 RETURNING id
-            """, query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id)
+            """, query_id, query_text, identity, stage, from_cache, gateway_id, genie_space_id,
+               row_count, cache_skip_reason)
 
             return row['id']
 
@@ -893,7 +1277,7 @@ class PGVectorStorageService:
             query = f"""
                 SELECT query_id, query_text, identity, stage, gateway_id,
                        from_cache, created_at, updated_at
-                FROM {self.query_log_table_name}
+                FROM {self.q_query_log_table}
                 {where}
                 ORDER BY created_at DESC
                 LIMIT ${len(params)}
@@ -936,6 +1320,7 @@ class PGVectorStorageService:
             ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
             ("question_normalization_enabled", config.get("question_normalization_enabled", False)),
             ("cache_validation_enabled", config.get("cache_validation_enabled", False)),
+            ("cache_write_validation_enabled", config.get("cache_write_validation_enabled", True)),
             ("caching_enabled", config.get("caching_enabled", True)),
             ("embedding_provider", config.get("embedding_provider", "databricks")),
             ("databricks_embedding_endpoint", config.get("databricks_embedding_endpoint", "databricks-gte-large-en")),
@@ -956,7 +1341,7 @@ class PGVectorStorageService:
 
         async with self.pool.acquire() as conn:
             await conn.execute(
-                f"INSERT INTO {self.gateway_table_name} ({cols}) VALUES ({placeholders})",
+                f"INSERT INTO {self.q_gateway_table} ({cols}) VALUES ({placeholders})",
                 *values,
             )
             logger.info("Gateway created in DB: id=%s name=%s", config["id"], config["name"])
@@ -971,11 +1356,12 @@ class PGVectorStorageService:
             row = await conn.fetchrow(f"""
                 SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                        max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
-                       cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                       cache_validation_enabled, cache_write_validation_enabled, caching_enabled,
+                       embedding_provider, databricks_embedding_endpoint,
                        shared_cache, status, created_by, description,
                        normalization_model, validation_model, intent_split_model, intent_split_enabled,
                        created_at, updated_at
-                FROM {self.gateway_table_name}
+                FROM {self.q_gateway_table}
                 WHERE id = $1
             """, gateway_id)
 
@@ -992,11 +1378,12 @@ class PGVectorStorageService:
             rows = await conn.fetch(f"""
                 SELECT id, name, genie_space_id, sql_warehouse_id, similarity_threshold,
                        max_queries_per_minute, cache_ttl_hours, question_normalization_enabled,
-                       cache_validation_enabled, caching_enabled, embedding_provider, databricks_embedding_endpoint,
+                       cache_validation_enabled, cache_write_validation_enabled, caching_enabled,
+                       embedding_provider, databricks_embedding_endpoint,
                        shared_cache, status, created_by, description,
                        normalization_model, validation_model, intent_split_model, intent_split_enabled,
                        created_at, updated_at
-                FROM {self.gateway_table_name}
+                FROM {self.q_gateway_table}
                 ORDER BY created_at DESC
             """)
             return [self._row_to_gateway_dict(row) for row in rows]
@@ -1017,7 +1404,8 @@ class PGVectorStorageService:
         # Build dynamic SET clause from provided updates
         allowed_fields = {
             "name", "similarity_threshold", "max_queries_per_minute", "cache_ttl_hours",
-            "question_normalization_enabled", "cache_validation_enabled", "caching_enabled",
+            "question_normalization_enabled", "cache_validation_enabled",
+            "cache_write_validation_enabled", "caching_enabled",
             "embedding_provider", "databricks_embedding_endpoint", "shared_cache", "status", "description",
             "sql_warehouse_id", "genie_space_id",
             "normalization_model", "validation_model", "intent_split_model", "intent_split_enabled",
@@ -1045,7 +1433,7 @@ class PGVectorStorageService:
 
         async with self.pool.acquire() as conn:
             result = await conn.execute(f"""
-                UPDATE {self.gateway_table_name}
+                UPDATE {self.q_gateway_table}
                 SET {', '.join(set_parts)}
                 WHERE id = ${param_idx}
             """, *params)
@@ -1063,7 +1451,7 @@ class PGVectorStorageService:
 
         async with self.pool.acquire() as conn:
             result = await conn.execute(f"""
-                DELETE FROM {self.gateway_table_name} WHERE id = $1
+                DELETE FROM {self.q_gateway_table} WHERE id = $1
             """, gateway_id)
             deleted = result != "DELETE 0"
             if deleted:
@@ -1083,18 +1471,18 @@ class PGVectorStorageService:
         async with self.pool.acquire() as conn:
             # All cache ops use gateway_id as namespace key
             cache_count = await conn.fetchval(f"""
-                SELECT COUNT(*) FROM {self.table_name}
+                SELECT COUNT(*) FROM {self.q_table}
                 WHERE gateway_id = $1
             """, gateway_id) or 0
 
             query_count = await conn.fetchval(f"""
-                SELECT COUNT(*) FROM {self.query_log_table_name}
+                SELECT COUNT(*) FROM {self.q_query_log_table}
                 WHERE gateway_id = $1
                   AND created_at > NOW() - INTERVAL '7 days'
             """, gateway_id) or 0
 
             cache_hits = await conn.fetchval(f"""
-                SELECT COUNT(*) FROM {self.query_log_table_name}
+                SELECT COUNT(*) FROM {self.q_query_log_table}
                 WHERE gateway_id = $1
                   AND from_cache = true
                   AND created_at > NOW() - INTERVAL '7 days'
@@ -1111,7 +1499,7 @@ class PGVectorStorageService:
         import json as _json
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT key, value FROM {self.global_settings_table_name}"
+                f"SELECT key, value FROM {self.q_global_settings_table}"
             )
         result = {}
         for r in rows:
@@ -1144,7 +1532,7 @@ class PGVectorStorageService:
             async with conn.transaction():
                 await conn.executemany(
                     f"""
-                    INSERT INTO {self.global_settings_table_name} (key, value, updated_at, updated_by)
+                    INSERT INTO {self.q_global_settings_table} (key, value, updated_at, updated_by)
                     VALUES ($1, $2::jsonb, NOW(), $3)
                     ON CONFLICT (key) DO UPDATE
                       SET value = EXCLUDED.value,
@@ -1161,7 +1549,7 @@ class PGVectorStorageService:
             raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
         async with self.pool.acquire() as conn:
             result = await conn.execute(
-                f"DELETE FROM {self.global_settings_table_name} WHERE key = $1",
+                f"DELETE FROM {self.q_global_settings_table} WHERE key = $1",
                 key,
             )
         return result != "DELETE 0"
@@ -1174,7 +1562,7 @@ class PGVectorStorageService:
             return None
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT role FROM {self.user_roles_table_name} WHERE identity = $1",
+                f"SELECT role FROM {self.q_user_roles_table} WHERE identity = $1",
                 identity
             )
             return row["role"] if row else None
@@ -1185,7 +1573,7 @@ class PGVectorStorageService:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(f"""
-                INSERT INTO {self.user_roles_table_name} (identity, role, granted_by, granted_at)
+                INSERT INTO {self.q_user_roles_table} (identity, role, granted_by, granted_at)
                 VALUES ($1, $2, $3, NOW())
                 ON CONFLICT (identity) DO UPDATE
                   SET role = EXCLUDED.role,
@@ -1199,7 +1587,7 @@ class PGVectorStorageService:
             return []
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT identity, role, granted_by, granted_at FROM {self.user_roles_table_name} ORDER BY granted_at DESC"
+                f"SELECT identity, role, granted_by, granted_at FROM {self.q_user_roles_table} ORDER BY granted_at DESC"
             )
             return [
                 {
@@ -1217,7 +1605,7 @@ class PGVectorStorageService:
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                f"DELETE FROM {self.user_roles_table_name} WHERE identity = $1",
+                f"DELETE FROM {self.q_user_roles_table} WHERE identity = $1",
                 identity
             )
 
@@ -1227,7 +1615,7 @@ class PGVectorStorageService:
             return 0
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT COUNT(*) AS cnt FROM {self.user_roles_table_name} WHERE role = $1",
+                f"SELECT COUNT(*) AS cnt FROM {self.q_user_roles_table} WHERE role = $1",
                 "owner",
             )
             return row["cnt"] if row else 0
@@ -1237,7 +1625,7 @@ class PGVectorStorageService:
             return None
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT role FROM {self.group_roles_table_name} WHERE group_name = $1",
+                f"SELECT role FROM {self.q_group_roles_table} WHERE group_name = $1",
                 group_name
             )
             return row["role"] if row else None
@@ -1247,7 +1635,7 @@ class PGVectorStorageService:
             raise ValueError("RBAC requires Lakebase (pgvector).")
         async with self.pool.acquire() as conn:
             await conn.execute(f"""
-                INSERT INTO {self.group_roles_table_name} (group_name, role, granted_by, granted_at)
+                INSERT INTO {self.q_group_roles_table} (group_name, role, granted_by, granted_at)
                 VALUES ($1, $2, $3, NOW())
                 ON CONFLICT (group_name) DO UPDATE SET role = $2, granted_by = $3, granted_at = NOW()
             """, group_name, role, granted_by)
@@ -1257,7 +1645,7 @@ class PGVectorStorageService:
             return []
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                f"SELECT group_name, role, granted_by, granted_at FROM {self.group_roles_table_name} ORDER BY granted_at DESC"
+                f"SELECT group_name, role, granted_by, granted_at FROM {self.q_group_roles_table} ORDER BY granted_at DESC"
             )
             return [
                 {
@@ -1274,9 +1662,379 @@ class PGVectorStorageService:
             raise ValueError("RBAC requires Lakebase (pgvector).")
         async with self.pool.acquire() as conn:
             await conn.execute(
-                f"DELETE FROM {self.group_roles_table_name} WHERE group_name = $1",
+                f"DELETE FROM {self.q_group_roles_table} WHERE group_name = $1",
                 group_name
             )
+
+    # --- Router CRUD ---
+
+    async def create_router(self, config: dict) -> dict:
+        """Create a new router configuration."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        fields = [
+            ("id", config["id"]),
+            ("name", config["name"]),
+            ("description", config.get("description") or ""),
+            ("status", config.get("status", "active")),
+            ("selector_model", config.get("selector_model")),
+            ("selector_system_prompt", config.get("selector_system_prompt")),
+            ("decompose_enabled", config.get("decompose_enabled", True)),
+            ("routing_cache_enabled", config.get("routing_cache_enabled", True)),
+            ("shared_cache", config.get("shared_cache", True)),
+            ("similarity_threshold", config.get("similarity_threshold", 0.92)),
+            ("cache_ttl_hours", config.get("cache_ttl_hours", 24)),
+            ("mlflow_experiment_path", config.get("mlflow_experiment_path")),
+            ("created_by", config.get("created_by")),
+            ("created_at", config.get("created_at")),
+            ("updated_at", config.get("updated_at")),
+        ]
+        cols = ", ".join(c for c, _ in fields)
+        placeholders = ", ".join(f"${i}" for i in range(1, len(fields) + 1))
+        values = [v for _, v in fields]
+
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"INSERT INTO {self.q_routers_table} ({cols}) VALUES ({placeholders})",
+                *values,
+            )
+            logger.info("Router created in DB: id=%s name=%s", config["id"], config["name"])
+            return await self.get_router(config["id"], include_members=False)
+
+    async def get_router(self, router_id: str, include_members: bool = True) -> Optional[dict]:
+        """Get a router by ID, optionally hydrating members."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT * FROM {self.q_routers_table} WHERE id = $1",
+                router_id,
+            )
+            if not row:
+                return None
+            router = self._row_to_router_dict(row)
+            if include_members:
+                router["members"] = await self._fetch_members(conn, router_id)
+            return router
+
+    async def list_routers(self) -> list:
+        """List all routers (without members, for efficiency)."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT * FROM {self.q_routers_table} ORDER BY created_at DESC"
+            )
+            return [self._row_to_router_dict(r) for r in rows]
+
+    async def update_router(self, router_id: str, updates: dict) -> Optional[dict]:
+        """Update router fields. Only whitelisted keys are applied."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+
+        _clearable_text_fields = {"selector_model", "selector_system_prompt", "mlflow_experiment_path"}
+        allowed = {
+            "name", "description", "status",
+            "selector_model", "selector_system_prompt",
+            "decompose_enabled", "routing_cache_enabled", "shared_cache",
+            "similarity_threshold", "cache_ttl_hours",
+            "mlflow_experiment_path",
+        }
+        set_parts = []
+        params = []
+        idx = 1
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            if key in _clearable_text_fields and value == "":
+                value = None
+            elif value is None:
+                continue
+            set_parts.append(f"{key} = ${idx}")
+            params.append(value)
+            idx += 1
+
+        if not set_parts:
+            return await self.get_router(router_id)
+
+        set_parts.append("updated_at = NOW()")
+        params.append(router_id)
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"UPDATE {self.q_routers_table} SET {', '.join(set_parts)} WHERE id = ${idx}",
+                *params,
+            )
+            if result == "UPDATE 0":
+                return None
+            logger.info("Router updated in DB: id=%s fields=%s", router_id, list(updates.keys()))
+            return await self.get_router(router_id)
+
+    async def delete_router(self, router_id: str) -> bool:
+        """Hard-delete a router (cascades to members + routing_cache)."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"DELETE FROM {self.q_routers_table} WHERE id = $1",
+                router_id,
+            )
+            deleted = result != "DELETE 0"
+            if deleted:
+                logger.info("Router deleted from DB: id=%s", router_id)
+            return deleted
+
+    # --- Router member CRUD ---
+
+    async def _fetch_members(self, conn, router_id: str) -> list:
+        rows = await conn.fetch(
+            f"""SELECT router_id, gateway_id, ordinal, title, when_to_use,
+                       tables, sample_questions, disabled, created_at, updated_at
+                FROM {self.q_router_members_table}
+                WHERE router_id = $1
+                ORDER BY ordinal, gateway_id""",
+            router_id,
+        )
+        return [self._row_to_member_dict(r) for r in rows]
+
+    async def add_router_member(self, member: dict) -> dict:
+        """Insert a new (router, gateway) member row. Raises on duplicate."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"""INSERT INTO {self.q_router_members_table}
+                    (router_id, gateway_id, ordinal, title, when_to_use,
+                     tables, sample_questions, disabled, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())""",
+                member["router_id"], member["gateway_id"], member.get("ordinal", 0),
+                member["title"], member["when_to_use"],
+                member.get("tables") or None,
+                member.get("sample_questions") or None,
+                member.get("disabled", False),
+            )
+            logger.info("Router member added: router=%s gateway=%s", member["router_id"], member["gateway_id"])
+            return await self.get_router_member(member["router_id"], member["gateway_id"])
+
+    async def get_router_member(self, router_id: str, gateway_id: str) -> Optional[dict]:
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""SELECT router_id, gateway_id, ordinal, title, when_to_use,
+                           tables, sample_questions, disabled, created_at, updated_at
+                    FROM {self.q_router_members_table}
+                    WHERE router_id = $1 AND gateway_id = $2""",
+                router_id, gateway_id,
+            )
+            return self._row_to_member_dict(row) if row else None
+
+    async def update_router_member(self, router_id: str, gateway_id: str, updates: dict) -> Optional[dict]:
+        """Update a member row's catalog metadata."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        allowed = {"ordinal", "title", "when_to_use", "tables", "sample_questions", "disabled"}
+        set_parts = []
+        params = []
+        idx = 1
+        for key, value in updates.items():
+            if key not in allowed or value is None:
+                continue
+            set_parts.append(f"{key} = ${idx}")
+            params.append(value)
+            idx += 1
+        if not set_parts:
+            return await self.get_router_member(router_id, gateway_id)
+
+        set_parts.append("updated_at = NOW()")
+        params.append(router_id)
+        params.append(gateway_id)
+
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"""UPDATE {self.q_router_members_table}
+                    SET {', '.join(set_parts)}
+                    WHERE router_id = ${idx} AND gateway_id = ${idx + 1}""",
+                *params,
+            )
+            if result == "UPDATE 0":
+                return None
+            return await self.get_router_member(router_id, gateway_id)
+
+    async def delete_router_member(self, router_id: str, gateway_id: str) -> bool:
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                f"DELETE FROM {self.q_router_members_table} WHERE router_id = $1 AND gateway_id = $2",
+                router_id, gateway_id,
+            )
+            deleted = result != "DELETE 0"
+            if deleted:
+                logger.info("Router member deleted: router=%s gateway=%s", router_id, gateway_id)
+            return deleted
+
+    # --- Routing cache (router-scoped question → decision) ---
+
+    async def lookup_routing_cache(
+        self,
+        router_id: str,
+        query_embedding: List[float],
+        threshold: float = 0.92,
+        identity: str = "",
+        shared_cache: bool = True,
+    ) -> Optional[dict]:
+        """Cosine-search the routing cache for the nearest question within threshold.
+
+        When shared_cache=False, results are filtered by `identity` so a routing
+        decision is only served back to the caller who originally produced it.
+        Prevents leaking the prior asker's verbatim `cached_question` into
+        another user's diagnostics. When shared_cache=True, the identity filter
+        is dropped and all rows for the router are eligible.
+
+        Returns {id, question, decision, similarity} or None. Only returns rows
+        whose ttl_expires is still in the future — expired rows stay in the
+        table but are not served (caller should prune).
+        """
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        import json as _json
+        embedding_array = np.array(query_embedding, dtype=np.float32)
+        async with self.pool.acquire() as conn:
+            await register_vector(conn)
+            if shared_cache:
+                row = await conn.fetchrow(
+                    f"""SELECT id, question, decision_json,
+                               1 - (question_embedding <=> $1::vector) AS similarity
+                        FROM {self.q_routing_cache_table}
+                        WHERE router_id = $2
+                          AND ttl_expires > NOW()
+                        ORDER BY question_embedding <=> $1::vector ASC
+                        LIMIT 1""",
+                    embedding_array, router_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    f"""SELECT id, question, decision_json,
+                               1 - (question_embedding <=> $1::vector) AS similarity
+                        FROM {self.q_routing_cache_table}
+                        WHERE router_id = $2
+                          AND identity = $3
+                          AND ttl_expires > NOW()
+                        ORDER BY question_embedding <=> $1::vector ASC
+                        LIMIT 1""",
+                    embedding_array, router_id, identity or "",
+                )
+            if not row:
+                return None
+            if row["similarity"] < threshold:
+                logger.info(
+                    "Routing cache near-miss: router=%s best_sim=%.3f threshold=%.2f",
+                    router_id, row["similarity"], threshold,
+                )
+                return None
+            # Best-effort hit count bump
+            try:
+                await conn.execute(
+                    f"UPDATE {self.q_routing_cache_table} SET hit_count = hit_count + 1 WHERE id = $1",
+                    row["id"],
+                )
+            except Exception as e:
+                logger.warning("Routing cache hit-count bump failed: %s", e)
+            decision = row["decision_json"]
+            if isinstance(decision, (str, bytes, bytearray)):
+                try:
+                    decision = _json.loads(decision)
+                except Exception:
+                    pass
+            logger.info(
+                "Routing cache HIT: router=%s id=%s sim=%.3f q=%s",
+                router_id, row["id"], row["similarity"], row["question"][:40],
+            )
+            return {
+                "id": row["id"],
+                "question": row["question"],
+                "decision": decision,
+                "similarity": float(row["similarity"]),
+            }
+
+    async def save_routing_cache(
+        self,
+        router_id: str,
+        question: str,
+        query_embedding: List[float],
+        decision: dict,
+        ttl_hours: int,
+        identity: str = "",
+    ) -> int:
+        """Persist a routing decision for later reuse. `identity` is stored on
+        every row so lookups under shared_cache=False can isolate per caller."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        import json as _json
+        embedding_array = np.array(query_embedding, dtype=np.float32)
+        expires_interval = f"{int(ttl_hours * 3600)} seconds"
+        async with self.pool.acquire() as conn:
+            await register_vector(conn)
+            row = await conn.fetchrow(
+                f"""INSERT INTO {self.q_routing_cache_table}
+                    (router_id, identity, question, question_embedding, decision_json, ttl_expires, created_at)
+                    VALUES ($1, $2, $3, $4::vector, $5::jsonb, NOW() + INTERVAL '{expires_interval}', NOW())
+                    RETURNING id""",
+                router_id, identity or "", question, embedding_array, _json.dumps(decision),
+            )
+            return int(row["id"])
+
+    async def clear_routing_cache(self, router_id: str) -> int:
+        """Delete all routing cache rows for a router. Returns count deleted."""
+        if not self.pool:
+            raise RuntimeError("PGVector storage not initialized. Call initialize() first.")
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                f"SELECT COUNT(*) FROM {self.q_routing_cache_table} WHERE router_id = $1",
+                router_id,
+            )
+            await conn.execute(
+                f"DELETE FROM {self.q_routing_cache_table} WHERE router_id = $1",
+                router_id,
+            )
+            logger.info("Routing cache cleared for router %s: %d entries", router_id, count)
+            return count or 0
+
+    def _row_to_router_dict(self, row) -> dict:
+        keys = row.keys()
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "description": row["description"],
+            "status": row["status"],
+            "selector_model": row["selector_model"],
+            "selector_system_prompt": row["selector_system_prompt"],
+            "decompose_enabled": row["decompose_enabled"],
+            "routing_cache_enabled": row["routing_cache_enabled"],
+            "shared_cache": row["shared_cache"] if "shared_cache" in keys else True,
+            "similarity_threshold": row["similarity_threshold"],
+            "cache_ttl_hours": row["cache_ttl_hours"],
+            "mlflow_experiment_path": row["mlflow_experiment_path"] if "mlflow_experiment_path" in keys else None,
+            "created_by": row["created_by"],
+            "created_at": _to_utc_iso(row["created_at"]),
+            "updated_at": _to_utc_iso(row["updated_at"]),
+        }
+
+    def _row_to_member_dict(self, row) -> dict:
+        return {
+            "router_id": row["router_id"],
+            "gateway_id": row["gateway_id"],
+            "ordinal": row["ordinal"],
+            "title": row["title"],
+            "when_to_use": row["when_to_use"],
+            "tables": list(row["tables"]) if row["tables"] else [],
+            "sample_questions": list(row["sample_questions"]) if row["sample_questions"] else [],
+            "disabled": row["disabled"],
+            "created_at": _to_utc_iso(row["created_at"]),
+            "updated_at": _to_utc_iso(row["updated_at"]),
+        }
 
     def _row_to_gateway_dict(self, row) -> dict:
         """Convert a database row to a gateway dict."""
@@ -1291,6 +2049,7 @@ class PGVectorStorageService:
             "cache_ttl_hours": row["cache_ttl_hours"],
             "question_normalization_enabled": row["question_normalization_enabled"],
             "cache_validation_enabled": row["cache_validation_enabled"],
+            "cache_write_validation_enabled": row["cache_write_validation_enabled"] if "cache_write_validation_enabled" in keys else True,
             "caching_enabled": row["caching_enabled"] if "caching_enabled" in keys else True,
             "embedding_provider": row["embedding_provider"],
             "databricks_embedding_endpoint": row["databricks_embedding_endpoint"],

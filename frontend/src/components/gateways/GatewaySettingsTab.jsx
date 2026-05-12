@@ -46,15 +46,21 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
     cache_ttl_value: ttl.value,
     cache_ttl_unit: ttl.unit,
     max_queries_per_minute: String(gateway.max_qpm || gateway.max_queries_per_minute || 5),
-    question_normalization_enabled: gateway.question_normalization_enabled !== false,
+    // Smart-feature toggles default OFF on read (=== true) so legacy gateways
+    // that stored NULL display as disabled — same convention used by the
+    // gateway list view. Coalescing NULL to ON (the `!== false` pattern)
+    // would silently disagree with the home page and with operator intent
+    // (see backend create defaults in gateway_routes._gateway_dict_from_body).
+    question_normalization_enabled: gateway.question_normalization_enabled === true,
     normalization_model: gateway.normalization_model || '',
-    cache_validation_enabled: gateway.cache_validation_enabled !== false,
+    cache_validation_enabled: gateway.cache_validation_enabled === true,
+    cache_write_validation_enabled: gateway.cache_write_validation_enabled === true,
     validation_model: gateway.validation_model || '',
-    intent_split_enabled: gateway.intent_split_enabled !== false,
+    intent_split_enabled: gateway.intent_split_enabled === true,
     intent_split_model: gateway.intent_split_model || '',
     embedding_provider: gateway.embedding_provider || 'databricks',
     databricks_embedding_endpoint: gateway.databricks_embedding_endpoint || 'databricks-gte-large-en',
-    shared_cache: gateway.shared_cache !== false,
+    shared_cache: gateway.shared_cache === true,
     sql_warehouse_id: gateway.sql_warehouse_id || '',
   })
   const [globalDefaults, setGlobalDefaults] = useState(null)
@@ -111,6 +117,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
         question_normalization_enabled: form.question_normalization_enabled,
         normalization_model: form.normalization_model ?? '',
         cache_validation_enabled: form.cache_validation_enabled,
+        cache_write_validation_enabled: form.cache_write_validation_enabled,
         validation_model: form.validation_model ?? '',
         intent_split_enabled: form.intent_split_enabled,
         intent_split_model: form.intent_split_model ?? '',
@@ -142,6 +149,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
         question_normalization_enabled: defaults?.question_normalization_enabled ?? true,
         normalization_model: '',
         cache_validation_enabled: defaults?.cache_validation_enabled ?? true,
+        cache_write_validation_enabled: defaults?.cache_write_validation_enabled ?? true,
         validation_model: '',
         intent_split_enabled: defaults?.intent_split_enabled ?? true,
         intent_split_model: '',
@@ -161,6 +169,7 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
         question_normalization_enabled: true,
         normalization_model: '',
         cache_validation_enabled: true,
+        cache_write_validation_enabled: true,
         validation_model: '',
         intent_split_enabled: true,
         intent_split_model: '',
@@ -253,6 +262,11 @@ export default function GatewaySettingsTab({ gateway, onUpdate }) {
               </SettingsField>
             )}
           </div>
+
+          <SettingsField label="Cache Write Validation" description="Heuristic checks before persisting Genie's SQL: skips empty results, refusal text, metric-view SQL, and column mismatches.">
+            <ToggleSwitch checked={form.cache_write_validation_enabled}
+              onChange={(v) => handleChange('cache_write_validation_enabled', v)} />
+          </SettingsField>
 
           <SettingsField label="Embedding Provider" description="Provider for query embeddings">
             <select value={form.embedding_provider} onChange={(e) => handleChange('embedding_provider', e.target.value)}

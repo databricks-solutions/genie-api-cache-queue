@@ -166,12 +166,22 @@ class GenieService:
 
                 if status == "COMPLETED":
                     sql_query = None
+                    sql_description = None
+                    text_parts: list[str] = []
                     attachments = data.get("attachments", [])
                     for attachment in attachments:
                         query_obj = attachment.get("query")
                         if query_obj:
-                            sql_query = query_obj.get("query") or query_obj.get("sql")
-                            break
+                            if sql_query is None:
+                                sql_query = query_obj.get("query") or query_obj.get("sql")
+                            desc = query_obj.get("description")
+                            if isinstance(desc, str) and desc.strip() and sql_description is None:
+                                sql_description = desc.strip()
+                        text_obj = attachment.get("text")
+                        if isinstance(text_obj, dict):
+                            content = text_obj.get("content")
+                            if isinstance(content, str) and content.strip():
+                                text_parts.append(content.strip())
 
                     return {
                         "conversation_id": conversation_id,
@@ -179,6 +189,8 @@ class GenieService:
                         "status": "COMPLETED",
                         "attachments": attachments,
                         "sql_query": sql_query,
+                        "genie_text": "\n\n".join(text_parts) if text_parts else None,
+                        "genie_description": sql_description,
                         "result": attachments
                     }
 

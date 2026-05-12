@@ -225,6 +225,7 @@ export default function SettingsPage() {
     similarity_threshold: '0.92', cache_ttl_value: '24', cache_ttl_unit: 'hours',
     max_queries_per_minute: '5', question_normalization_enabled: true, normalization_model: '',
     cache_validation_enabled: true, validation_model: '',
+    cache_write_validation_enabled: true,
     intent_split_enabled: true, intent_split_model: '',
     embedding_provider: 'databricks', databricks_embedding_endpoint: 'databricks-gte-large-en',
     shared_cache: true,
@@ -270,6 +271,7 @@ export default function SettingsPage() {
           question_normalization_enabled: server.question_normalization_enabled !== false,
           normalization_model: server.normalization_model || '',
           cache_validation_enabled: server.cache_validation_enabled !== false,
+          cache_write_validation_enabled: server.cache_write_validation_enabled !== false,
           validation_model: server.validation_model || '',
           intent_split_enabled: server.intent_split_enabled !== false,
           intent_split_model: server.intent_split_model || '',
@@ -412,6 +414,7 @@ export default function SettingsPage() {
         question_normalization_enabled: c.question_normalization_enabled,
         normalization_model: c.normalization_model ?? '',
         cache_validation_enabled: c.cache_validation_enabled,
+        cache_write_validation_enabled: c.cache_write_validation_enabled,
         validation_model: c.validation_model ?? '',
         intent_split_enabled: c.intent_split_enabled,
         intent_split_model: c.intent_split_model ?? '',
@@ -849,6 +852,11 @@ export default function SettingsPage() {
                   endpoints={endpoints} loading={endpointsLoading} filterTask="llm/v1/chat" placeholder="databricks-llama-4-maverick (default)" />
               </FieldRow>
             )}
+
+            <FieldRow label="Cache Write Validation" description="Heuristic checks before persisting Genie's SQL: skip empty results, refusal text, metric-view SQL, and column mismatches.">
+              <ToggleSwitch checked={config.cache_write_validation_enabled}
+                onChange={(v) => handleChange('cache_write_validation_enabled', v)} />
+            </FieldRow>
 
             <FieldRow label="Embedding Provider" description="Provider for query embeddings">
               <select value={config.embedding_provider} onChange={(e) => handleChange('embedding_provider', e.target.value)}

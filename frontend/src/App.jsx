@@ -5,6 +5,8 @@ import { api } from './services/api'
 import Sidebar from './components/layout/Sidebar'
 import GatewayListPage from './components/gateways/GatewayListPage'
 import GatewayDetailPage from './components/gateways/GatewayDetailPage'
+import RouterListPage from './components/routers/RouterListPage'
+import RouterDetailPage from './components/routers/RouterDetailPage'
 import PlaygroundPage from './components/playground/PlaygroundPage'
 import SettingsPage from './components/settings/SettingsPage'
 import ApiReferencePage from './components/api/ApiReferencePage'
@@ -81,6 +83,8 @@ function App() {
             <Routes>
               <Route path="/" element={<GatewayListPage />} />
               <Route path="/gateways/:id" element={<GatewayDetailPage />} />
+              <Route path="/routers" element={<RouterListPage />} />
+              <Route path="/routers/:id" element={<RouterDetailPage />} />
               <Route path="/playground" element={<PlaygroundPage />} />
               <Route path="/playground/:id" element={<PlaygroundPage />} />
               <Route path="/settings" element={<SettingsPage />} />

@@ -1,8 +1,9 @@
 import { NavLink } from 'react-router-dom'
-import { Layers, Play, Code2, Plug, Bug } from 'lucide-react'
+import { Layers, Play, Code2, Plug, Bug, Route as RouteIcon } from 'lucide-react'
 
 const mainNavItems = [
   { to: '/', icon: Layers, label: 'Gateways', end: true },
+  { to: '/routers', icon: RouteIcon, label: 'Routers' },
   { to: '/playground', icon: Play, label: 'Playground' },
 ]
 

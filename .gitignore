@@ -64,5 +64,23 @@ test-evidence/
 CLAUDE.md
 .claude/
 
+# Local testing artifacts. The seed script, room catalog, eval harness
+# and question set are workspace-specific (Genie space IDs, table paths,
+# sample questions, gold routing decisions) and intentionally not
+# published — anyone deploying this app configures gateways + routers via
+# the UI or their own scripted wrapper.
+scripts/seed_app.py
+# router/ is a standalone reference POC — the integrated router lives
+# under backend/app/api/router_routes.py.
+router/
+seed/
+eval/
+QUESTIONS.md
+
+# Internal research / audit notes referencing specific commits + deploy
+# specifics. Keep local.
+docs/lakebase_appkit_audit.md
+docs/lakebase_appkit_audit.md.comments.json
+
 # Auto-generated version file (written by install.sh at deploy time)
 backend/app/_version.py

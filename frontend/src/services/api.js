@@ -263,6 +263,52 @@ export const api = {
     return response.data;
   },
 
+  // Router CRUD + query
+  listRouters: async () => {
+    const response = await axios.get(`${API_BASE_URL}/v1/routers`);
+    return response.data;
+  },
+  createRouter: async (body) => {
+    const response = await axios.post(`${API_BASE_URL}/v1/routers`, body);
+    return response.data;
+  },
+  getRouter: async (routerId) => {
+    const response = await axios.get(`${API_BASE_URL}/v1/routers/${routerId}`);
+    return response.data;
+  },
+  updateRouter: async (routerId, updates) => {
+    const response = await axios.put(`${API_BASE_URL}/v1/routers/${routerId}`, updates);
+    return response.data;
+  },
+  deleteRouter: async (routerId) => {
+    const response = await axios.delete(`${API_BASE_URL}/v1/routers/${routerId}`);
+    return response.data;
+  },
+  addRouterMember: async (routerId, body) => {
+    const response = await axios.post(`${API_BASE_URL}/v1/routers/${routerId}/members`, body);
+    return response.data;
+  },
+  updateRouterMember: async (routerId, gatewayId, updates) => {
+    const response = await axios.put(`${API_BASE_URL}/v1/routers/${routerId}/members/${gatewayId}`, updates);
+    return response.data;
+  },
+  deleteRouterMember: async (routerId, gatewayId) => {
+    const response = await axios.delete(`${API_BASE_URL}/v1/routers/${routerId}/members/${gatewayId}`);
+    return response.data;
+  },
+  flushRouterCache: async (routerId) => {
+    const response = await axios.delete(`${API_BASE_URL}/v1/routers/${routerId}/cache`);
+    return response.data;
+  },
+  routerPreview: async (routerId, question, hints) => {
+    const response = await axios.post(`${API_BASE_URL}/v1/routers/${routerId}/preview`, { question, hints });
+    return response.data;
+  },
+  routerQuery: async (routerId, question, hints) => {
+    const response = await axios.post(`${API_BASE_URL}/v1/routers/${routerId}/query`, { question, hints });
+    return response.data;
+  },
+
   checkAuthMode: async () => {
     const response = await axios.get(`${API_BASE_URL}/auth/mode`);
     return response.data; // { auth_mode: 'user' | 'service_principal', message }
