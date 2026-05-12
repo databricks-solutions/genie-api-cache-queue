@@ -70,12 +70,14 @@ experimental:
 workspace:
   root_path: /Workspace/apps/.bundle/${bundle.name}/${bundle.target}
 
-# .gitignore excludes `frontend/dist/` (it's a build output), but the deployed
-# app serves the bundled frontend from there. Override the gitignore for
-# bundle sync so the predeploy hook's build outputs are uploaded.
+# .gitignore excludes the predeploy build outputs (frontend/dist/ and the
+# auto-generated backend/app/_version.py). The deployed app needs both:
+# the SPA bundle to serve, and the version stamp for /api/version + the
+# sidebar version indicator. Override the gitignore for bundle sync.
 sync:
   include:
     - frontend/dist/**
+    - backend/app/_version.py
 
 variables:
   app_name:
