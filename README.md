@@ -54,8 +54,6 @@ Two caches stack: the **routing cache** skips the selector LLM on repeat questio
 
 ### 1. Deploy with the Asset Bundle
 
-The repo ships a pure-DAB single-deploy pattern (Option C — see `docs/dab_chicken_egg_findings.md`). No `make` wrapper, no `install.sh`, no `resolve_database.sh`, no DB-ID lookup — just `databricks bundle …` directly.
-
 ```bash
 # First-time setup for a target (run all three in order):
 databricks bundle deploy --target dev --profile fevm                   # builds frontend + uploads + provisions
