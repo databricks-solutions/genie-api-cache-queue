@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { Layers, Play, Code2, Plug, Bug, Route as RouteIcon } from 'lucide-react'
+import { api } from '../../services/api'
 
 const mainNavItems = [
   { to: '/', icon: Layers, label: 'Gateways', end: true },
@@ -37,6 +39,14 @@ function NavItem({ to, icon: Icon, label, end }) {
 }
 
 export default function Sidebar() {
+  const [version, setVersion] = useState(null)
+
+  useEffect(() => {
+    api.getVersion()
+      .then((v) => setVersion(v?.version || null))
+      .catch(() => setVersion(null))
+  }, [])
+
   return (
     <aside className="w-[200px] bg-dbx-sidebar flex flex-col p-2 h-full">
       <nav className="flex flex-col gap-0.5 flex-1">
@@ -51,6 +61,14 @@ export default function Sidebar() {
           <NavItem key={item.to} {...item} />
         ))}
       </nav>
+      {version && (
+        <div
+          className="px-3 pt-2 pb-1 text-[11px] text-dbx-text-secondary font-mono text-center"
+          title="App version (git describe)"
+        >
+          {version}
+        </div>
+      )}
     </aside>
   )
 }
